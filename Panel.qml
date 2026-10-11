@@ -1025,9 +1025,14 @@ Panel {
   }
 
   function handleText(t) {
-    // The welcome card is modal: only its own keys work until it is dismissed.
+    // The welcome card is modal: only its own keys work until it is dismissed. It tells about ?, which closes it,
+    // since the key hints would sit under its blur.
     if (root.welcoming) {
       if (t === "n") dismissWelcome("add")
+      else if (t === "?") {
+        dismissWelcome("")
+        if (!root.hintsVisible) toggleHints()
+      }
       return
     }
     if (view === "sources" && mode === "confirm") {
