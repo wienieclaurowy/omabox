@@ -374,6 +374,22 @@ class StateFileTest(unittest.TestCase):
         self.assertEqual(omabox.load_state(self.path)["items"][0]["title"], "Zażółć")
 
 
+class DoctorTest(unittest.TestCase):
+    def test_fresh_install_is_not_a_problem(self):
+        root = Path(tempfile.mkdtemp())
+        names = ("CONFIG_PATH", "STATE_PATH", "IMAGE_DIR", "ICON_DIR", "NOTE_ARCHIVE_DIR", "OMARCHY_MENU_PATH")
+        saved = {name: getattr(omabox, name) for name in names}
+        self.addCleanup(lambda: [setattr(omabox, name, value) for name, value in saved.items()])
+        omabox.CONFIG_PATH, omabox.STATE_PATH = root / "config" / "sources.toml", root / "state" / "items.json"
+        omabox.IMAGE_DIR, omabox.ICON_DIR = root / "images", root / "icons"
+        omabox.NOTE_ARCHIVE_DIR, omabox.OMARCHY_MENU_PATH = root / "notes", root / "menu.jsonc"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(omabox.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            omabox.cmd_doctor(argparse.Namespace())
+        self.assertNotIn("✗", out.getvalue())
+        self.assertIn("state: none yet", out.getvalue())
+
+
 class CadenceTest(unittest.TestCase):
     # Saturday 2026-09-26 09:00 local
     now = datetime(2026, 9, 26, 9, 0).astimezone()

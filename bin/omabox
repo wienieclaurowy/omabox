@@ -3661,7 +3661,10 @@ def cmd_doctor(args):
     if recovered:
         line(False, f"state: items.json was unreadable and started over; the old file is {recovered} "
                     "(delete it once checked)")
-    line(STATE_PATH.exists(), f"state: {len(state['items'])} posts, {sum(not i.get('read') for i in state['items'])} unread ({STATE_PATH})")
+    if STATE_PATH.exists():
+        line(True, f"state: {len(state['items'])} posts, {sum(not i.get('read') for i in state['items'])} unread ({STATE_PATH})")
+    else:
+        print(f"  state: none yet, the first delivery writes it ({STATE_PATH})")
     action, wait = tick_plan(state)
     print(f"  delivery: daily at {delivery_time(state)}, weekly sources on {WEEKDAY_NAMES[weekly_day(state)]}; "
           f"the bar widget runs `omabox tick`, next check in {wait // 60} min" + (f" ({action} due)" if action else ""))
