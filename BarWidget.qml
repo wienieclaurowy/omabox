@@ -177,7 +177,18 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
+  // One target, one handler: each extra registration logs a warning. The first copy owns it; when its monitor goes,
+  // peers() changes and the next copy takes over a turn later, after the old owner let go (two at once warn too).
+  property bool ipcOwner: false
+  readonly property bool firstCopy: scheduler()
+  onFirstCopyChanged: {
+    if (!firstCopy) ipcOwner = false
+    else Qt.callLater(function() { root.ipcOwner = root.scheduler() })
+  }
+  Component.onCompleted: Qt.callLater(function() { root.ipcOwner = root.scheduler() })
+
   IpcHandler {
+    enabled: root.ipcOwner
     target: "omabox"
 
     function toggleView(view: string): string {
