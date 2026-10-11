@@ -1526,6 +1526,12 @@ class ShortPostTest(unittest.TestCase):
 
 
 class RsshubTest(unittest.TestCase):
+    def setUp(self):
+        self.runtime = Path(tempfile.mkdtemp())
+        patcher = mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(self.runtime)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_x_profile_urls_map_to_local_route(self):
         self.assertEqual(omabox.x_profile_feed("https://x.com/rowanvale"), f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale")
         self.assertEqual(omabox.x_profile_feed("https://twitter.com/rowanvale/"), f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale")
@@ -1558,7 +1564,8 @@ class RsshubTest(unittest.TestCase):
             return Result(0)
 
         with omabox.rsshub_session(True, run=run, wait=lambda: None, up=lambda: up, token_path=token_path, engine="podman"):
-            pass
+            seen_env["marker"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
+        seen_env["marker_after"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
         return calls, seen_env
 
     def test_session_passes_token_by_private_file_and_stops(self):
@@ -1568,6 +1575,7 @@ class RsshubTest(unittest.TestCase):
         self.assertFalse(env["path"].exists())
         self.assertTrue(all("secret-token" not in " ".join(argv) for argv in calls))
         self.assertEqual(calls[-1][:2], ["podman", "stop"])
+        self.assertEqual((env["marker"], env["marker_after"]), (True, False))
 
     def test_session_reuses_running_rsshub(self):
         calls, _ = self.run_session(up=True)
@@ -1581,6 +1589,7 @@ class RsshubTest(unittest.TestCase):
         self.assertEqual(start[start.index("--user") + 1], "65534:65534")
         self.assertEqual(start[start.index("-p") + 1], f"127.0.0.1:{omabox.RSSHUB_PORT}:1200")
         self.assertIn("@sha256:", start[-1])
+        self.assertEqual(start[start.index("--timeout") + 1], str(omabox.RSSHUB_MAX_SECONDS))
         self.assertRegex(env["text"], r"(?m)^ACCESS_KEY=[\w-]{20,}$")
         self.assertIn("DEBUG_INFO=false", env["text"])
         self.assertEqual(omabox.RSSHUB_KEY, "")
@@ -1627,6 +1636,27 @@ class RsshubTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             self.run_session(start_code=125)
         self.assertNotIn("secret-token", str(caught.exception))
+
+    def test_a_container_left_by_a_killed_run_is_removed(self):
+        runtime = self.runtime
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return type("Result", (), {"returncode": 0})()
+
+        omabox.stop_stale_rsshub(run)
+        self.assertEqual(calls, [])
+        (runtime / omabox.RSSHUB_MARKER).write_text("podman\n")
+        with open(runtime / "omabox-rsshub.lock", "w") as busy:
+            omabox.fcntl.flock(busy, omabox.fcntl.LOCK_EX)
+            omabox.stop_stale_rsshub(run)
+        self.assertEqual(calls, [])
+        with mock.patch.object(omabox.shutil, "which", lambda name: f"/usr/bin/{name}"):
+            omabox.stop_stale_rsshub(run)
+        self.assertEqual(calls, [["podman", "rm", "-f", omabox.RSSHUB_CONTAINER]])
+        self.assertFalse((runtime / omabox.RSSHUB_MARKER).exists())
+
 
 
 class XTokenTest(unittest.TestCase):

@@ -137,7 +137,8 @@ computer in a podman or docker container. To make that as safe as it can be:
   reads: it has no code that posts, likes, reposts, follows, sends messages, changes settings or deletes
   anything, and it sends the token to x.com only. A new RSSHub version reaches you only in an Omabox release.
 - **It runs only during a delivery.** The container starts when an X source is fetched and stops right after,
-  also when you log out or shut down mid-fetch; one left behind by a crash is removed by the next run.
+  also when you log out or shut down mid-fetch; one left behind by a crash is removed within minutes, and podman
+  stops it on its own after 30 minutes.
   Between deliveries no program holds your token.
 - **Nothing else can use it.** RSSHub listens on your own computer only, and every run gets a new random key
   that each request must carry, so other programs and web pages cannot use your logged-in session.

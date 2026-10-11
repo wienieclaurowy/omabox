@@ -2140,19 +2140,63 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rss
     if not needed:
         yield
         return
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    runtime = runtime_dir()
     engine = engine or container_engine()
     # fetch and `omabox replies` share the container: without the lock one run stops it under the other
     with open(runtime / "omabox-rsshub.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
         if engine:
-            run([engine, "rm", "-f", RSSHUB_CONTAINER], capture_output=True, timeout=30)
+            remove_container(run, engine, runtime)
         if up():
             yield
             return
         with rsshub_container(run, wait, token_path, engine, runtime):
             yield
+
+
+def runtime_dir():
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+
+
+RSSHUB_MARKER = "omabox-rsshub.running"
+# podman kills the container after this long even when the run that started it was killed (docker has no such flag)
+RSSHUB_MAX_SECONDS = 1800
+
+
+def remove_container(run, engine, runtime, graceful=False):
+    """Removes our container, after a stop when graceful; True once it is gone. The marker that says it may be up
+    goes with it."""
+    attempts = [[engine, "rm", "-f", RSSHUB_CONTAINER]]
+    if graceful:
+        attempts.insert(0, [engine, "stop", "-t", "5", RSSHUB_CONTAINER])
+    for argv in attempts:
+        try:
+            if run(argv, capture_output=True, timeout=60).returncode == 0:
+                (runtime / RSSHUB_MARKER).unlink(missing_ok=True)
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
+def stop_stale_rsshub(run=subprocess.run, runtime=None):
+    """Removes a container left up, holding the X token, by a run killed before it could stop it. Cheap when there
+    is none: only a marker file is checked."""
+    runtime = Path(runtime or runtime_dir())
+    marker = runtime / RSSHUB_MARKER
+    if not marker.exists():
+        return
+    with open(runtime / "omabox-rsshub.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        engine = marker.read_text().strip() or container_engine()
+        if engine in ("podman", "docker") and shutil.which(engine):
+            remove_container(run, engine, runtime)
+        else:
+            marker.unlink(missing_ok=True)
 
 
 class XTokenMissing(RuntimeError):
@@ -2212,7 +2256,8 @@ def rsshub_container(run, wait, token_path, engine, runtime):
             handle.write("".join(f"{name}={value}\n" for name, value in env.items()))
         # Locked down: no writes, no capabilities, no root, capped memory and processes. jsdelivr is blocked so the
         # X query ids come from the pinned image, not from a third-party file fetched at start.
-        started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER,
+        lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
+        started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
                        "-p", f"127.0.0.1:{RSSHUB_PORT}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
                        "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--user", "65534:65534",
                        "--add-host", "cdn.jsdelivr.net:127.0.0.1", "--env-file", str(env_file), RSSHUB_IMAGE],
@@ -2221,13 +2266,14 @@ def rsshub_container(run, wait, token_path, engine, runtime):
         env_file.unlink(missing_ok=True)
     if started.returncode != 0:
         raise RuntimeError(f"{engine} run failed: {(started.stderr or '').strip()[-300:]}")
+    (runtime / RSSHUB_MARKER).write_text(engine + "\n")
     try:
         RSSHUB_KEY = key
         wait()
         yield
     finally:
         RSSHUB_KEY = ""
-        run([engine, "stop", "-t", "5", RSSHUB_CONTAINER], capture_output=True, timeout=60)
+        remove_container(run, engine, runtime, graceful=True)
 
 
 def home_relative(path):
@@ -3459,6 +3505,8 @@ def cmd_tick(args):
             return
         with contextlib.suppress(OSError):
             archive_notifications()
+        with contextlib.suppress(OSError):
+            stop_stale_rsshub()
         sources = load_sources()
         refresh_versions(sources)
         state = load_state()
