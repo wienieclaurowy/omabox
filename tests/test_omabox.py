@@ -85,6 +85,64 @@ BLUESKY_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
 <guid isPermaLink="false">at://did:plc:q4m2x7c9h3k5t8w1b6n0r2pz/app.bsky.feed.post/3kx7fqm2pa1zt</guid></item>
 </channel></rss>"""
 
+FERN = {"did": "did:plc:q4m2x7c9h3k5t8w1b6n0r2pz", "handle": "fernwick.bsky.social", "displayName": "Fernwick Bakery",
+        "avatar": "https://cdn.bsky.app/img/avatar/plain/fern/a.jpg"}
+GULL = {"did": "did:plc:g7u2l9l4k1e8w3x5c0v6b2nm", "handle": "harbourgull.example", "displayName": "",
+        "avatar": "https://cdn.bsky.app/img/avatar/plain/gull/a.jpg"}
+
+
+def bluesky_post(rkey, author, text, when, embed=None, facets=None):
+    record = {"$type": "app.bsky.feed.post", "text": text, "createdAt": when}
+    if facets:
+        record["facets"] = facets
+    post = {"uri": f"at://{author['did']}/app.bsky.feed.post/{rkey}", "author": author, "record": record,
+            "indexedAt": when, "likeCount": 99, "repostCount": 7}
+    if embed:
+        post["embed"] = embed
+    return post
+
+
+RYE_TEXT = "Rye is back 🍞 at fernwick.example/rye #bread with @harbourgull.example & friends"
+
+
+def facet(part, feature):
+    start = RYE_TEXT.encode().index(part.encode())
+    return {"index": {"byteStart": start, "byteEnd": start + len(part.encode())}, "features": [feature]}
+
+
+BLUESKY_API_FEED = json.dumps({"feed": [
+    {"post": bluesky_post("3p1", FERN, RYE_TEXT, "2026-09-21T18:04:00.512Z", facets=[
+        facet("fernwick.example/rye", {"$type": "app.bsky.richtext.facet#link", "uri": "https://fernwick.example/rye"}),
+        facet("#bread", {"$type": "app.bsky.richtext.facet#tag", "tag": "bread"}),
+        facet("@harbourgull.example", {"$type": "app.bsky.richtext.facet#mention", "did": GULL["did"]})],
+        embed={"$type": "app.bsky.embed.images#view", "images": [
+            {"thumb": "https://cdn.bsky.app/img/feed_thumbnail/plain/fern/rye.jpg",
+             "fullsize": "https://cdn.bsky.app/img/feed_fullsize/plain/fern/rye.jpg", "alt": "Two rye loaves"}]})},
+    {"post": bluesky_post("3p2", GULL, "", "2026-09-20T09:00:00Z", embed={
+        "$type": "app.bsky.embed.video#view", "playlist": "https://video.bsky.example/watch/gull/v/playlist.m3u8",
+        "thumbnail": "https://video.bsky.example/watch/gull/v/thumbnail.jpg"}),
+     "reason": {"$type": "app.bsky.feed.defs#reasonRepost", "by": FERN,
+                "uri": f"at://{FERN['did']}/app.bsky.feed.repost/3r1", "indexedAt": "2026-09-21T07:30:00Z"}},
+    {"post": bluesky_post("3p3", FERN, "The new oven, in full:", "2026-09-19T12:00:00Z", embed={
+        "$type": "app.bsky.embed.recordWithMedia#view",
+        "media": {"$type": "app.bsky.embed.external#view", "external": {
+            "uri": "https://fernwick.example/oven", "title": "Our new oven", "description": "",
+            "thumb": "https://cdn.bsky.app/img/feed_thumbnail/plain/fern/oven.jpg"}},
+        "record": {"record": {"$type": "app.bsky.embed.record#viewRecord",
+                              "uri": f"at://{GULL['did']}/app.bsky.feed.post/3q1", "author": GULL,
+                              "value": {"text": "Smells good down at the harbour", "createdAt": "2026-09-19T11:00:00Z"},
+                              "embeds": [{"$type": "app.bsky.embed.images#view", "images": [
+                                  {"fullsize": "https://cdn.bsky.app/img/feed_fullsize/plain/gull/q.jpg", "alt": ""}]}]}}})},
+    {"post": bluesky_post("3p4", FERN, "Gone, sadly", "2026-09-18T12:00:00Z", embed={
+        "$type": "app.bsky.embed.record#view", "record": {"$type": "app.bsky.embed.record#viewNotFound",
+                                                          "uri": f"at://{GULL['did']}/app.bsky.feed.post/3q0"}}),
+     "reply": {"parent": bluesky_post("3q9", GULL, "Is the rye back?", "2026-09-18T11:00:00Z")}},
+    {"post": bluesky_post("3p5", FERN, "Bakers worth following:", "2026-09-17T12:00:00Z", embed={
+        "$type": "app.bsky.embed.record#view", "record": {
+            "$type": "app.bsky.graph.defs#starterPackViewBasic", "uri": f"at://{FERN['did']}/app.bsky.graph.starterpack/3s1",
+            "record": {"name": "Harbour bakers"}}})},
+]}).encode()
+
 HN_FEED = b"""<rss version="2.0"><channel><title>Hacker News: Front Page</title>
 <item><title><![CDATA[Lantern 2.3: window groups you can name]]></title><description><![CDATA[
 <p>Article URL: <a href="https://lantern.example/blog/groups?ref=hn&amp;v=2">https://lantern.example/blog/groups?ref=hn&amp;v=2</a></p>
@@ -719,11 +777,20 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(found["title"], "Quarry Bench")
         self.assertIn("SOCS=", self.headers["https://www.youtube.com/@QuarryBench"]["Cookie"])
 
-    def test_latest_of_untitled_posts_shows_their_text(self):
-        self.pages["https://bsky.app/profile/fernwick.bsky.social/rss"] = BLUESKY_FEED
+    def test_bluesky_profile_is_named_and_read_through_the_api(self):
+        api = "https://public.api.bsky.app/xrpc/"
+        self.pages[f"{api}app.bsky.actor.getProfile?actor=fernwick.bsky.social"] = json.dumps(FERN).encode()
+        feed = omabox.bluesky_feed_url(FERN["did"])
+        self.pages[feed] = BLUESKY_API_FEED
         found = omabox.discover("https://bsky.app/profile/fernwick.bsky.social")
-        self.assertEqual(found["latest"], {"title": "If you're at the market, the bread stall is open! It closes in 5 hours.",
-                                           "published": "2026-09-21T18:04:00Z"})
+        self.assertEqual((found["url"], found["title"], found["count"]),
+                         (f"https://bsky.app/profile/{FERN['did']}/rss", "Fernwick Bakery", 5))
+        self.assertTrue(found["latest"]["title"].startswith("Rye is back 🍞 at fernwick.example/rye #bread"))
+        self.assertEqual(found["latest"]["published"], "2026-09-21T18:04:00Z")
+        self.assertEqual(omabox.remembered_feed(feed), BLUESKY_API_FEED)
+        self.pages[f"{api}app.bsky.actor.getProfile?actor={urllib.parse.quote(GULL['did'])}"] = json.dumps(GULL).encode()
+        self.pages[omabox.bluesky_feed_url(GULL["did"])] = b'{"feed": []}'
+        self.assertEqual(omabox.discover(f"https://bsky.app/profile/{GULL['did']}/rss")["title"], "harbourgull.example")
 
     def test_mastodon_profile_links_its_feed(self):
         self.pages["https://mastodon.social/@tidepool"] = (
@@ -1216,6 +1283,68 @@ class MuteTest(unittest.TestCase):
             path.write_text(f'[[source]]\nname = "x"\nurl = "https://x"\nmute = {value}\n')
             with self.assertRaisesRegex(ValueError, "mute must be a list of strings"):
                 omabox.load_sources(path)
+
+
+class BlueskyTest(unittest.TestCase):
+    def entries(self):
+        return {entry["guid"].rsplit("/", 1)[1]: entry for entry in omabox.parse_bluesky(BLUESKY_API_FEED)}
+
+    def test_text_links_its_facets_and_counts_bytes_not_characters(self):
+        html = self.entries()["3p1"]["html"]
+        self.assertTrue(html.startswith(
+            'Rye is back 🍞 at <a href="https://fernwick.example/rye">fernwick.example/rye</a> '
+            '<a href="https://bsky.app/hashtag/bread">#bread</a> with '
+            f'<a href="https://bsky.app/profile/{GULL["did"]}">@harbourgull.example</a> &amp; friends'), html)
+        self.assertIn('<img src="https://cdn.bsky.app/img/feed_fullsize/plain/fern/rye.jpg" alt="Two rye loaves">', html)
+
+    def test_reposts_are_dated_and_keyed_by_the_repost(self):
+        entries = self.entries()
+        repost = entries["3r1"]
+        self.assertEqual(repost["repost"], {"name": "harbourgull.example", "handle": "harbourgull.example"})
+        self.assertEqual(repost["published"], "2026-09-21T07:30:00Z")
+        self.assertEqual(repost["link"], "https://bsky.app/profile/harbourgull.example/post/3p2")
+        self.assertEqual(repost["title"], "Video")
+        self.assertIn('<video src="https://video.bsky.example/watch/gull/v/playlist.m3u8"', repost["html"])
+        self.assertIsNone(entries["3p1"]["repost"])
+
+    def test_quotes_cards_and_replies(self):
+        entries = self.entries()
+        oven = entries["3p3"]
+        self.assertEqual(oven["card"], {"url": "https://fernwick.example/oven", "title": "Our new oven",
+                                        "site": "fernwick.example",
+                                        "thumb": "https://cdn.bsky.app/img/feed_thumbnail/plain/fern/oven.jpg"})
+        self.assertEqual((oven["quote"]["name"], oven["quote"]["link"], oven["quote"]["published"]),
+                         ("harbourgull.example", "https://bsky.app/profile/harbourgull.example/post/3q1", "2026-09-19T11:00:00Z"))
+        self.assertIn("Smells good down at the harbour<img", oven["quote"]["html"])
+        gone = entries["3p4"]
+        self.assertEqual(gone["reply_to"], ["harbourgull.example"])
+        self.assertEqual(gone["quote"]["html"], "<p>The quoted post is not available.</p>")
+        pack = entries["3p5"]
+        self.assertIsNone(pack["quote"])
+        self.assertEqual((pack["card"]["url"], pack["card"]["title"]),
+                         (f"https://bsky.app/starter-pack/{FERN['did']}/3s1", "Harbour bakers"))
+
+    def test_stored_posts_carry_the_card_and_quote_and_no_counts(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        omabox.prepare_merge(state, "Fernwick", list(omabox.parse_bluesky(BLUESKY_API_FEED)), "2026-09-27T08:00:00Z")(state)
+        oven = next(item for item in state["items"] if item["guid"].endswith("/3p3"))
+        self.assertIn('<p class="card"><a href="https://fernwick.example/oven"><b>Our new oven</b></a>', oven["html"])
+        self.assertIn('class="quote"', oven["html"])
+        self.assertNotIn("99", json.dumps(state["items"]))
+
+    def test_source_reads_the_api_but_keeps_its_rss_address(self):
+        requested = []
+
+        def get(url, cached):
+            requested.append(url)
+            raise OSError("offline")
+
+        gathered = omabox.gather_source(omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json"),
+                                        {"name": "Fernwick", "url": f"https://bsky.app/profile/{FERN['did']}/rss"},
+                                        "2026-09-27T08:00:00Z", get=get)
+        self.assertEqual(gathered.error, "OSError: offline")
+        self.assertEqual(requested, [f"https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor="
+                                     f"{urllib.parse.quote(FERN['did'])}&filter=posts_and_author_threads&limit=30"])
 
 
 class XRouteTest(unittest.TestCase):

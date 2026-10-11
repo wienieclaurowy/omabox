@@ -660,9 +660,14 @@ def link_card(url, images, fetch=download_limited):
     if not title:
         return ""
     image_url = meta.get("og:image") or meta.get("twitter:image") or ""
-    picture = images({"src": urllib.parse.urljoin(url, image_url)}) if image_url and images else ""
-    picture = picture if "<img" in picture else ""
     site = meta.get("og:site_name") or (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
+    return card_markup(url, title, site, urllib.parse.urljoin(url, image_url) if image_url else "", images)
+
+
+def card_markup(url, title, site, picture_url, images):
+    """A link preview: the picture (when it downloads), then the title linking to url and the site's name."""
+    picture = images({"src": picture_url}) if picture_url and images else ""
+    picture = picture if "<img" in picture else ""
     return (f'{picture}<p class="card"><a href="{html.escape(url, quote=True)}"><b>{html.escape(title)}</b></a>'
             f'<br><span class="meta">{html.escape(site)}</span></p>')
 
@@ -1179,6 +1184,141 @@ def parse_x_feed(data):
         })
 
 
+BLUESKY_API = "https://public.api.bsky.app/xrpc/"
+# at://<did>/<collection>/<rkey> -> the bsky.app page for that record
+BLUESKY_PAGES = {"app.bsky.feed.post": "profile/{did}/post/{rkey}", "app.bsky.feed.generator": "profile/{did}/feed/{rkey}",
+                 "app.bsky.graph.list": "profile/{did}/lists/{rkey}", "app.bsky.graph.starterpack": "starter-pack/{did}/{rkey}"}
+
+
+def bluesky_page(uri, handle=""):
+    parts = str(uri or "").removeprefix("at://").split("/")
+    if len(parts) != 3 or parts[1] not in BLUESKY_PAGES:
+        return ""
+    did = handle if handle and parts[1] == "app.bsky.feed.post" else parts[0]
+    return "https://bsky.app/" + BLUESKY_PAGES[parts[1]].format(did=did, rkey=parts[2])
+
+
+def bluesky_text(text, facets):
+    """A post's text as html. Facets mark byte ranges of the UTF-8 text as links, mentions or tags."""
+    raw = str(text or "").encode("utf-8")
+    spans = []
+    for facet in facets or []:
+        index = facet.get("index") or {}
+        start, end = index.get("byteStart"), index.get("byteEnd")
+        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(raw)):
+            continue
+        href = ""
+        for feature in facet.get("features") or []:
+            kind = str(feature.get("$type") or "")
+            if kind.endswith("#link") and str(feature.get("uri") or "").startswith(("https://", "http://")):
+                href = feature["uri"]
+            elif kind.endswith("#mention") and feature.get("did"):
+                href = f"https://bsky.app/profile/{feature['did']}"
+            elif kind.endswith("#tag") and feature.get("tag"):
+                href = f"https://bsky.app/hashtag/{urllib.parse.quote(str(feature['tag']))}"
+        if href:
+            spans.append((start, end, href))
+    out, at = [], 0
+    for start, end, href in sorted(spans):
+        if start < at:
+            continue
+        out.append(html.escape(raw[at:start].decode("utf-8", "replace")))
+        out.append(f'<a href="{html.escape(href)}">{html.escape(raw[start:end].decode("utf-8", "replace"))}</a>')
+        at = end
+    out.append(html.escape(raw[at:].decode("utf-8", "replace")))
+    return "".join(out).strip().replace("\n", "<br>")
+
+
+def bluesky_name(author):
+    return str(author.get("displayName") or "").strip() or str(author.get("handle") or "")
+
+
+def bluesky_embed(view):
+    """A post's embed view as (pictures and video html, link card, quoted record view)."""
+    view = view or {}
+    kind = str(view.get("$type") or "")
+    if kind == "app.bsky.embed.recordWithMedia#view":
+        media, card, _ = bluesky_embed(view.get("media"))
+        return media, card, (view.get("record") or {}).get("record")
+    if kind == "app.bsky.embed.images#view":
+        return "".join(f'<img src="{html.escape(str(image.get("fullsize") or ""))}" alt="{html.escape(str(image.get("alt") or ""))}">'
+                       for image in view.get("images") or [] if image.get("fullsize")), None, None
+    if kind == "app.bsky.embed.video#view" and view.get("playlist"):
+        poster = html.escape(str(view.get("thumbnail") or ""))
+        return f'<video src="{html.escape(str(view["playlist"]))}" poster="{poster}"></video>', None, None
+    if kind == "app.bsky.embed.external#view":
+        external = view.get("external") or {}
+        url = str(external.get("uri") or "")
+        if url.startswith(("https://", "http://")):
+            site = (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
+            return "", {"url": url, "title": str(external.get("title") or "").strip() or site, "site": site,
+                        "thumb": str(external.get("thumb") or "")}, None
+    if kind == "app.bsky.embed.record#view":
+        return "", None, view.get("record")
+    return "", None, None
+
+
+def bluesky_quote(record):
+    """A quoted record as parse_x_feed's quote, or a card for a quoted feed, list or starter pack; (quote, card)."""
+    kind = str(record.get("$type") or "")
+    if kind == "app.bsky.embed.record#viewRecord":
+        author, value = record.get("author") or {}, record.get("value") or {}
+        body = bluesky_text(value.get("text"), value.get("facets"))
+        for view in record.get("embeds") or []:
+            media, card, _ = bluesky_embed(view)
+            body += media + (f'<p><a href="{html.escape(card["url"])}">{html.escape(card["title"])}</a></p>' if card else "")
+        handle = str(author.get("handle") or "")
+        return {"name": bluesky_name(author), "handle": handle, "link": bluesky_page(record.get("uri"), handle),
+                "reply_to": [], "avatar": str(author.get("avatar") or ""),
+                "published": iso_utc(value.get("createdAt") or record.get("indexedAt")), "html": body}, None
+    if kind.endswith(("#viewNotFound", "#viewBlocked", "#viewDetached")):
+        return {"name": "", "handle": "", "link": "", "reply_to": [], "avatar": "", "published": "",
+                "html": "<p>The quoted post is not available.</p>"}, None
+    inner = record.get("record") if isinstance(record.get("record"), dict) else {}
+    title = str(record.get("displayName") or record.get("name") or inner.get("name") or "").strip()
+    url = bluesky_page(record.get("uri"))
+    return None, ({"url": url, "title": title, "site": "Bluesky", "thumb": str(record.get("avatar") or "")}
+                  if url and title else None)
+
+
+def parse_bluesky(data):
+    """Bluesky's public getAuthorFeed as parse_x_feed entries plus card: the pictures, videos, link cards and quoted
+    posts that Bluesky's own RSS leaves out. A repost is dated when it was reposted and keyed by the repost record."""
+    for row in json.loads(data).get("feed") or []:
+        post = row.get("post") or {}
+        record, author = post.get("record") or {}, post.get("author") or {}
+        handle = str(author.get("handle") or "")
+        guid, published, repost = str(post.get("uri") or ""), record.get("createdAt") or post.get("indexedAt"), None
+        reason = row.get("reason") or {}
+        if reason.get("$type") == "app.bsky.feed.defs#reasonRepost":
+            repost = {"name": bluesky_name(author), "handle": handle}
+            guid, published = str(reason.get("uri") or guid), reason.get("indexedAt") or published
+        parent = ((row.get("reply") or {}).get("parent") or {}).get("author") or {}
+        reply_to = [parent["handle"]] if parent.get("handle") and parent.get("did") != author.get("did") else []
+        text = bluesky_text(record.get("text"), record.get("facets"))
+        media, card, quoted = bluesky_embed(post.get("embed"))
+        quote = None
+        if quoted:
+            quote, quoted_card = bluesky_quote(quoted)
+            card = card or quoted_card
+        title = ""
+        if not text:
+            alt = re.search(r'alt="([^"]+)"', media)
+            title = (excerpt(html.unescape(alt.group(1)), 80) if alt else "Video" if "<video" in media
+                     else "Picture" if media else card["title"] if card else "")
+        yield with_guid({
+            "guid": guid,
+            "title": title,
+            "link": web_link(bluesky_page(post.get("uri"), handle)),
+            "published": iso_utc(published),
+            "html": text + media,
+            "repost": repost,
+            "quote": quote,
+            "reply_to": reply_to,
+            "card": card,
+        })
+
+
 VERSION_RE = re.compile(r"v?(\d+(?:\.\d+)+)")
 
 
@@ -1574,9 +1714,12 @@ def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base
         body, text = sanitize(entry["html"], images(entry) if images else None)
         body, summary, minutes = structure(body, text)
         short = is_short_post(entry["title"], text)
-        if cards and short:
+        card = entry.get("card")
+        if cards and short and not card:
             body = attach_card(body, text, images(entry) if images else None)
         body = linkify(body, mentions_base)
+        if card:
+            body += card_markup(card["url"], card["title"], card["site"], card["thumb"], images(entry) if images else None)
         if entry.get("reply_to"):
             body = replying_to(entry["reply_to"], mentions_base) + body
         if entry.get("quote"):
@@ -1993,6 +2136,7 @@ GITHUB_REPO_RE = re.compile(r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+
 
 YOUTUBE_CHANNEL_RE = re.compile(r"^https?://(?:www\.|m\.)?youtube\.com/channel/(UC[\w-]{22})(?:[/?#]|$)", re.I)
 BLUESKY_PROFILE_RE = re.compile(r"^https?://(?:www\.)?bsky\.app/profile/([\w.:-]+)/?(?:[?#].*)?$", re.I)
+BLUESKY_RSS_RE = re.compile(r"^https://bsky\.app/profile/([\w.:-]+)/rss$", re.I)
 HN_PAGE_RE = re.compile(r"^https?://news\.ycombinator\.com(?:/(news|newest|best|ask|show|jobs)?)?/?(?:[?#].*)?$", re.I)
 REDDIT_RE = re.compile(r"^https?://(?:(?:www|old|new|np)\.)?reddit\.com/(r|u|user)/(\w[\w-]*)/?(?:[?#].*)?$", re.I)
 # EU visitors can get a cookie-consent interstitial instead of the channel page; SOCS=CAI answers "reject all".
@@ -2037,6 +2181,32 @@ def site_name(feed_url):
 def is_youtube(url):
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def bluesky_actor(url):
+    """The handle or DID behind a Bluesky profile or its RSS URL; None for anything else. A Bluesky source keeps its
+    RSS URL (OPML exports stay readable elsewhere) but is read through the public API, whose posts carry media."""
+    match = BLUESKY_RSS_RE.match(url) or BLUESKY_PROFILE_RE.match(url)
+    return match.group(1) if match else None
+
+
+def bluesky_feed_url(actor):
+    query = urllib.parse.urlencode({"actor": actor, "filter": "posts_and_author_threads", "limit": KEEP_PER_SOURCE})
+    return f"{BLUESKY_API}app.bsky.feed.getAuthorFeed?{query}"
+
+
+def discover_bluesky(actor):
+    _, data = download(f"{BLUESKY_API}app.bsky.actor.getProfile?{urllib.parse.urlencode({'actor': actor})}")
+    profile = json.loads(data)
+    did = str(profile.get("did") or "")
+    if not did.startswith("did:"):
+        raise ValueError("no Bluesky profile found at that address")
+    feed = bluesky_feed_url(did)
+    _, data = discover_download(feed)
+    entries = list(parse_bluesky(data))
+    remember_feed([feed], data)
+    return {"url": f"https://bsky.app/profile/{did}/rss", "title": bluesky_name(profile) or did,
+            "latest": latest_entry(entries), "count": len(entries)}
 
 
 def is_hnrss(url):
@@ -2144,6 +2314,8 @@ def discover(url):
     if github:
         url = f"https://github.com/{github.group(1)}/{github.group(2)}/releases.atom"
     url = site_feed(url) or url
+    if bluesky_actor(url):
+        return discover_bluesky(bluesky_actor(url))
     # The panel's add passes discover's own RSSHub URL back in, so those need the container too.
     x_feed = x_profile_feed(url) or (url if x_route(url) else None)
     if x_feed:
@@ -2614,7 +2786,9 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
     name, url = source["name"], source["url"]
     try:
         x_feed = needs_rsshub(url) and "/twitter/" in url
-        data, validators = get(x_feed_url(url) if x_feed else url, snapshot["http"].get(name))
+        bluesky = bluesky_actor(url)
+        address = x_feed_url(url) if x_feed else bluesky_feed_url(bluesky) if bluesky else url
+        data, validators = get(address, snapshot["http"].get(name))
         if data is None:
             def unchanged(state):
                 record_success(state, name, stamp)
@@ -2624,7 +2798,7 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         mentions = "https://x.com/" if x_feed else ""
         muted = mute_filter(source.get("mute"), lambda problem: print(f"{name}: {problem}, skipped", file=sys.stderr))
         article = extract if source.get("full_text") and not needs_rsshub(url) else None
-        entries = list(parse_x_feed(data) if x_feed else parse_feed(data))
+        entries = list(parse_x_feed(data) if x_feed else parse_bluesky(data) if bluesky else parse_feed(data))
         if is_hnrss(url):
             entries = [hn_entry(entry) for entry in entries]
         store = prepare_merge(snapshot, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or url),
