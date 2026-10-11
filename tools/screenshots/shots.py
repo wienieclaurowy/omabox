@@ -4,8 +4,9 @@
 
 SCENARIO is feed, notifications, sources, reader, welcome, add or xtoken; THEME is an Omarchy theme folder name
 (tokyo-night, catppuccin-latte, ...). Each shot shows a click-through overlay on one monitor (SHOTS_SCREEN, default
-the focused one) for about five seconds. The live shell, its theme and the real Omabox data are not touched: the rig
-runs on a copy of the shell's Commons and Ui, a sandbox home from demo.py and its own runtime directory.
+the focused one) for about five seconds; SHOTS_HEIGHT=720 lays the panel out as on a screen that tall. The live
+shell, its theme and the real Omabox data are not touched: the rig runs on a copy of the shell's Commons and Ui, a
+sandbox home from demo.py and its own runtime directory.
 Needs qs, grim, hyprctl and python3-pillow.
 """
 
@@ -46,6 +47,9 @@ def patched_shell(work):
             ("WlrLayershell.keyboardFocus: open\n    ? (focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)\n"
              "    : WlrKeyboardFocus.None\n", "WlrLayershell.keyboardFocus: WlrKeyboardFocus.None\n"),
             ("model: root.open ? Quickshell.screens : []", "model: []"),
+            # SHOTS_HEIGHT lays the panel out for a shorter screen, such as 720 for a 1080p laptop at scale 1.5.
+            ("readonly property real screenH: screen ? screen.height : 0",
+             'readonly property real screenH: Number(Quickshell.env("SHOTS_HEIGHT")) || (screen ? screen.height : 0)'),
         ],
     }
     for name, pairs in edits.items():
