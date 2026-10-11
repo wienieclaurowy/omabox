@@ -1246,7 +1246,8 @@ Panel {
   Process {
     id: historyProc
     // Archive first so Omarchy's 10-entry history and Omabox's 7-day copy agree; both dirs are listed, parseHistory dedups.
-    command: ["bash", "-c", "\"$1\" archive-notifications >/dev/null 2>&1; for d in \"$2\" \"$3\"; do for f in \"$d\"/*.json; do [[ -e $f ]] && printf '%s\\t' \"${f##*/}\" && tr -d '\\n' < \"$f\" && echo; done; done",
+    // Bash builtins only: a process per file (tr) took over half a second for a week of notifications.
+    command: ["bash", "-c", "\"$1\" archive-notifications >/dev/null 2>&1; for d in \"$2\" \"$3\"; do for f in \"$d\"/*.json; do [[ -e $f ]] || continue; text=; IFS= read -r -d '' text < \"$f\"; printf '%s\\t%s\\n' \"${f##*/}\" \"${text//$'\\n'/}\"; done; done",
       "--", root.omaboxBin, root.historyDir, root.archiveDir]
     stdout: StdioCollector {
       waitForEnd: true
