@@ -1843,17 +1843,18 @@ def weekly_day(state):
     return WEEKDAYS.index(day) if day in WEEKDAYS else 0
 
 
-def is_due(source, last_fetched, now=None, weekday=0):
-    now = now or datetime.now().astimezone()
+def is_due(source, last_fetched, now=None, weekday=0, state=None):
+    """Due when its last fetch came before the last delivery moment (state's delivery time), or for weekly sources
+    before the last one on the weekly day: a catch-up run in the morning must not stand in for that evening's."""
+    now = local_time(now)
     if source["cadence"] == "paused":
         return False
     if not last_fetched:
         return True
-    last = datetime.fromisoformat(last_fetched).astimezone(now.tzinfo)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = last_delivery_moment(state or {}, now)
     if source["cadence"] == "weekly":
-        start -= timedelta(days=(now.weekday() - weekday) % 7)
-    return last < start
+        start = delivery_moment(state or {}, start.date() - timedelta(days=(start.weekday() - weekday) % 7), now.tzinfo)
+    return datetime.fromisoformat(last_fetched) < start
 
 
 GITHUB_REPO_RE = re.compile(r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?(?:$|/releases/?$)")
@@ -2390,7 +2391,7 @@ def due_sources(sources, state, args):
     return [source for source in sources
             if (not args.only or source["name"] in args.only)
             and (not args.retry or network_error(state["errors"].get(source["name"], "")))
-            and (args.all and source["cadence"] != "paused" or is_due(source, state["fetched"].get(source["name"]), weekday=weekly_day(state)))]
+            and (args.all and source["cadence"] != "paused" or is_due(source, state["fetched"].get(source["name"]), weekday=weekly_day(state), state=state))]
 
 
 def fetch_host(url):

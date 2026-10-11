@@ -402,6 +402,18 @@ class CadenceTest(unittest.TestCase):
         self.assertEqual(omabox.weekly_day({"weekly_day": "sat"}), 5)
         self.assertEqual(omabox.weekly_day({"weekly_day": "bogus"}), 0)
 
+    def test_due_again_at_the_delivery_after_a_catch_up(self):
+        # delivery at 18:00, missed yesterday, caught up at 09:00 today: 18:00 today still brings the day's posts
+        source, state = {"cadence": "daily"}, {"delivery": "18:00"}
+        caught_up = self.iso(self.now)
+        self.assertFalse(omabox.is_due(source, caught_up, self.now.replace(hour=17, minute=59), state=state))
+        self.assertTrue(omabox.is_due(source, caught_up, self.now.replace(hour=18), state=state))
+        self.assertFalse(omabox.is_due(source, self.iso(self.now.replace(hour=18, minute=5)), self.now.replace(hour=23), state=state))
+        # weekly on Saturday at 18:00: a catch-up Saturday morning is not that evening's delivery
+        weekly = {"cadence": "weekly"}
+        self.assertTrue(omabox.is_due(weekly, caught_up, self.now.replace(hour=18), weekday=5, state=state))
+        self.assertFalse(omabox.is_due(weekly, caught_up, self.now.replace(hour=17), weekday=5, state=state))
+
     def test_paused_never_due(self):
         self.assertFalse(omabox.is_due({"cadence": "paused"}, "", self.now))
 
