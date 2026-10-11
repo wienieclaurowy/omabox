@@ -648,6 +648,15 @@ class PublicHostTest(unittest.TestCase):
         for address in ("93.184.216.34", "2606:4700::1111"):
             self.assertTrue(omabox.public_address(address), address)
 
+    def test_nat64_and_6to4_follow_the_embedded_ipv4(self):
+        nat64 = int(ipaddress.ip_address("64:ff9b::"))
+        for inner in ("127.0.0.1", "10.0.0.5", "169.254.169.254", "192.168.1.1"):
+            embedded = int(ipaddress.ip_address(inner))
+            self.assertFalse(omabox.public_address(str(ipaddress.IPv6Address(nat64 + embedded))), inner)
+            self.assertFalse(omabox.public_address(str(ipaddress.IPv6Address((0x2002 << 112) + (embedded << 80) + 1))), inner)
+        self.assertTrue(omabox.public_address(str(ipaddress.IPv6Address(nat64 + int(ipaddress.ip_address("93.184.216.34"))))))
+        self.assertFalse(omabox.public_address("64:ff9b:1::5db8:d822"))
+
     def test_download_limited_refuses_before_connecting(self):
         with self.assertRaises(ValueError):
             omabox.download_limited("http://127.0.0.1:9/x.png", 100)

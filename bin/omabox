@@ -212,8 +212,18 @@ def image_info(data):
     return None
 
 
+NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+
+
 def public_address(address):
     ip = ipaddress.ip_address(address.split("%")[0])
+    if ip.version == 6:
+        # NAT64 and 6to4 carry an IPv4 target the gateway dials; is_global looks at the IPv6 prefix only
+        embedded = ip.ipv4_mapped or ip.sixtofour or (
+            ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF) if ip in NAT64_PREFIX else None)
+        if ip in NAT64_LOCAL or (embedded is not None and not public_address(str(embedded))):
+            return False
     # is_global also refuses the RFC 6598 shared address space, which is_private misses; multicast counts as global
     return ip.is_global and not ip.is_multicast
 
