@@ -1052,6 +1052,30 @@ class DeliveryTimeTest(unittest.TestCase):
         self.assertEqual((morning.day, morning.hour, morning.minute), (27, 6, 45))
 
 
+class XTokenSaveTest(unittest.TestCase):
+    def test_saved_for_the_owner_only_and_trimmed(self):
+        path = Path(tempfile.mkdtemp()) / "omabox" / "x-token"
+        omabox.save_x_token("  " + "a1" * 20 + "\n", path)
+        self.assertEqual(path.read_text(), "a1" * 20 + "\n")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        omabox.save_x_token("b2" * 20, path)
+        self.assertEqual(path.read_text(), "b2" * 20 + "\n")
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["x-token"])
+
+    def test_refuses_what_is_not_a_cookie_value(self):
+        path = Path(tempfile.mkdtemp()) / "x-token"
+        for bad in ("", "auth_token=" + "a" * 40, "a b" * 10, "short"):
+            with self.assertRaises(ValueError):
+                omabox.save_x_token(bad, path)
+        self.assertFalse(path.exists())
+
+    def test_missing_token_tells_the_panel_to_ask(self):
+        with mock.patch.object(omabox, "discover", side_effect=omabox.XTokenMissing("X sources need your X token")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            omabox.cmd_discover(argparse.Namespace(url="https://x.com/someone", json=True))
+        self.assertEqual(json.loads(out.getvalue())["needs"], "x-token")
+
+
 class TickPlanTest(unittest.TestCase):
     NOW = datetime(2026, 9, 26, 12, 0).astimezone()
 
@@ -1234,7 +1258,7 @@ class XTokenTest(unittest.TestCase):
         for message in ("Error: Twitter API error: 401", "Error: Twitter API error: 403",
                         "Error: Twitter API user lookup failed (codes: 89)"):
             self.assertEqual(omabox.fetch_error(self.error(message), self.ROUTE), omabox.X_TOKEN_ERROR, message)
-        self.assertIn("x-token", omabox.X_TOKEN_ERROR)
+        self.assertIn("Sources (t)", omabox.X_TOKEN_ERROR)
 
     def test_other_failures_keep_a_plain_error(self):
         for message in ("Error: Twitter API error: 429", "NotFoundError: Twitter API could not find this user",
@@ -1297,7 +1321,7 @@ class XTokenTest(unittest.TestCase):
         omabox.notify_token_rejected(["A", "B"], send=lambda *args: sent.append(args))
         ((summary, body, view, _),) = sent
         self.assertEqual((summary, view), ("X token rejected", "sources"))
-        self.assertIn("x-token", body)
+        self.assertIn("Sources, then t", body)
         self.assertIn("A, B", body)
 
     def test_notification_argv_opens_the_sources_view(self):

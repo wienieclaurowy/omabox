@@ -1849,6 +1849,39 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rss
             yield
 
 
+class XTokenMissing(RuntimeError):
+    """No X token saved yet; the panel answers it by asking for one."""
+
+
+X_TOKEN_RE = re.compile(r"^[0-9A-Za-z]{20,200}$")
+
+
+def save_x_token(text, path=None):
+    """Stores an auth_token cookie value readable by the owner only. Raises ValueError for anything else."""
+    token = str(text or "").strip()
+    if not X_TOKEN_RE.match(token):
+        raise ValueError("that does not look like an auth_token value: letters and digits only, usually 40 of them")
+    path = Path(path or X_TOKEN_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(token + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_x_token(args):
+    if args.set:
+        save_x_token(sys.stdin.readline())
+        print("saved")
+    elif args.remove:
+        X_TOKEN_PATH.unlink(missing_ok=True)
+        print("removed")
+    else:
+        saved = X_TOKEN_PATH.exists() and bool(X_TOKEN_PATH.read_text().strip())
+        print(json.dumps({"saved": saved}) if args.json else ("saved" if saved else "not saved"))
+
+
 @contextlib.contextmanager
 def rsshub_container(run, wait, token_path, engine, runtime):
     engine = engine or container_engine()
@@ -1857,7 +1890,7 @@ def rsshub_container(run, wait, token_path, engine, runtime):
     token_path = Path(token_path or X_TOKEN_PATH)
     token = token_path.read_text().strip() if token_path.exists() else ""
     if not token:
-        raise RuntimeError(f"X sources need the auth_token cookie in {token_path} (mode 600)")
+        raise XTokenMissing(f"X sources need your X token (the auth_token cookie) in {home_relative(token_path)}")
     env_file = runtime / "omabox-rsshub.env"
     run([engine, "rm", "-f", RSSHUB_CONTAINER], capture_output=True, timeout=30)
     descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1883,7 +1916,7 @@ def home_relative(path):
     return f"~/{path.relative_to(HOME)}" if path.is_relative_to(HOME) else str(path)
 
 
-X_TOKEN_ERROR = f"X token rejected: refresh {home_relative(X_TOKEN_PATH)} (auth_token cookie from x.com)"
+X_TOKEN_ERROR = "X token rejected: paste a new one in Sources (t)"
 # RSSHub's error page reads "Error: Twitter API error: <status>" when X answers >= 400; codes 32/89 are X's
 # "could not authenticate" and "invalid or expired token".
 X_TOKEN_REJECTED_RE = re.compile(r"Twitter API error: 40[13]\b|user lookup failed \(codes?: [\d, ]*\b(?:32|89)\b")
@@ -2141,7 +2174,7 @@ def token_notice(state, notify):
 
 
 def notify_token_rejected(waiting, send=send_notification):
-    send("X token rejected", f"Refresh {home_relative(X_TOKEN_PATH)} with the auth_token cookie from x.com. "
+    send("X token rejected", "Paste a new one in Omabox: Sources, then t. "
          f"Waiting: {', '.join(waiting)}", "sources", chr(GLYPHS["twitter"]))
 
 
@@ -2248,7 +2281,9 @@ def cmd_discover(args):
     except Exception as error:
         message = error_text(error)
         if args.json:
-            print(json.dumps({"error": message}))
+            # needs: the panel asks for the X token instead of only showing the error
+            token = isinstance(error, XTokenMissing) or message == X_TOKEN_ERROR
+            print(json.dumps({"error": message, **({"needs": "x-token"} if token else {})}))
             return
         sys.exit(message)
     if args.json:
@@ -3494,6 +3529,11 @@ def main(argv=None):
     later.add_argument("--on", action="store_true")
     later.add_argument("--off", action="store_true")
     later.set_defaults(func=cmd_later)
+    xtoken = sub.add_parser("x-token", help="say whether an X token is saved; --set reads one from stdin, --remove deletes it")
+    xtoken.add_argument("--set", action="store_true")
+    xtoken.add_argument("--remove", action="store_true")
+    xtoken.add_argument("--json", action="store_true")
+    xtoken.set_defaults(func=cmd_x_token)
     tick = sub.add_parser("tick", help="what the bar widget runs every few minutes: deliver or retry when due, "
                                        "archive notifications, print the seconds until the next tick")
     tick.set_defaults(func=cmd_tick)
