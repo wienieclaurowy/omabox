@@ -289,8 +289,12 @@ function muteSummary(source) {
   return parts.map(function(part) { return "  ·  " + part }).join("")
 }
 
+// X sources are stored as the local RSSHub route; people know them as x.com/<handle>.
 function shortUrl(url) {
-  return String(url || "").replace(/^https?:\/\//, "").replace(/^www\./, "")
+  var text = String(url || "")
+  var x = text.match(/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/twitter\/user\/([\w]+)/)
+  if (x) return "x.com/" + x[1]
+  return text.replace(/^https?:\/\//, "").replace(/^www\./, "")
 }
 
 // link when it is an absolute http(s) URL, else "": stored posts may predate the CLI's own check.
