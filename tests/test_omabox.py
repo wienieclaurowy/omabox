@@ -1709,19 +1709,20 @@ class XTokenTest(unittest.TestCase):
         base = omabox.RSSHUB_BASE
         sources = [{"name": "A", "url": f"{base}/twitter/user/a"}, {"name": "Repo", "url": f"{base}/github/repos/a"},
                    {"name": "B", "url": f"{base}/twitter/user/b"}]
-        fetched, added = [], {}
-        state = {"errors": {"B": "URLError: timed out"}}
+        fetched = []
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        state["errors"]["B"] = "URLError: timed out"
 
-        def fetch(state, source, stamp):
+        def gather(snapshot, source, stamp):
             fetched.append(source["name"])
-            if source["name"] == "A":
-                state["errors"]["A"] = omabox.X_TOKEN_ERROR
-            return 0
+            error = omabox.X_TOKEN_ERROR if source["name"] == "A" else ""
+            return omabox.Gathered(source["name"], source["url"], stamp, error, store=lambda state: 0)
 
-        omabox.fetch_via_rsshub(state, sources, "t", added, fetch)
+        results = omabox.gather_via_rsshub(state, sources, "t", gather)
         self.assertEqual(fetched, ["A", "Repo"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual([result(state) for result in results], [0, 0, 0])
         self.assertEqual(state["errors"]["B"], omabox.X_TOKEN_ERROR)
-        self.assertEqual(added, {"A": 0, "Repo": 0})
 
     def test_a_fetch_replaces_the_token_error_of_the_last_run(self):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
@@ -1730,12 +1731,14 @@ class XTokenTest(unittest.TestCase):
         sources = [{"name": "A", "url": self.ROUTE, "icon": "*"}, {"name": "B", "url": self.ROUTE, "icon": "*"}]
         fetched = []
 
-        def fetch(state, source, stamp):
+        def gather(snapshot, source, stamp):
             fetched.append(source["name"])
-            with contextlib.redirect_stdout(io.StringIO()):
-                return omabox.fetch_source(state, source, stamp, get=lambda url, cached: (empty, {}))
+            return omabox.gather_source(snapshot, source, stamp, get=lambda url, cached: (empty, {}))
 
-        omabox.fetch_via_rsshub(state, sources, "t", {}, fetch)
+        results = omabox.gather_via_rsshub(state, sources, "t", gather)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for result in results:
+                result(state)
         self.assertEqual(fetched, ["A", "B"])
         self.assertEqual(state["errors"], {})
 
@@ -1970,12 +1973,13 @@ class StaleTest(unittest.TestCase):
         base = omabox.RSSHUB_BASE
         state = {"errors": {}}
 
-        def fetch(state, source, stamp):
-            state["errors"][source["name"]] = omabox.X_TOKEN_ERROR
-            return 0
+        def gather(snapshot, source, stamp):
+            return omabox.Gathered(source["name"], source["url"], stamp, omabox.X_TOKEN_ERROR)
 
-        omabox.fetch_via_rsshub(state, [{"name": "A", "url": f"{base}/twitter/user/a"},
-                                        {"name": "B", "url": f"{base}/twitter/user/b"}], "t", {}, fetch)
+        results = omabox.gather_via_rsshub(state, [{"name": "A", "url": f"{base}/twitter/user/a"},
+                                                   {"name": "B", "url": f"{base}/twitter/user/b"}], "t", gather)
+        with contextlib.redirect_stderr(io.StringIO()):
+            results[1](state)
         self.assertEqual(state["failing_since"], {"B": "t"})
 
     def test_failing_warns_from_three_days(self):
@@ -2848,6 +2852,108 @@ class RepliesTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             omabox.main(["replies", "blog", "--json"])
         self.assertEqual(json.loads(out.getvalue()), {"error": "only X posts have replies to show"})
+
+
+class FetchLockTest(unittest.TestCase):
+    FEED = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Tide tables</title><link>https://example.com/1</link><guid>t1</guid><pubDate>Sat, 26 Sep 2026 08:00:00 +0000</pubDate></item>
+<item><title>Ferry news</title><link>https://example.com/2</link><guid>t2</guid><pubDate>Fri, 25 Sep 2026 08:00:00 +0000</pubDate></item>
+</channel></rss>"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        names = ("CONFIG_PATH", "STATE_PATH", "IMAGE_DIR", "ICON_DIR")
+        saved = {name: getattr(omabox, name) for name in names}
+        self.addCleanup(lambda: [setattr(omabox, name, value) for name, value in saved.items()])
+        omabox.CONFIG_PATH, omabox.STATE_PATH = self.root / "sources.toml", self.root / "state" / "items.json"
+        omabox.IMAGE_DIR, omabox.ICON_DIR = self.root / "images", self.root / "icons"
+        runtime = self.root / "run"
+        runtime.mkdir(mode=0o700)
+        patcher = mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(runtime)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.during = lambda: None
+        self.requests = 0
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                test.requests += 1
+                test.during()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/rss+xml")
+                self.end_headers()
+                self.wfile.write(test.FEED)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.url = f"http://127.0.0.1:{server.server_port}/feed.xml"
+        omabox.save_sources([{"name": "Tides", "url": self.url, "cadence": "daily", "icon": "*"}])
+
+    def fetch(self):
+        args = argparse.Namespace(offline=False, all=True, only=None, notify=False, retry=False)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            omabox.cmd_fetch(args)
+        return errors.getvalue()
+
+    def test_network_runs_outside_the_state_lock(self):
+        free = []
+
+        def during():
+            omabox.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(omabox.STATE_PATH.with_suffix(".lock"), "w") as handle:
+                try:
+                    omabox.fcntl.flock(handle, omabox.fcntl.LOCK_EX | omabox.fcntl.LOCK_NB)
+                    free.append(True)
+                except BlockingIOError:
+                    free.append(False)
+            self.assertTrue(omabox.fetching())
+
+        self.during = during
+        self.fetch()
+        self.assertEqual(free, [True])
+        self.assertEqual(len(omabox.load_state()["items"]), 2)
+        self.assertFalse(omabox.fetching())
+
+    def test_sources_changed_during_a_fetch_are_kept_as_they_are_then(self):
+        def add_late_source():
+            sources = omabox.load_sources()
+            omabox.save_sources(sources + [{"name": "Late", "url": "https://example.com/late.xml", "cadence": "daily"}])
+            with omabox.locked():
+                state = omabox.load_state()
+                state["items"].append({"id": "late1", "source": "Late", "title": "Late post", "link": "",
+                                       "published": "2026-09-26T08:00:00Z", "read": False, "html": ""})
+                state["fetched"]["Late"] = "2026-09-26T08:00:00Z"
+                omabox.save_state(state)
+
+        self.during = add_late_source
+        self.fetch()
+        state = omabox.load_state()
+        self.assertEqual(sorted(item["source"] for item in state["items"]), ["Late", "Tides", "Tides"])
+        self.assertIn("Late", state["fetched"])
+
+        self.during = lambda: omabox.save_sources([s for s in omabox.load_sources() if s["name"] != "Tides"])
+        with omabox.locked():
+            state = omabox.load_state()
+            state["items"] = [item for item in state["items"] if item["source"] != "Tides"]
+            state["fetched"].pop("Tides")
+            omabox.save_state(state)
+        self.fetch()
+        state = omabox.load_state()
+        self.assertEqual([item["source"] for item in state["items"]], ["Late"])
+        self.assertNotIn("Tides", state["fetched"])
+
+    def test_a_second_fetch_skips_while_one_runs(self):
+        with omabox.fetch_lock() as alone:
+            self.assertTrue(alone)
+            self.assertIn("another fetch is running", self.fetch())
+        self.assertEqual(self.requests, 0)
+        self.assertFalse(omabox.STATE_PATH.exists())
 
 
 class FullTextFetchTest(unittest.TestCase):
