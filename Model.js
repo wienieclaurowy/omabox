@@ -371,7 +371,8 @@ function hints(view, mode, reading) {
     if (mode === "rename") return "enter save  ·  esc cancel"
     if (mode === "mute") return "enter add  ·  tab/shift+tab pick a rule to edit or clear  ·  esc close"
     if (mode === "confirm") return "y remove  ·  n keep"
-    return "j/k move  ·  l rename  ·  h back  ·  n new  ·  c cadence  ·  m mute  ·  space pause  ·  x remove  ·  -/+ delivery time  ·  w weekly day  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
+    if (mode === "x-token") return "enter save  ·  esc cancel"
+    return "j/k move  ·  l rename  ·  h back  ·  n new  ·  c cadence  ·  m mute  ·  space pause  ·  x remove  ·  -/+ delivery time  ·  w weekly day  ·  t X token  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
   }
   if (view === "notifications") return "j/k move  ·  l read  ·  / search  ·  f filter  ·  o run action  ·  yy copy  ·  x remove  ·  X clear all  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
   return "j/k move  ·  l read  ·  / search  ·  f filter  ·  z snooze  ·  m later  ·  yy copy link  ·  i media  ·  gg/G top/bottom  ·  o browser  ·  a mark read  ·  X clear read  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"

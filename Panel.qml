@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -65,9 +66,18 @@ Panel {
   property string deliveryTime: ""
   property string weeklyDay: "mon"
   property var cliDone: null
+  // The welcome card shows on the feed until it is dismissed once; dismissing saves `welcomed` in shell.json.
+  readonly property bool welcomed: setting("welcomed", false) === true
+  readonly property bool welcoming: !welcomed && view === "feed" && !reading && mode === "list"
+  readonly property bool overlayShown: welcoming || (view === "sources" && mode === "x-token")
+  // X profile URL whose lookup stopped for a missing or rejected X token; looked up again once one is saved.
+  property string pendingXUrl: ""
+  property bool xTokenSaved: false
+  property string tokenToSend: ""
 
   readonly property bool hintsVisible: setting("hints", false) === true
   readonly property bool typing: mode === "add-url" || mode === "add-name" || mode === "rename" || mode === "mute" || mode === "search"
+    || mode === "x-token"
   readonly property bool confirming: mode === "confirm" || mode === "confirm-clear"
   readonly property var allItems: hostWidget ? hostWidget.items : []
   readonly property var items: Model.filterItems(allItems, filter, query)
@@ -741,6 +751,10 @@ Panel {
       root.busy = false
       var found = null
       try { found = JSON.parse(text) } catch (e) {}
+      if (found && found.needs === "x-token") {
+        root.startXToken(url)
+        return
+      }
       if (!found || found.error) {
         root.messageError = true
         root.message = found && found.error ? found.error : text
@@ -753,6 +767,69 @@ Panel {
         nameField.selectAll()
         nameField.forceActiveFocus()
       })
+    })
+  }
+
+  function dismissWelcome(next) {
+    persistSettings({ welcomed: true })
+    if (next === "add") {
+      showView("sources")
+      startAdd()
+    }
+  }
+
+  // ---- X token: it goes to the CLI on stdin, so it never shows in a process list.
+  function startXToken(url) {
+    root.pendingXUrl = url || ""
+    root.message = ""
+    root.mode = "x-token"
+    runCli(["x-token", "--json"], function(code, text) {
+      var result = null
+      try { result = JSON.parse(text) } catch (e) {}
+      root.xTokenSaved = !!result && result.saved === true
+    })
+    Qt.callLater(function() {
+      tokenField.text = ""
+      tokenField.forceActiveFocus()
+    })
+  }
+
+  function saveXToken() {
+    var token = tokenField.text.trim()
+    if (token === "" || tokenProc.running) return
+    root.tokenToSend = token
+    tokenField.text = ""
+    tokenProc.running = true
+  }
+
+  function removeXToken() {
+    runCli(["x-token", "--remove"], function(code, text) {
+      root.xTokenSaved = false
+      root.messageError = code !== 0
+      root.message = code === 0 ? "X token removed from this computer." : text
+    })
+  }
+
+  function tokenSaved(code, text) {
+    if (code !== 0) {
+      root.messageError = true
+      root.message = text
+      Qt.callLater(function() { tokenField.forceActiveFocus() })
+      return
+    }
+    root.xTokenSaved = true
+    var url = root.pendingXUrl
+    root.pendingXUrl = ""
+    if (url === "") {
+      root.mode = "list"
+      focusCatcher()
+      note("X token saved.")
+      return
+    }
+    root.mode = "add-url"
+    Qt.callLater(function() {
+      urlField.text = url
+      root.lookUp()
     })
   }
 
@@ -896,6 +973,11 @@ Panel {
   }
 
   function handleText(t) {
+    // The welcome card is modal: only its own keys work until it is dismissed.
+    if (root.welcoming) {
+      if (t === "n") dismissWelcome("add")
+      return
+    }
     if (view === "sources" && mode === "confirm") {
       if (t === "y") confirmRemove(true)
       else if (t === "n") confirmRemove(false)
@@ -977,13 +1059,15 @@ Panel {
       else if (t === "c") cycleCadence()
       else if (t === "m") startMute()
       else if (t === "w") setWeeklyDay(Model.nextWeekday(root.weeklyDay))
+      else if (t === "t") startXToken("")
       else if (t === "-") stepDelivery(-30)
       else if (t === "+" || t === "=") stepDelivery(30)
     }
   }
 
   function handleEscape() {
-    if (root.snoozePickerId !== "") closeSnooze()
+    if (root.welcoming) dismissWelcome("")
+    else if (root.snoozePickerId !== "") closeSnooze()
     else if (root.catchupOpen) closeCatchup()
     else if (view === "sources" && mode === "confirm") confirmRemove(false)
     else if (mode === "confirm-clear") confirmClear(false)
@@ -1082,6 +1166,23 @@ Panel {
   }
 
   Process {
+    id: tokenProc
+    command: ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "x-token", "--set"]
+    stdinEnabled: true
+    onStarted: {
+      write(root.tokenToSend + "\n")
+      root.tokenToSend = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = Model.splitCliOutput(text)
+        root.tokenSaved(result.code, result.text)
+      }
+    }
+  }
+
+  Process {
     id: repliesProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -1133,14 +1234,14 @@ Panel {
     open: root.opened
     focusTarget: arrowBlocker
     contentWidth: panel.fittedContentWidth(root.reading ? root.readerWidth : Style.space(520))
-    contentHeight: panel.fittedContentHeight(body.implicitHeight)
+    contentHeight: panel.fittedContentHeight(Math.max(body.implicitHeight, root.overlayShown ? overlayCard.height + Style.space(40) : 0))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.typing
       onMoveRequested: function(dx, dy) {
-        if (root.confirming) return
+        if (root.confirming || root.welcoming) return
         if (dx > 0) root.enter()
         else if (dx < 0) root.leave()
         if (dy !== 0) root.moveCursor(dy)
@@ -1150,6 +1251,10 @@ Panel {
         var viaReturn = root.viaReturn
         root.viaReturn = false
         if (root.confirming) return
+        if (root.welcoming) {
+          root.dismissWelcome("")
+          return
+        }
         if (root.catchupOpen) {
           root.catchUp("all")
           return
@@ -1159,7 +1264,7 @@ Panel {
         else root.activate(root.cursor)
       }
       onDeleteRequested: {
-        if (root.reading || root.confirming) return
+        if (root.reading || root.confirming || root.welcoming) return
         if (root.view === "notifications") root.forgetNotification(root.cursor)
         else if (root.view === "sources") root.askRemove()
       }
@@ -1176,7 +1281,7 @@ Panel {
           if (event.key === Qt.Key_Up || event.key === Qt.Key_Down || event.key === Qt.Key_Left || event.key === Qt.Key_Right)
             event.accepted = true
           // PanelKeyCatcher maps x and X both to deleteRequested; X (clear all) is split off here.
-          else if (event.text === "X" && root.view !== "sources" && root.mode === "list" && !root.reading) {
+          else if (event.text === "X" && root.view !== "sources" && root.mode === "list" && !root.reading && !root.welcoming) {
             root.askClear()
             event.accepted = true
           }
@@ -1185,6 +1290,13 @@ Panel {
 
       Column {
         id: body
+        layer.enabled: root.overlayShown
+        layer.effect: MultiEffect {
+          autoPaddingEnabled: false
+          blurEnabled: true
+          blur: 1.0
+          blurMax: 40
+        }
         width: parent.width
         spacing: Style.space(8)
 
@@ -1866,6 +1978,218 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
+            }
+          }
+        }
+      }
+
+      // Welcome and the X token guide sit in the middle of the panel over a blurred copy of it.
+      MouseArea {
+        anchors.fill: parent
+        visible: root.overlayShown
+        acceptedButtons: Qt.AllButtons
+        onWheel: function(wheel) { wheel.accepted = true }
+
+        Rectangle {
+          anchors.fill: parent
+          color: Util.alpha(root.cardColor, 0.35)
+        }
+
+        Rectangle {
+          id: overlayCard
+          anchors.centerIn: parent
+          width: Math.min(parent.width - Style.space(32), Style.space(470))
+          height: overlayColumn.implicitHeight + Style.space(36)
+          radius: Style.cornerRadius
+          // Opaque even when the theme's popups are see-through, so the guide reads cleanly over the blur.
+          color: Qt.rgba(root.cardColor.r, root.cardColor.g, root.cardColor.b, 1)
+          border.width: 1
+          border.color: Util.alpha(Color.accent, 0.45)
+
+          Column {
+            id: overlayColumn
+            x: Style.space(18)
+            y: Style.space(18)
+            width: parent.width - Style.space(36)
+            spacing: Style.space(10)
+
+              Column {
+                id: welcomeColumn
+                visible: root.welcoming
+                width: parent.width
+                spacing: Style.space(10)
+
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: "Welcome to Omabox"
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  lineHeight: 1.25
+                  text: "A quiet inbox. Your feeds arrive once a day, at " + (root.deliveryTime || "08:00")
+                    + ", all together, instead of all day long. In between there is nothing new to check, so you can get on with your day."
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                Repeater {
+                  model: [
+                    "Add your own sources in Sources: blogs, YouTube channels, Reddit, Bluesky, Mastodon and X.",
+                    "Notifications keeps every desktop notification for 7 days, so nothing is lost when one slips by.",
+                    "Every action has a key. Press ? at any time to see them."
+                  ]
+
+                  Text {
+                    required property var modelData
+                    width: welcomeColumn.width
+                    leftPadding: Style.space(14)
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    text: "•  " + modelData
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Row {
+                  spacing: Style.space(6)
+
+                  Button {
+                    text: "Start reading"
+                    bordered: true
+                    foreground: Color.accent
+                    fontFamily: root.fontFamily
+                    onClicked: root.dismissWelcome("")
+                  }
+
+                  Button {
+                    text: "Add a source"
+                    bordered: true
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    onClicked: root.dismissWelcome("add")
+                  }
+                }
+              }
+            Column {
+              id: tokenForm
+              visible: root.view === "sources" && root.mode === "x-token"
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.xTokenSaved ? "Replace your X token" : "Connect an X account"
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "Read this first. X has no public feeds, so Omabox reads X with your login. The token below is that login: "
+                  + "whoever has it can use the account as you. X's rules do not allow reading this way and X can lock the account, "
+                  + "so use a spare account, not your main one."
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: [
+                  "1.  In your browser, sign in to x.com with the account Omabox should use.",
+                  "2.  Open the developer tools (F12), then Application in Chromium or Storage in Firefox, then Cookies, then https://x.com.",
+                  "3.  Copy the value of auth_token (about 40 letters and digits) and paste it below."
+                ]
+
+                Text {
+                  required property var modelData
+                  width: tokenForm.width
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  text: modelData
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(10)
+
+                Text {
+                  width: Style.space(48)
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "TOKEN"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 1
+                  font.bold: true
+                }
+
+                TextField {
+                  id: tokenField
+                  width: parent.width - Style.space(58)
+                  password: true
+                  enabled: !tokenProc.running
+                  placeholderText: "auth_token value"
+                  foreground: root.fg
+                  font.family: root.fontFamily
+                  Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape) { root.pendingXUrl = ""; root.cancelTyping(); event.accepted = true }
+                    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.saveXToken(); event.accepted = true }
+                  }
+                }
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "It stays on this computer, readable by you alone. Signing out of x.com, or \"Log out of all other sessions\" "
+                  + "in X's settings, makes it useless at once."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                visible: root.xTokenSaved
+                text: "Remove the saved token"
+                bordered: true
+                foreground: Color.urgent
+                fontFamily: root.fontFamily
+                onClicked: root.removeXToken()
+              }
+            }
+
+
+            Text {
+              visible: root.mode === "x-token" && root.messageError && root.message !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: root.message
+              color: Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
           }
         }
