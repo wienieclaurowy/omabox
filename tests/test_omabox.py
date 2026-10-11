@@ -1347,6 +1347,13 @@ class TickPlanTest(unittest.TestCase):
         state["retried"] = self.stamp(minutes=-10)
         self.assertEqual(omabox.tick_plan(state, self.NOW), (None, omabox.TICK_MAX_SECONDS))
 
+    def test_stamps_from_a_clock_that_ran_ahead_are_ignored(self):
+        self.assertEqual(omabox.tick_plan(self.state(delivered=self.stamp(days=2)), self.NOW)[0], "deliver")
+        errors = {"Blog": "URLError: <urlopen error timed out>"}
+        state = self.state(delivered=self.stamp(hours=-1), retried=self.stamp(days=1), errors=errors)
+        self.assertEqual(omabox.tick_plan(state, self.NOW)[0], "retry")
+        self.assertTrue(omabox.is_due({"cadence": "daily"}, self.stamp(days=1), self.NOW))
+
     def test_other_errors_do_not_retry(self):
         state = self.state(delivered=self.stamp(hours=-1), errors={"Blog": "HTTPError: HTTP Error 404: Not Found"})
         self.assertIsNone(omabox.tick_plan(state, self.NOW)[0])

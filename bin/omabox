@@ -1854,7 +1854,8 @@ def is_due(source, last_fetched, now=None, weekday=0, state=None):
     start = last_delivery_moment(state or {}, now)
     if source["cadence"] == "weekly":
         start = delivery_moment(state or {}, start.date() - timedelta(days=(start.weekday() - weekday) % 7), now.tzinfo)
-    return datetime.fromisoformat(last_fetched) < start
+    last = datetime.fromisoformat(last_fetched)
+    return last < start or last > now
 
 
 GITHUB_REPO_RE = re.compile(r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?(?:$|/releases/?$)")
@@ -3341,6 +3342,13 @@ def next_delivery_moment(state, now=None):
     return delivery_moment(state, last_delivery_moment(state, now).date() + timedelta(days=1), now.tzinfo)
 
 
+def past_moment(stamp, now):
+    """The stored stamp as a datetime, None when unset or later than now: a clock that ran ahead once must not hold
+    deliveries back until real time catches up."""
+    moment = datetime.fromisoformat(stamp) if stamp else None
+    return moment if moment and moment <= now else None
+
+
 def tick_plan(state, now=None):
     """What a tick does now ("deliver", "retry" or None) and the seconds until the next tick is worth running.
     A delivery missed while the machine was off or asleep comes at the next tick, like systemd's Persistent=true;
@@ -3348,17 +3356,17 @@ def tick_plan(state, now=None):
     now = local_time(now)
     moment = last_delivery_moment(state, now)
     wait = (next_delivery_moment(state, now) - now).total_seconds()
-    delivered = state.get("delivered")
+    delivered = past_moment(state.get("delivered"), now)
     until = state.get("paused_until")
     held = bool(until) and datetime.fromisoformat(until) > moment
     if paused(state, now):
         wait = min(wait, (datetime.fromisoformat(until) - now).total_seconds())
-    elif not held and (not delivered or datetime.fromisoformat(delivered) < moment):
+    elif not held and (not delivered or delivered < moment):
         return "deliver", TICK_MIN_SECONDS
     action = None
     if any(network_error(text) for text in state["errors"].values()) and not paused(state, now):
-        tried = state.get("retried") or delivered
-        due_at = datetime.fromisoformat(tried) + timedelta(minutes=RETRY_MINUTES) if tried else now
+        tried = past_moment(state.get("retried"), now) or delivered
+        due_at = tried + timedelta(minutes=RETRY_MINUTES) if tried else now
         if due_at <= now:
             action = "retry"
         else:
