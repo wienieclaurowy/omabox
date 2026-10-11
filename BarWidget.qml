@@ -13,7 +13,8 @@ BarWidget {
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
   readonly property string statePath: stateHome + "/omabox/items.json"
   readonly property string omaboxBin: Model.localPath(Qt.resolvedUrl("bin/omabox"))
-  readonly property string historyDir: stateHome + "/omarchy/notifications/history"
+  // Omarchy keeps it under $HOME whatever XDG_STATE_HOME says.
+  readonly property string historyDir: home + "/.local/state/omarchy/notifications/history"
   // FileView never watches a file whose directory is missing, so the state directory is made before items.json is watched.
   property bool stateDirReady: false
   // Why the last `omabox tick` failed, "" after one that worked; the feed's status line shows it.
