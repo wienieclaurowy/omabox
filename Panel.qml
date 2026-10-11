@@ -74,6 +74,8 @@ Panel {
   property var cliQueue: []
   // HH:MM of the daily delivery (`omabox delivery`), "" until loaded; -/+ in sources move it, deliveryApply saves.
   property string deliveryTime: ""
+  // From `omabox delivery --json`, refreshed while the panel is open.
+  property bool fetching: false
   property string weeklyDay: "mon"
   property var cliDone: null
   // The welcome card shows on the feed until it is dismissed once; dismissing saves `welcomed` in shell.json.
@@ -717,7 +719,12 @@ Panel {
       if (code !== 0 || !result || !result.time) return
       if (!deliveryApply.running) root.deliveryTime = result.time
       root.weeklyDay = result.weekly_day || "mon"
+      root.deliveryStatus(result)
     })
+  }
+
+  function deliveryStatus(result) {
+    root.fetching = result.fetching === true
   }
 
   // Half-hour steps, wrapping past midnight; saved once the stepping stops.
@@ -1147,6 +1154,27 @@ Panel {
     interval: 4000
     running: root.message !== "" && !root.busy && root.articleLoadingId === "" && root.view !== "sources"
     onTriggered: root.message = ""
+  }
+
+  // Off the CLI queue: a read-only check that must not wait behind, or hold up, the user's own changes.
+  Process {
+    id: deliveryProbe
+    command: [root.omaboxBin, "delivery", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = null
+        try { result = JSON.parse(text) } catch (e) {}
+        if (result) root.deliveryStatus(result)
+      }
+    }
+  }
+
+  Timer {
+    interval: root.fetching ? 3000 : 15000
+    running: root.opened
+    repeat: true
+    onTriggered: if (!deliveryProbe.running) deliveryProbe.running = true
   }
 
   Timer {
@@ -2006,6 +2034,7 @@ Panel {
               .filter(function(part) { return part !== "" }).join("  ·  ")
             : root.busy ? "Looking…"
             : root.message !== "" ? root.message
+            : root.fetching ? "Fetching new posts…"
             : root.view === "feed"
               ? Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
                 + (root.errorSources.length > 0 ? "  ·  failed: " + root.errorSources.join(", ") : "")
@@ -2014,6 +2043,7 @@ Panel {
           color: root.confirming || root.catchupOpen ? root.fg
             : root.busy ? root.faint
             : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
+            : root.fetching ? root.faint
             : failed ? Color.urgent : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
