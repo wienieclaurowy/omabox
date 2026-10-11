@@ -1288,8 +1288,20 @@ Panel {
         }
       }
 
+      // While a card shows, a see-through theme background would let the desktop through, unblurred, behind it.
+      Rectangle {
+        readonly property real border: Math.max(1, Style.space(2))
+        visible: root.overlayShown
+        anchors.fill: parent
+        anchors.margins: -(Style.spacing.popupPadding - border)
+        radius: Math.max(0, Style.cornerRadius - border)
+        color: Qt.rgba(root.cardColor.r, root.cardColor.g, root.cardColor.b, 1)
+      }
+
       Column {
         id: body
+        // Nothing behind a card reacts to the pointer: no hover highlight, no clicks.
+        enabled: !root.overlayShown
         layer.enabled: root.overlayShown
         layer.effect: MultiEffect {
           autoPaddingEnabled: false
@@ -1987,6 +1999,7 @@ Panel {
       MouseArea {
         anchors.fill: parent
         visible: root.overlayShown
+        hoverEnabled: true
         acceptedButtons: Qt.AllButtons
         onWheel: function(wheel) { wheel.accepted = true }
 
