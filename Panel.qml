@@ -754,6 +754,7 @@ Panel {
     root.message = ""
     runCli(["discover", "--json", url], function(code, text) {
       root.busy = false
+      if (root.mode !== "add-url") return
       var found = null
       try { found = JSON.parse(text) } catch (e) {}
       if (found && found.needs === "x-token") {
@@ -959,9 +960,10 @@ Panel {
   }
 
   // Leaving rename/mute/confirm first: they act on currentSource, so moving the cursor under them
-  // renames an empty field, mutes or removes a different source.
+  // renames an empty field, mutes or removes a different source. An add form left open would keep `typing` set,
+  // which blocks every key once the row click moves focus off the field.
   function selectSource(index) {
-    if (root.mode === "rename" || root.mode === "mute" || root.mode === "confirm") cancelTyping()
+    if (root.mode !== "list") cancelTyping()
     root.cursor = index
   }
 
