@@ -63,6 +63,9 @@ Panel {
   property var notifications: []
   property bool dnd: false
   property var sources: []
+  // Set by the first answer, so the empty states do not flash while the CLI is still reading.
+  property bool sourcesLoaded: false
+  property bool notificationsLoaded: false
   property var discovered: null
   property bool busy: false
   property string message: ""
@@ -756,6 +759,7 @@ Panel {
         return
       }
       try { root.sources = JSON.parse(text) } catch (e) { root.message = text }
+      root.sourcesLoaded = true
       if (root.view === "sources") root.cursor = Math.min(root.cursor, Math.max(0, root.sources.length - 1))
     })
   }
@@ -1248,6 +1252,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.notifications = Model.parseHistory(text)
+        root.notificationsLoaded = true
         if (root.pendingRead >= 0 && root.view === "notifications") root.openReader(root.pendingRead)
         root.pendingRead = -1
       }
@@ -1517,50 +1522,50 @@ Panel {
           }
         }
 
-        Row {
-          visible: !root.catchupOpen && root.view === "feed" && !root.reading && Model.unreadCount(root.items) > 0
-          spacing: Style.space(10)
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: Model.unreadCount(root.items) + " UNREAD"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.letterSpacing: 1
-            font.bold: true
-          }
-
-          Button {
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Mark read"
-            tooltipText: "Mark read (a)"
-            bordered: true
-            foreground: root.fg
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            onClicked: root.openCatchup()
-          }
-        }
-
-        Flow {
-          visible: root.catchupOpen && root.view === "feed" && !root.reading
+        // One fixed-height slot for the unread count and the mark-read choices; it stays when the last post is read,
+        // so the list under it does not jump. What the choices cover is in the status line.
+        Item {
+          visible: root.view === "feed" && !root.reading && root.allItems.length > 0
           width: parent.width
-          spacing: Style.space(12)
+          height: Math.max(markReadButton.implicitHeight, catchupPicker.implicitHeight)
 
-          Text {
-            textFormat: Text.PlainText
-            text: "MARK READ" + (root.filter !== "" ? "  ·  " + Model.filterLabel(root.filter) : "")
-              + (root.query !== "" ? "  ·  / " + root.query : "")
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.letterSpacing: 1
-            font.bold: true
+          Row {
+            id: unreadRow
+            visible: !root.catchupOpen
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(10)
+
+            readonly property int unread: Model.unreadCount(root.items)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: unreadRow.unread > 0 ? unreadRow.unread + " UNREAD" : "ALL READ"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+              font.bold: true
+            }
+
+            Button {
+              id: markReadButton
+              visible: unreadRow.unread > 0
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Mark read"
+              tooltipText: "Mark read (a)"
+              bordered: true
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.openCatchup()
+            }
           }
 
           ChoicePicker {
+            id: catchupPicker
+            visible: root.catchupOpen
+            anchors.verticalCenter: parent.verticalCenter
             choices: root.catchupOpen ? Model.catchupChoices(root.items, root.now) : []
             foreground: root.fg
             dim: root.faint
@@ -1574,13 +1579,13 @@ Panel {
           id: reader
           visible: root.reading
           width: parent.width
-          maxHeight: root.bodyMaxHeight - reader.y - root.tailHeight - (messageLine.visible ? messageLine.height + parent.spacing : 0)
+          maxHeight: root.bodyMaxHeight - reader.y - root.tailHeight
           panel: root
           item: root.readingItem
         }
 
         Item {
-          visible: root.view === "sources" && root.deliveryTime !== ""
+          visible: root.view === "sources"
           width: parent.width
           height: visible ? deliveryControls.height : 0
 
@@ -1625,8 +1630,8 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: root.deliveryTime
-              color: root.fg
+              text: root.deliveryTime || "--:--"
+              color: root.deliveryTime ? root.fg : root.faint
               font.family: root.fontFamily
               font.pixelSize: Style.font.subtitle
               font.bold: true
@@ -1644,7 +1649,7 @@ Panel {
         }
 
         Item {
-          visible: root.view === "sources" && root.deliveryTime !== ""
+          visible: root.view === "sources"
           width: parent.width
           height: visible ? weekdayChips.height : 0
 
@@ -1674,7 +1679,7 @@ Panel {
         }
 
         PanelSeparator {
-          visible: root.view === "sources" && root.deliveryTime !== ""
+          visible: root.view === "sources"
           width: parent.width
           foreground: root.fg
         }
@@ -1904,19 +1909,8 @@ Panel {
         }
 
         Text {
-          id: messageLine
-          visible: root.busy || root.message !== ""
-          width: parent.width
-          textFormat: Text.PlainText
-          wrapMode: Text.WordWrap
-          text: root.busy ? "Looking…" : root.message
-          color: root.busy || !root.messageError ? root.dim : Color.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Text {
-          visible: root.rows.length === 0 && !root.reading
+          visible: root.rows.length === 0 && !root.reading && (root.view === "feed" ? !root.hostWidget || root.hostWidget.stateLoaded
+            : root.view === "notifications" ? root.notificationsLoaded : root.sourcesLoaded)
           width: parent.width
           topPadding: Style.space(24)
           bottomPadding: Style.space(24)
@@ -1974,18 +1968,27 @@ Panel {
 
         Text {
           id: statusLine
-          visible: (root.view !== "sources" || root.mode === "confirm") && !root.reading
+          readonly property bool failed: root.view === "feed" && root.hostWidget !== null && root.hostWidget.tickProblem !== ""
+          // Messages ("Copied …", CLI answers) take this line for a while instead of a row above the list, which
+          // pushed the list down and back. A space keeps the line's height while there is nothing to say yet.
           width: parent.width
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           text: root.mode === "confirm" && root.currentSource ? "Remove " + root.currentSource.name + " and its posts?"
             : root.mode === "confirm-clear" ? root.clearQuestion
+            : root.catchupOpen ? ["MARK READ", Model.filterLabel(root.filter), root.query !== "" ? "/ " + root.query : ""]
+              .filter(function(part) { return part !== "" }).join("  ·  ")
+            : root.busy ? "Looking…"
+            : root.message !== "" ? root.message
             : root.view === "feed"
               ? Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
                 + (root.errorSources.length > 0 ? "  ·  failed: " + root.errorSources.join(", ") : "")
-              : root.notifications.length + " from the last 7 days"
-          color: root.confirming ? root.fg
-            : root.view === "feed" && root.hostWidget && root.hostWidget.tickProblem !== "" ? Color.urgent : root.faint
+            : root.view === "notifications" ? (root.notificationsLoaded ? root.notifications.length + " from the last 7 days" : " ")
+            : root.sourcesLoaded ? root.sources.length + (root.sources.length === 1 ? " source" : " sources") : " "
+          color: root.confirming || root.catchupOpen ? root.fg
+            : root.busy ? root.faint
+            : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
+            : failed ? Color.urgent : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1

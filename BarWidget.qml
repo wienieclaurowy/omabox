@@ -21,6 +21,8 @@ BarWidget {
   property string tickProblem: ""
 
   property var feedState: Model.parseState("")
+  // false until items.json was read (or found missing) once; the feed's empty state waits for it.
+  property bool stateLoaded: false
   property var overrides: ({})
   property date now: new Date()
   readonly property var items: Model.feedItems(feedState, overrides, now)
@@ -307,8 +309,12 @@ BarWidget {
     onLoaded: {
       root.feedState = Model.parseState(text())
       root.overrides = ({})
+      root.stateLoaded = true
     }
-    onLoadFailed: root.feedState = Model.parseState("")
+    onLoadFailed: {
+      root.feedState = Model.parseState("")
+      root.stateLoaded = true
+    }
   }
 
   Loader {
