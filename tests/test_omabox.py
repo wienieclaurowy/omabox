@@ -693,6 +693,16 @@ class DiscoverTest(unittest.TestCase):
                     "https://mastodon.social/@tidepool"):
             self.assertIsNone(omabox.site_feed(url), url)
 
+    def test_reddit_and_hacker_news_get_the_names_their_sites_use(self):
+        cases = {"https://old.reddit.com/r/harbourtown": "r/harbourtown", "https://reddit.com/u/fernhollow": "u/fernhollow",
+                 "https://news.ycombinator.com/": "Hacker News", "https://news.ycombinator.com/ask": "Ask HN",
+                 "https://news.ycombinator.com/show": "Show HN", "https://hnrss.org/newest": "Hacker News: New",
+                 "https://hnrss.org/frontpage?points=200": "Hacker News: Front Page",
+                 "https://mastodon.example/@tidepool.rss": "Hacker News: Front Page"}
+        for url, name in cases.items():
+            self.pages[omabox.site_feed(url) or url] = HN_FEED
+            self.assertEqual(omabox.discover(url)["title"], name, url)
+
     def test_hnrss_query_passes_through(self):
         self.pages["https://hnrss.org/frontpage?points=200"] = RSS_FEED
         found = omabox.discover("hnrss.org/frontpage?points=200")

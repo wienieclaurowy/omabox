@@ -2018,6 +2018,22 @@ def site_feed(url):
     return None
 
 
+REDDIT_FEED_RE = re.compile(r"^https://www\.reddit\.com/(r|user)/([\w-]+)/\.rss$", re.I)
+HN_PAGE_NAMES = {"frontpage": "Hacker News", "newest": "Hacker News: New", "best": "Hacker News: Best",
+                 "ask": "Ask HN", "show": "Show HN", "jobs": "Hacker News: Jobs"}
+
+
+def site_name(feed_url):
+    """The name a site calls the feeds site_feed builds (r/name, Ask HN); None for others, which keep their title."""
+    reddit = REDDIT_FEED_RE.match(feed_url)
+    if reddit:
+        return f"{'r' if reddit.group(1).lower() == 'r' else 'u'}/{reddit.group(2)}"
+    parts = urllib.parse.urlparse(feed_url)
+    if is_hnrss(feed_url) and not parts.query:
+        return HN_PAGE_NAMES.get(parts.path.strip("/"))
+    return None
+
+
 def is_youtube(url):
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host == "youtube.com" or host.endswith(".youtube.com")
@@ -2154,7 +2170,7 @@ def discover(url):
         feed_url = final_url
         entries = list(parse_feed(data))
         remember_feed([linked, final_url], data)
-    title = feed_title(data)
+    title = site_name(feed_url) or feed_title(data)
     if github:
         title = f"{github.group(2)} releases"
     return {"url": feed_url, "title": title or urllib.parse.urlparse(feed_url).netloc, "latest": latest_entry(entries),
