@@ -1459,12 +1459,16 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
     """images: optional factory entry -> Sanitizer image hook (ImageFetcher at fetch time).
     mentions_base links @names (X sources); cards fetches link previews for short posts (network, fetch time only).
     muted: mute_filter predicate; matching entries are never stored or counted.
-    Returns how many new posts were stored unread.
     article: (link, title) -> fetch_article fields, tried for new unread posts with a web link; failing, the post
-    keeps only its feed html."""
+    keeps only its feed html. Returns how many new posts were stored unread."""
     items = state["items"]
     by_id = {item["id"]: item for item in items}
-    first_fetch = not any(item["source"] == source for item in items)
+    ours = [item for item in items if item["source"] == source]
+    first_fetch = not ours
+    # Ids hash the name a source had when the post was stored, so after a rename posts are found by guid; posts
+    # stored before guids were kept fall back to their link once, which also records their guid.
+    by_guid = {item["guid"]: item for item in ours if "guid" in item}
+    by_link = {item["link"]: item for item in ours if "guid" not in item and item.get("link")}
     entries = sorted(entries, key=lambda e: e["published"], reverse=True)
     if muted:
         # plain sanitize: the image hook would download pictures of posts about to be dropped
@@ -1472,9 +1476,22 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
                    if not muted(entry["title"], sanitize(entry["html"] + (entry.get("quote") or {}).get("html", ""))[1])]
     entries = entries[:KEEP_PER_SOURCE]
     added = 0
+    known = {}
+    for entry in entries:
+        legacy = by_id.get(item_id(source, entry["guid"]))
+        known[entry["guid"]] = by_guid.get(entry["guid"]) or (
+            legacy if legacy is not None and legacy["source"] == source and "guid" not in legacy else None)
+    claimed = {id(item) for item in known.values() if item is not None}
+    for entry in entries:
+        legacy = by_link.get(entry["link"]) if entry["link"] else None
+        if known[entry["guid"]] is None and legacy is not None and id(legacy) not in claimed:
+            known[entry["guid"]] = by_link.pop(entry["link"])
+            claimed.add(id(legacy))
     for position, entry in enumerate(entries):
         iid = item_id(source, entry["guid"])
-        existing = by_id.get(iid)
+        existing = known.get(entry["guid"])
+        if existing is not None:
+            existing.setdefault("guid", entry["guid"])
         if existing is not None and existing.get("media") == MEDIA_VERSION:
             continue
         body, text = sanitize(entry["html"], images(entry) if images else None)
@@ -1500,8 +1517,13 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
                     existing.pop(key, None)
             existing.update(shaped)
             continue
+        # another source can hold this id: one renamed away from this name, stored under it
+        bump = 1
+        while iid in by_id:
+            iid, bump = item_id(source, f"{entry['guid']}\0{bump}"), bump + 1
         item = {
             "id": iid,
+            "guid": entry["guid"],
             "source": source,
             "title": title,
             "link": entry["link"],
@@ -1525,6 +1547,7 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
                 print(f"{source}: no full article for {item['link']}: {article_error(error)}", file=sys.stderr)
         items.append(item)
         by_id[iid] = item
+        known[entry["guid"]] = item
         # only unread posts are news: a first fetch stores the backlog as read
         added += not item["read"]
     ours = sorted((i for i in items if i["source"] == source), key=lambda i: i["published"], reverse=True)

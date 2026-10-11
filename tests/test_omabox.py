@@ -303,6 +303,60 @@ class MergeTest(unittest.TestCase):
         self.assertIn("t1", titles)
         self.assertNotIn("t2", titles)
 
+    def linked(self, *numbers):
+        return [{"guid": f"tag:example.com,2026:{n}", "title": f"Tide report {n}", "link": f"https://example.com/{n}",
+                 "published": f"2026-09-{10 + n:02d}T08:00:00Z", "html": f"<p>Report {n}</p>"} for n in numbers]
+
+    def test_rename_keeps_posts_and_their_ids(self):
+        root = Path(tempfile.mkdtemp())
+        saved = {key: getattr(omabox, key) for key in ("CONFIG_PATH", "STATE_PATH")}
+        self.addCleanup(lambda: [setattr(omabox, key, value) for key, value in saved.items()])
+        omabox.CONFIG_PATH, omabox.STATE_PATH = root / "sources.toml", root / "items.json"
+        omabox.save_sources([{"name": "Tides", "url": "https://example.com/feed", "cadence": "daily"}])
+        state = omabox.load_state()
+        omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-13T08:00:00Z")
+        for item in state["items"]:
+            item.update(read=True, later=True)
+        omabox.save_state(state)
+        before = {item["id"] for item in state["items"]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            omabox.main(["rename", "Tides", "Harbour tides"])
+        state = omabox.load_state()
+        self.assertEqual(omabox.merge(state, "Harbour tides", self.linked(1, 2, 3), "2026-09-14T08:00:00Z"), 1)
+        self.assertEqual(len(state["items"]), 3)
+        self.assertLessEqual(before, {item["id"] for item in state["items"]})
+        self.assertEqual(sum(item.get("later", False) for item in state["items"]), 2)
+
+    def test_posts_renamed_before_guids_were_stored_are_found_by_link(self):
+        state = self.fresh()
+        omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-13T08:00:00Z")
+        for item in state["items"]:
+            del item["guid"]
+            item.update(source="Harbour tides", read=True)
+        self.assertEqual(omabox.merge(state, "Harbour tides", self.linked(1, 2, 3), "2026-09-14T08:00:00Z"), 1)
+        self.assertEqual(len(state["items"]), 3)
+        self.assertTrue(all(item["guid"].startswith("tag:example.com") for item in state["items"]))
+        # an unrenamed old post is found by its id and gets its guid too
+        state = self.fresh()
+        omabox.merge(state, "Tides", self.linked(1), "2026-09-13T08:00:00Z")
+        del state["items"][0]["guid"]
+        state["items"][0]["link"] = ""
+        self.assertEqual(omabox.merge(state, "Tides", self.linked(1), "2026-09-14T08:00:00Z"), 0)
+        self.assertEqual([item["guid"] for item in state["items"]], ["tag:example.com,2026:1"])
+
+    def test_a_new_source_under_a_renamed_one_s_old_name_keeps_apart(self):
+        state = self.fresh()
+        omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-13T08:00:00Z")
+        for item in state["items"]:
+            item.update(source="Old tides", read=True)
+        omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-14T08:00:00Z")
+        self.assertEqual(len(state["items"]), 4)
+        self.assertEqual(len({item["id"] for item in state["items"]}), 4)
+        self.assertEqual({item["source"] for item in state["items"] if item["read"]}, {"Old tides", "Tides"})
+        self.assertEqual(omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-15T08:00:00Z"), 0)
+        self.assertEqual(omabox.merge(state, "Old tides", self.linked(1, 2), "2026-09-15T08:00:00Z"), 0)
+        self.assertEqual(len(state["items"]), 4)
+
     def test_state_round_trip(self):
         path = Path(tempfile.mkdtemp()) / "sub" / "items.json"
         state = self.fresh()
