@@ -127,6 +127,21 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(second["html"], "Only the summary")
         self.assertEqual(third["html"], "<div><p>Kelp</p></div>")
 
+    def test_rss_1_0(self):
+        feed = b"""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"
+  xmlns:dc="http://purl.org/dc/elements/1.1/">
+ <channel rdf:about="https://example.com/"><title>Harbour Notes</title><link>https://example.com/</link></channel>
+ <item rdf:about="https://example.com/ferry"><title>Ferry times</title><link>https://example.com/ferry</link>
+  <description>&lt;p&gt;Summer timetable&lt;/p&gt;</description><dc:date>2026-09-20T07:30:00+02:00</dc:date></item>
+</rdf:RDF>"""
+        (entry,) = omabox.parse_feed(feed)
+        self.assertEqual((entry["guid"], entry["title"], entry["link"]), ("https://example.com/ferry", "Ferry times", "https://example.com/ferry"))
+        self.assertEqual(entry["published"], "2026-09-20T05:30:00Z")
+        self.assertEqual(entry["html"], "<p>Summer timetable</p>")
+        self.assertEqual(omabox.feed_title(feed), "Harbour Notes")
+        self.assertEqual(omabox.feed_home(feed), "https://example.com/")
+
     def test_rss(self):
         (entry,) = omabox.parse_feed(RSS_FEED)
         self.assertEqual(entry["title"], "Post & more")

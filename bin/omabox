@@ -50,6 +50,8 @@ USER_AGENT = f"omabox/{VERSION} (+https://github.com/wienieclaurowy/omabox)"
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 RSS_CONTENT = "{http://purl.org/rss/1.0/modules/content/}encoded"
+RSS1 = "{http://purl.org/rss/1.0/}"
+RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
 MEDIA = "{http://search.yahoo.com/mrss/}"
 MARKUP_TAG_RE = re.compile(r"<[A-Za-z/!]")
 
@@ -901,10 +903,18 @@ def media_group_html(entry):
     return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
 
 
+def rss_namespace(root):
+    """"" for RSS 0.9x/2.0, the RSS 1.0 namespace for an RDF document (whose items sit beside the channel)."""
+    if root.tag == "rss":
+        return ""
+    if root.tag == RDF + "RDF":
+        return RSS1
+    raise NotAFeed(f"not an Atom or RSS document (root <{root.tag}>)")
+
+
 def parse_feed(data):
     root = ET.fromstring(data)
-    if root.tag not in (ATOM + "feed", "rss"):
-        raise NotAFeed(f"not an Atom or RSS document (root <{root.tag}>)")
+    ns = "" if root.tag == ATOM + "feed" else rss_namespace(root)
     if root.tag == ATOM + "feed":
         for entry in root.findall(ATOM + "entry"):
             link = ""
@@ -920,12 +930,12 @@ def parse_feed(data):
                 "html": atom_text(entry, ATOM + "content") or atom_text(entry, ATOM + "summary") or media_group_html(entry),
             }
         return
-    for item in root.iter("item"):
-        link = (item.findtext("link") or "").strip()
-        body = item.findtext(RSS_CONTENT) or item.findtext("description") or ""
+    for item in root.iter(ns + "item"):
+        link = (item.findtext(ns + "link") or "").strip()
+        body = item.findtext(RSS_CONTENT) or item.findtext(ns + "description") or ""
         yield {
-            "guid": (item.findtext("guid") or link).strip(),
-            "title": html.unescape(item.findtext("title") or "").strip(),
+            "guid": (item.findtext("guid") or item.get(RDF + "about") or link).strip(),
+            "title": html.unescape(item.findtext(ns + "title") or "").strip(),
             "link": web_link(link),
             "published": iso_utc(item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date")),
             # tagless descriptions (Bluesky) are plain text whose line breaks matter
@@ -1131,7 +1141,11 @@ def feed_home(data):
             if link.get("rel", "alternate") == "alternate" and link.get("href"):
                 return link.get("href")
         return ""
-    return (root.findtext("channel/link") or "").strip()
+    try:
+        ns = rss_namespace(root)
+    except NotAFeed:
+        return ""
+    return (root.findtext(f"{ns}channel/{ns}link") or "").strip()
 
 
 def icon_ext(data):
@@ -1709,7 +1723,8 @@ def feed_title(data):
     root = ET.fromstring(data)
     if root.tag == ATOM + "feed":
         return html.unescape(root.findtext(ATOM + "title") or "").strip()
-    return html.unescape(root.findtext("channel/title") or "").strip()
+    ns = rss_namespace(root)
+    return html.unescape(root.findtext(f"{ns}channel/{ns}title") or "").strip()
 
 
 def latest_entry(entries):
