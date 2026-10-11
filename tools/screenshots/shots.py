@@ -38,8 +38,10 @@ def patched_shell(work):
     for path in shell.rglob("*"):
         path.chmod(0o755 if path.is_dir() else 0o644)
     edits = {
+        # Popups are opaque in shots: a see-through panel over a bright wallpaper washes out when scaled down.
         "Commons/Color.qml": [("readonly property string currentThemePath: ",
-                               'readonly property string currentThemePath: Quickshell.env("SHOTS_THEME") || ')],
+                               'readonly property string currentThemePath: Quickshell.env("SHOTS_THEME") || '),
+                              ('"popups.background-alpha"', '"popups.shots-background-alpha"')],
         "Ui/KeyboardPanel.qml": [
             ("WlrLayershell.keyboardFocus: open\n    ? (focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)\n"
              "    : WlrKeyboardFocus.None\n", "WlrLayershell.keyboardFocus: WlrKeyboardFocus.None\n"),
@@ -74,20 +76,20 @@ def backdrop(theme):
     return str(pictures[0]) if pictures else ""
 
 
-def crop(empty, full, margin):
-    """The panel plus margin, from the top of the screen so the bar icon shows above it."""
+def panel_box(empty, full):
+    """(half width, bottom) of what the panel changed. It is centred on the screen; anything else that changed only
+    widens one side, so the narrower half wins."""
     a, b = Image.open(empty).convert("RGB"), Image.open(full).convert("RGB")
     box = ImageChops.difference(a, b).convert("L").point([0] * 25 + [255] * 231).getbbox()
     if not box:
-        return b
+        return b.width / 2, b.height
     left, _, right, bottom = box
-    # The panel is centred on the screen; anything else that changed only widens one side, so the narrower half wins.
-    half = min(b.width / 2 - left, right - b.width / 2) + margin
-    return b.crop((int(b.width / 2 - half), 0, int(b.width / 2 + half), min(b.height, bottom + margin)))
+    return min(b.width / 2 - left, right - b.width / 2), bottom
 
 
-def shoot(shell, out, scenario, theme, screen):
-    work = Path(tempfile.mkdtemp(prefix="omabox-shots-", dir=CACHE))
+def shoot(shell, work_root, scenario, theme, screen):
+    """Takes one scenario; returns (full screenshot path, panel half width, panel bottom)."""
+    work = Path(tempfile.mkdtemp(prefix="omabox-shots-", dir=work_root))
     home = work / "home"
     subprocess.run([sys.executable, str(HERE / "demo.py"), str(home)], check=True, capture_output=True)
     for name in ("fontconfig",):
@@ -115,15 +117,12 @@ def shoot(shell, out, scenario, theme, screen):
         rig.terminate()
         rig.wait(timeout=10)
         shutil.rmtree(runtime, ignore_errors=True)
-    shot = crop(work / "empty.png", work / "full.png", margin=int(36 * screen["scale"]))
-    target = out / f"{scenario}-{theme}.png"
-    shot.save(target, optimize=True)
     problems = [line.strip() for line in (work / "qs.log").read_text().splitlines()
                 if "omabox" in line.lower() and any(k in line for k in ("TypeError", "ReferenceError", "Cannot", "error"))]
-    shutil.rmtree(work, ignore_errors=True)
-    print(target, f"({shot.width}x{shot.height})")
     for line in problems[:5]:
         print("  ", line)
+    half, bottom = panel_box(work / "empty.png", work / "full.png")
+    return work / "full.png", half, bottom
 
 
 def main():
@@ -136,9 +135,22 @@ def main():
     monitors = json.loads(subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True, text=True).stdout)
     wanted = os.environ.get("SHOTS_SCREEN")
     screen = next((m for m in monitors if m["name"] == wanted), None) or focused_screen()
-    for spec in sys.argv[2:]:
-        scenario, _, theme = spec.partition(":")
-        shoot(shell, out, scenario, theme or "tokyo-night", screen)
+    # One crop box for every shot of a run, so shots meant to sit side by side come out the same size.
+    margin = int(20 * screen["scale"])
+    with tempfile.TemporaryDirectory(dir=CACHE) as work_root:
+        taken = []
+        for spec in sys.argv[2:]:
+            scenario, _, theme = spec.partition(":")
+            theme = theme or "tokyo-night"
+            taken.append((f"{scenario}-{theme}", *shoot(shell, Path(work_root), scenario, theme, screen)))
+        half = max(t[2] for t in taken) + margin
+        bottom = max(t[3] for t in taken) + margin
+        for name, full, _, _ in taken:
+            image = Image.open(full).convert("RGB")
+            shot = image.crop((int(image.width / 2 - half), 0, int(image.width / 2 + half), min(image.height, bottom)))
+            target = out / f"{name}.png"
+            shot.save(target, optimize=True)
+            print(target, f"({shot.width}x{shot.height})")
 
 
 if __name__ == "__main__":

@@ -121,6 +121,10 @@ NOTES = [
     ("Battery", "Headphones at 15%", "About two hours of listening left.", 190, ""),
     ("Thunderbird", "Invoice 2026-10", "Your hosting invoice is ready. Nothing to pay: it is covered by credit.", 300, ""),
     ("Updates", "System up to date", "42 packages updated. No restart needed.", 520, ""),
+    ("Calendar", "Dentist tomorrow at 9:30", "Remember to leave 20 minutes early: roadworks on the bridge.", 610, ""),
+    ("Signal", "Jonas", "Sent you the photos from the lake.", 700, ""),
+    ("Screenshot", "Screenshot saved", "Copied to the clipboard and saved to Pictures.", 760, ""),
+    ("Timer", "Tea is ready", "Four minutes are up.", 830, ""),
 ]
 for number, (app, summary, body, minutes, glyph) in enumerate(NOTES, 1):
     stamp_ms = int((now - timedelta(minutes=minutes)).timestamp() * 1000)
