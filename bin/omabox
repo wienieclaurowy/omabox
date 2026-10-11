@@ -2078,6 +2078,47 @@ def latest_entry(entries):
     return {"title": entry["title"] or excerpt(sanitize(entry["html"])[1], 80), "published": entry["published"]}
 
 
+DISCOVER_DIR = CACHE_DIR / "discover"
+DISCOVER_SECONDS = 600
+
+
+def discovered_path(url):
+    return DISCOVER_DIR / hashlib.sha1(url.encode()).hexdigest()[:20]
+
+
+def remember_feed(urls, data):
+    """Keeps a feed discover downloaded for a few minutes. Adding from the panel runs discover, then add, which
+    discovers and fetches: three requests in seconds, and Reddit answers the second with 429 Too Many Requests."""
+    private_dir(DISCOVER_DIR)
+    cutoff = time.time() - DISCOVER_SECONDS
+    for old in DISCOVER_DIR.iterdir():
+        with contextlib.suppress(OSError):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    for url in dict.fromkeys(urls):
+        with open_private(discovered_path(url), mode="wb") as f:
+            f.write(data)
+
+
+def remembered_feed(url):
+    path = discovered_path(url)
+    with contextlib.suppress(OSError):
+        if time.time() - path.stat().st_mtime < DISCOVER_SECONDS:
+            return path.read_bytes()
+    return None
+
+
+def discover_download(url, headers=None):
+    data = remembered_feed(url)
+    return (url, data) if data is not None else download(url, headers)
+
+
+def discovered_or_download(url, cached=None):
+    """download_feed for add's first fetch, which reuses the feed discover just downloaded."""
+    data = remembered_feed(url)
+    return (data, {}) if data is not None else download_feed(url, cached)
+
+
 def discover(url):
     """Resolve a page, repo or feed URL to a feed. Returns url, title and the newest entry."""
     url = url.strip()
@@ -2098,19 +2139,21 @@ def discover(url):
         entries = list(parse_feed(data))
         name = x_route(x_feed)[0].rsplit("/", 1)[1]
         return {"url": x_feed, "title": f"@{name} on X", "latest": latest_entry(entries), "count": len(entries)}
-    final_url, data = download(url, YOUTUBE_CONSENT if is_youtube(url) else None)
+    final_url, data = discover_download(url, YOUTUBE_CONSENT if is_youtube(url) else None)
     try:
         entries = list(parse_feed(data))
         feed_url = final_url
+        remember_feed([url, final_url], data)
     except (ET.ParseError, NotAFeed):
         finder = FeedLinkFinder()
         finder.feed(data.decode("utf-8", "replace"))
         if not finder.links:
             raise ValueError("no feed found on that page")
-        feed_url = urllib.parse.urljoin(final_url, finder.links[0])
-        final_url, data = download(feed_url)
+        linked = urllib.parse.urljoin(final_url, finder.links[0])
+        final_url, data = discover_download(linked)
         feed_url = final_url
         entries = list(parse_feed(data))
+        remember_feed([linked, final_url], data)
     title = feed_title(data)
     if github:
         title = f"{github.group(2)} releases"
@@ -2872,7 +2915,7 @@ def cmd_add(args):
     print(f"added {name}: {found['url']}")
     if args.cadence != "paused":
         with rsshub_session(needs_rsshub(source["url"])):
-            result = gather_source(load_state(), source, now_iso())
+            result = gather_source(load_state(), source, now_iso(), get=discovered_or_download)
         with locked():
             state = load_state()
             if any(s["name"] == name and s["url"] == source["url"] for s in load_sources()):

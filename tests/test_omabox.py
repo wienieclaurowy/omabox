@@ -638,9 +638,36 @@ class DiscoverTest(unittest.TestCase):
             return url, self.pages[url]
 
         omabox.download = fake
+        saved = omabox.DISCOVER_DIR
+        omabox.DISCOVER_DIR = Path(tempfile.mkdtemp()) / "discover"
+        self.addCleanup(setattr, omabox, "DISCOVER_DIR", saved)
 
     def tearDown(self):
         omabox.download = self.real
+
+    def test_adding_from_the_panel_asks_the_site_once(self):
+        root = Path(tempfile.mkdtemp())
+        names = ("CONFIG_PATH", "STATE_PATH", "IMAGE_DIR", "ICON_DIR")
+        saved = {name: getattr(omabox, name) for name in names}
+        self.addCleanup(lambda: [setattr(omabox, name, value) for name, value in saved.items()])
+        omabox.CONFIG_PATH, omabox.STATE_PATH = root / "sources.toml", root / "items.json"
+        omabox.IMAGE_DIR, omabox.ICON_DIR = root / "images", root / "icons"
+        feed = "https://www.reddit.com/r/harbourtown/.rss"
+        self.pages[feed] = RSS_FEED
+        conditional = []
+        real_feed = omabox.download_feed
+        omabox.download_feed = lambda url, cached=None: conditional.append(url) or (RSS_FEED, {})
+        self.addCleanup(setattr, omabox, "download_feed", real_feed)
+        found = omabox.discover("https://www.reddit.com/r/harbourtown")
+        with contextlib.redirect_stdout(io.StringIO()):
+            omabox.cmd_add(argparse.Namespace(url=found["url"], name="r/harbourtown", cadence="daily"))
+        self.assertEqual((self.requested, conditional), ([feed], []))
+        self.assertEqual([item["title"] for item in omabox.load_state()["items"]], ["Post & more"])
+        stale = time.time() - omabox.DISCOVER_SECONDS - 5
+        os.utime(omabox.discovered_path(feed), (stale, stale))
+        self.assertIsNone(omabox.remembered_feed(feed))
+        omabox.discover(feed)
+        self.assertEqual(self.requested, [feed, feed])
 
     def test_site_urls_map_to_their_feeds(self):
         cases = {
