@@ -2042,9 +2042,48 @@ def locked(path=None):
             HELD_LOCKS.discard(lock_path)
 
 
+# Reddit allows one anonymous request per clock minute; x-ratelimit-reset says how many seconds are left of it.
+REDDIT_PACE = {"free_at": 0.0}  # time.monotonic() of this process's next free Reddit request
+REDDIT_MINUTE = 60
+
+
+def reddit_host(url):
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host == "reddit.com" or host.endswith(".reddit.com")
+
+
+def note_reddit_limit(headers, refused):
+    try:
+        remaining = float(headers.get("x-ratelimit-remaining"))
+        reset = float(headers.get("x-ratelimit-reset"))
+    except (TypeError, ValueError):
+        remaining, reset = (0, REDDIT_MINUTE) if refused else (1, 0)
+    if remaining < 1:
+        REDDIT_PACE["free_at"] = time.monotonic() + min(max(reset, 0), REDDIT_MINUTE) + 1
+
+
+def paced_open(url, send):
+    """send()'s response. A Reddit request waits for Reddit's next free minute, so a delivery with several
+    subreddits gets them all instead of 429s; a 429 left by another process's request is waited out once."""
+    if not reddit_host(url):
+        return send()
+    for retry in (False, True):
+        time.sleep(max(0.0, REDDIT_PACE["free_at"] - time.monotonic()))
+        try:
+            response = send()
+        except urllib.error.HTTPError as error:
+            note_reddit_limit(error.headers, refused=error.code == 429)
+            if error.code != 429 or retry:
+                raise
+            error.close()
+            continue
+        note_reddit_limit(response.headers, refused=False)
+        return response
+
+
 def download(url, headers=None):
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with paced_open(url, lambda: urllib.request.urlopen(request, timeout=30)) as response:
         return response.geturl(), feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
 
 
@@ -2059,7 +2098,8 @@ def download_feed(url, cached=None, opener=urllib.request.urlopen):
         if cached.get("modified"):
             headers["If-Modified-Since"] = cached["modified"]
     try:
-        with opener(urllib.request.Request(rsshub_keyed(url), headers=headers), timeout=30) as response:
+        request = urllib.request.Request(rsshub_keyed(url), headers=headers)
+        with paced_open(url, lambda: opener(request, timeout=30)) as response:
             data = feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
             reply = response.headers
     except urllib.error.HTTPError as error:
@@ -2849,7 +2889,7 @@ def gather_via_rsshub(snapshot, sources, stamp, gather=gather_source):
 
 def network_error(text):
     """HTTPError is a URLError subclass but keeps its own name, so a feed answering 404 or 500 does not match.
-    429 does: Reddit allows about one anonymous request a minute, so a run with several subreddits hits it."""
+    429 does: Reddit allows one anonymous request a minute, which another process's request may have used."""
     return text.startswith(("URLError:", "TimeoutError:", "ConnectionResetError:", "ConnectionRefusedError:",
                             "HTTPError: HTTP Error 429:"))
 

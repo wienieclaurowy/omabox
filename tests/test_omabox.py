@@ -2139,6 +2139,86 @@ class ConditionalGetTest(unittest.TestCase):
         self.assertTrue(state["errors"]["S"].startswith("URLError:"))
 
 
+class RedditPaceTest(unittest.TestCase):
+    LIMIT = {"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "30"}
+
+    def setUp(self):
+        class Clock:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        self.clock = Clock()
+        for patcher in (mock.patch.object(omabox, "time", self.clock),
+                        mock.patch.dict(omabox.REDDIT_PACE, {"free_at": 0.0})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def opener(self, *answers):
+        """answers: (status, headers) for each request in turn; seen: the clock at each request."""
+        answers, seen, clock = list(answers), [], self.clock
+
+        class Response:
+            def __init__(self, headers):
+                self.headers, self.left = headers, RSS_FEED
+
+            def read(self, amount=-1):
+                chunk, self.left = self.left, b""
+                return chunk
+
+            def geturl(self):
+                return "https://www.reddit.com/r/a/.rss"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def open_(request, timeout):
+            status, headers = answers.pop(0)
+            seen.append(clock.now)
+            if status != 200:
+                raise urllib.error.HTTPError(request.full_url, status, "status", headers, None)
+            return Response(headers)
+
+        return open_, seen
+
+    def test_subreddits_in_one_run_wait_for_reddits_next_minute(self):
+        opener, seen = self.opener((200, self.LIMIT), (200, {**self.LIMIT, "x-ratelimit-reset": "59"}), (200, {}))
+        with mock.patch("urllib.request.urlopen", opener):
+            omabox.download("https://www.reddit.com/r/a/.rss")
+        self.assertEqual(omabox.download_feed("https://old.reddit.com/r/b/.rss", None, opener)[0], RSS_FEED)
+        omabox.download_feed("https://www.reddit.com/r/c/.rss", None, opener)
+        self.assertEqual(seen, [1000.0, 1031.0, 1091.0])
+
+    def test_a_429_from_another_request_is_waited_out_once(self):
+        opener, seen = self.opener((429, {**self.LIMIT, "x-ratelimit-reset": "12"}), (200, self.LIMIT))
+        self.assertEqual(omabox.download_feed("https://www.reddit.com/r/a/.rss", None, opener)[0], RSS_FEED)
+        self.assertEqual(seen, [1000.0, 1013.0])
+        opener, seen = self.opener((429, {}), (429, {}))
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            omabox.download_feed("https://www.reddit.com/r/b/.rss", None, opener)
+        caught.exception.close()
+        self.assertEqual(seen, [1044.0, 1105.0])
+
+    def test_other_sites_are_not_paced(self):
+        opener, seen = self.opener((200, self.LIMIT), (200, self.LIMIT), (404, self.LIMIT))
+        omabox.download_feed("https://a.example/feed", None, opener)
+        omabox.download_feed("https://notreddit.com/r/a/.rss", None, opener)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            omabox.download_feed("https://a.example/feed", None, opener)
+        caught.exception.close()
+        self.assertEqual(seen, [1000.0, 1000.0, 1000.0])
+
+
 class StaleTest(unittest.TestCase):
     NOW = datetime(2026, 9, 27, 8, 0, tzinfo=timezone.utc)
     SOURCE = {"name": "S", "url": "https://a.example/feed", "cadence": "daily", "icon": "*"}
