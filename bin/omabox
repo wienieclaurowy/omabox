@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import html
 import http.client
+import http.server
 import ipaddress
 import json
 import os
@@ -364,7 +365,7 @@ class ImageFetcher:
 
     def video(self, attrs):
         """A <video> as its poster wrapped in a link to the file: the reader draws a play badge on omabox-poster:
-        pictures and plays the link in mpv (omabox play, https only). A plain link when there is no poster to show."""
+        pictures and plays the link in the video player (omabox play, https only). A plain link when there is no poster to show."""
         src = self.absolute(attrs.get("src"))
         if not src:
             return ""
@@ -2035,6 +2036,17 @@ def viewer_argv(paths, start, desktop_file=default_desktop_file):
     return ["xdg-open", paths[start]]
 
 
+def player_argv(urls, start, desktop_file=default_desktop_file):
+    """The default video player's command, then mpv; None without either. mpv gets its own flags so the
+    playlist keeps the post's order."""
+    argv = default_app_argv("video/mp4", urls, start, desktop_file)
+    if argv and Path(argv[0]).name != "mpv":
+        return argv
+    if shutil.which("mpv"):
+        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--", *urls]
+    return None
+
+
 def window_addresses(run=subprocess.run):
     """Hyprland client window addresses, or None outside Hyprland."""
     if not shutil.which("hyprctl") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
@@ -3230,64 +3242,59 @@ def cmd_view(args):
         time.sleep(0.3)
 
 
-def pipe(source, sink):
-    try:
-        while data := source.recv(65536):
-            sink.sendall(data)
-    except OSError:
-        pass
-    finally:
-        with contextlib.suppress(OSError):
-            sink.shutdown(socket.SHUT_WR)
+RELAY_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag")
 
 
-def tunnel(client, connect=connect_public):
-    """One CONNECT request from mpv: the target is dialed by connect_public, which dials only the addresses it
-    checked, so neither a short-TTL DNS answer nor a redirect to another host can reach the LAN."""
-    with client:
-        request = b""
-        while b"\r\n\r\n" not in request:
-            chunk = client.recv(4096)
-            if not chunk or len(request) > 16384:
-                return
-            request += chunk
-        head, _, early = request.partition(b"\r\n\r\n")
-        method, _, target = head.split(b"\r\n", 1)[0].decode("latin-1").partition(" ")
-        host, _, port = target.split(" ", 1)[0].rpartition(":")
-        try:
-            if method != "CONNECT" or not port.isdigit():
-                raise ValueError(f"not a CONNECT request: {method}")
-            upstream = connect((host.strip("[]"), int(port)), timeout=15)
-        except (OSError, ValueError):
-            client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+class VideoRelay(http.server.BaseHTTPRequestHandler):
+    """Serves each video of a post on loopback, fetched through PUBLIC_OPENER: whichever player plays it never
+    dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking."""
+
+    def do_GET(self):
+        self.relay(body=True)
+
+    def do_HEAD(self):
+        self.relay(body=False)
+
+    def relay(self, body):
+        url = self.server.videos.get(self.path)
+        if url is None:
+            self.send_error(404)
             return
-        with upstream:
-            upstream.settimeout(None)
-            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-            if early:
-                upstream.sendall(early)
-            back = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
-            back.start()
-            pipe(client, upstream)
-            back.join()
+        headers = {"User-Agent": USER_AGENT}
+        if self.headers.get("Range"):
+            headers["Range"] = self.headers["Range"]
+        try:
+            response = self.server.opener.open(urllib.request.Request(url, headers=headers, method=self.command),
+                                               timeout=15)
+        except urllib.error.HTTPError as error:
+            error.close()
+            self.send_error(error.code)
+            return
+        except (OSError, ValueError):
+            self.send_error(502)
+            return
+        with response:
+            self.send_response(response.status)
+            for name in RELAY_HEADERS:
+                if response.headers.get(name):
+                    self.send_header(name, response.headers[name])
+            self.end_headers()
+            if body:
+                with contextlib.suppress(OSError):
+                    shutil.copyfileobj(response, self.wfile, 65536)
+
+    def log_message(self, format, *args):
+        pass
 
 
-def start_tunnels(connect=connect_public):
-    """Loopback CONNECT proxy for mpv, alive as long as this process; returns its http://127.0.0.1:port URL."""
-    server = socket.create_server(("127.0.0.1", 0))
-
-    def serve():
-        while True:
-            client, _ = server.accept()
-            threading.Thread(target=tunnel, args=(client, connect), daemon=True).start()
-
-    threading.Thread(target=serve, daemon=True).start()
-    return f"http://127.0.0.1:{server.getsockname()[1]}"
-
-
-def player_argv(urls, start, proxy):
-    # ffmpeg sends every https connection through http_proxy, segments and redirects too; yt-dlp would not, hence --ytdl=no
-    return ["mpv", f"--playlist-start={start}", "--ytdl=no", f"--stream-lavf-o-append=http_proxy={proxy}", "--", *urls]
+def start_relay(urls, opener=PUBLIC_OPENER):
+    """The loopback address of each video, served by a VideoRelay that lives as long as this process."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), VideoRelay)
+    token = secrets.token_urlsafe(16)
+    paths = [f"/{token}/{index}{Path(urllib.parse.urlparse(url).path).suffix}" for index, url in enumerate(urls)]
+    server.videos, server.opener = dict(zip(paths, urls)), opener
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return [f"http://127.0.0.1:{server.server_port}{path}" for path in paths]
 
 
 def focus_window(address, run=subprocess.run):
@@ -3299,7 +3306,7 @@ def focus_window(address, run=subprocess.run):
 
 def hold_focus(address, run=subprocess.run, seconds=1.5, every=0.1):
     """Keeps the window focused for its first moments: it maps while the panel still holds the keyboard, and the
-    closing panel hands focus back to the window that had it before, so mpv would not get q."""
+    closing panel hands focus back to the window that had it before, so the player would not get q."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -3311,39 +3318,45 @@ def hold_focus(address, run=subprocess.run, seconds=1.5, every=0.1):
         time.sleep(every)
 
 
-def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.2, wait_seconds=30, tunnels=start_tunnels,
-             focus=hold_focus):
-    """Plays a post's videos in mpv from the clicked one and returns when mpv quits. Prints "opened" once mpv's
-    window is up: X files take about half a second to start, and the panel stays on screen until then.
-    mpv reaches the network only through the tunnel proxy, so feed-supplied addresses stay off the LAN."""
+def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.2, wait_seconds=30, relay=start_relay,
+             focus=hold_focus, players=player_argv):
+    """Plays a post's videos in the default video player (else mpv) from the clicked one, through the loopback
+    relay, and returns when the player's window closes. Prints "opened" once the window is up: X files take
+    about half a second to start, and the panel stays on screen until then. Prints "no player" without one."""
     urls = args.urls
     if not all(url.startswith("https://") for url in urls):
         sys.exit("refused: videos play from https addresses only")
     start = min(max(args.start, 0), len(urls) - 1)
-    proxy = tunnels()
-    env = {**os.environ, "http_proxy": proxy, "no_proxy": ""}
+    argv = players(relay(urls), start)
+    if argv is None:
+        print("no player", flush=True)
+        sys.exit("no video player: install mpv")
+    # the player reaches only the loopback relay, which a proxy from the environment could not reach
+    env = {key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     before = windows()
     try:
-        player = run(player_argv(urls, start, proxy), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+        player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as error:
-        sys.exit(f"cannot start mpv: {error}")
+        sys.exit(f"cannot start {argv[0]}: {error}")
     deadline = time.monotonic() + wait_seconds
     window = None
     while before is not None:
         window = next(iter((windows() or before) - before), None)
         if window:
             break
-        if player.poll() is not None:
-            sys.exit(f"mpv could not play {urls[start]}")
+        # exit 0 before a window is a single-instance player handing the videos to its running copy
+        if player.poll() not in (None, 0):
+            sys.exit(f"{argv[0]} could not play {urls[start]}")
         if time.monotonic() > deadline:
             player.terminate()
-            sys.exit("mpv opened no window")
+            sys.exit(f"{argv[0]} opened no window")
         time.sleep(poll_every)
     print("opened", flush=True)
     if window:
         focus(window)
     player.wait()
+    while window and window in (windows() or set()):
+        time.sleep(poll_every)
 
 
 def cmd_unsnooze(args):
@@ -3428,7 +3441,8 @@ def cmd_doctor(args):
         line(shutil.which(tool) is not None, f"{tool}: {use}")
     viewer = viewer_argv([str(IMAGE_DIR / "x.png")], 0)[0]
     line(shutil.which(viewer) is not None, f"picture viewer (i): {viewer}")
-    line(shutil.which("mpv") is not None, "video player (i): mpv")
+    player = player_argv(["https://example.com/v.mp4"], 0)
+    line(player is not None, f"video player (i): {player[0] if player else 'none, install mpv'}")
     if any(needs_rsshub(source["url"]) for source in sources):
         engine = container_engine()
         line(engine is not None, f"X sources: {engine or 'needs podman or docker'}")
@@ -3557,7 +3571,7 @@ def main(argv=None):
     view.add_argument("--start", type=int, default=0, help="index of the picture to show first")
     view.add_argument("paths", nargs="+")
     view.set_defaults(func=cmd_view)
-    play = sub.add_parser("play", help="play videos in mpv, return when it quits")
+    play = sub.add_parser("play", help="play videos in the video player, return when it closes")
     play.add_argument("--start", type=int, default=0, help="index of the video to play first")
     play.add_argument("urls", nargs="+")
     play.set_defaults(func=cmd_play)

@@ -455,7 +455,7 @@ Column {
       activeFocusOnPress: false
       textFormat: TextEdit.RichText
       wrapMode: TextEdit.Wrap
-      // Kept while the picture viewer or mpv hides the panel: an emptied body clamps the scroll to the top.
+      // Kept while the picture viewer or video player hides the panel: an emptied body clamps the scroll to the top.
       text: root.item && root.panel && (root.visible || root.panel.viewingMedia)
         ? root.panel.readerCss + Model.renderHtml(root.item.html, root.panel.imageDir, width, root.panel.commentFaces)
         : ""
@@ -466,7 +466,7 @@ Column {
       onTextChanged: Qt.callLater(root.placeMedia)
       onContentSizeChanged: Qt.callLater(root.placeMedia)
       // Clicks are handled here, not by onLinkActivated: most pictures sit inside link cards and video posters inside
-      // links to their files, and a click on either must open the viewer or mpv only, not the link as well.
+      // links to their files, and a click on either must open the viewer or player only, not the link as well.
       TapHandler {
         onTapped: function(eventPoint) {
           var p = eventPoint.position

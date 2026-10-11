@@ -96,9 +96,9 @@ Panel {
       : (cursor < items.length && items[cursor].id === readingId ? items[cursor] : null)
   // A stored full article is what the reader shows; feedVersionId is the post switched back to its feed html.
   property string feedVersionId: ""
-  // Stays set after the viewer or mpv closes, until the next open(): the reader keeps its body (and scroll) meanwhile.
+  // Stays set after the viewer or player closes, until the next open(): the reader keeps its body (and scroll) meanwhile.
   property bool viewingMedia: false
-  // "<post id>:<video index>" while mpv loads that video; the reader shows it on the video's play badge.
+  // "<post id>:<video index>" while the player loads that video; the reader shows it on the video's play badge.
   property string openingVideo: ""
   property string articleLoadingId: ""
   // Replies fetch in their own Process, off the CLI queue (real X request, starts RSSHub: 4-60 s).
@@ -411,7 +411,7 @@ Panel {
     note("Copied " + link)
   }
 
-  // Pictures open in the image viewer, videos play in mpv, from media ({ kind, index }, Model.mediaAt; default: the
+  // Pictures open in the image viewer, videos in the video player, from media ({ kind, index }, Model.mediaAt; default: the
   // one on screen). The panel steps aside meanwhile and comes back as it was (view, post, scroll), not via open(), which resets.
   function openMedia(media) {
     var item = currentItem()
@@ -1130,14 +1130,19 @@ Panel {
     }
   }
 
-  // The panel stays until `omabox play` prints "opened" (mpv's window is up), so the half second X takes to
+  // The panel stays until `omabox play` prints "opened" (the player's window is up), so the half second X takes to
   // start a file shows on the play badge instead of an empty screen.
   Process {
     id: videoPlayer
     property bool shown: false
-    onStarted: shown = false
+    property bool noPlayer: false
+    onStarted: {
+      shown = false
+      noPlayer = false
+    }
     stdout: SplitParser {
       onRead: function(data) {
+        if (data === "no player") videoPlayer.noPlayer = true
         if (data !== "opened") return
         videoPlayer.shown = true
         root.openingVideo = ""
@@ -1147,7 +1152,7 @@ Panel {
     onExited: function(exitCode) {
       root.openingVideo = ""
       if (videoPlayer.shown) root.controller.show()
-      else root.note("The video did not play.")
+      else root.note(videoPlayer.noPlayer ? "No video player found. Install mpv to play videos." : "The video did not play.")
     }
   }
 

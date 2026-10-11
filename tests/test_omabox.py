@@ -13,6 +13,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1869,8 +1870,9 @@ class ViewerTest(unittest.TestCase):
     PATHS = ["/c/a.png", "/c/b.jpg", "/c/c.gif"]
     URLS = ["https://video.twimg.com/a.mp4", "https://video.twimg.com/b.mp4"]
 
-    def play(self, urls, start=0, window_after=1, exits=None):
-        """cmd_play against a fake mpv whose window shows on the window_after-th look; exits: poll() result."""
+    def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None):
+        """cmd_play against a fake player whose window shows after window_after looks and closes after
+        window_gone_after (default: the next look); exits: poll() result."""
         launched, looks = [], []
         self.env = None
 
@@ -1891,30 +1893,83 @@ class ViewerTest(unittest.TestCase):
 
         def windows():
             looks.append(1)
-            return {"0xa", "0xmpv"} if len(looks) > window_after else {"0xa"}
+            shown = window_after < len(looks) <= (window_gone_after or window_after + 1)
+            return {"0xa", "0xplayer"} if shown else {"0xa"}
+
+        def relay(urls):
+            return [f"http://127.0.0.1:9/t/{index}.mp4" for index in range(len(urls))]
+
+        def mpv_only(urls, start):
+            return ["mpv", f"--playlist-start={start}", "--"] + urls
 
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), mock.patch.dict(omabox.os.environ, {"http_proxy": "http://192.0.2.1:3128"}):
             omabox.cmd_play(argparse.Namespace(urls=urls, start=start), run, windows, poll_every=0, wait_seconds=5,
-                            tunnels=lambda: "http://127.0.0.1:9", focus=lambda address: launched.append("focus " + address))
+                            relay=relay, focus=lambda address: launched.append("focus " + address),
+                            players=players or mpv_only)
+        self.looks = len(looks)
         return launched, out.getvalue()
 
-    def test_play_starts_mpv_at_the_clicked_video_through_the_tunnel_and_waits_for_it(self):
+    def test_play_starts_the_player_on_the_relay_at_the_clicked_video_and_waits_for_it(self):
         launched, out = self.play(self.URLS, start=1, window_after=3)
-        self.assertEqual(launched, [["mpv", "--playlist-start=1", "--ytdl=no",
-                                     "--stream-lavf-o-append=http_proxy=http://127.0.0.1:9", "--"] + self.URLS,
-                                    "focus 0xmpv", "waited"])
-        self.assertEqual((self.env["http_proxy"], self.env["no_proxy"]), ("http://127.0.0.1:9", ""))
+        self.assertEqual(launched, [["mpv", "--playlist-start=1", "--", "http://127.0.0.1:9/t/0.mp4",
+                                     "http://127.0.0.1:9/t/1.mp4"], "focus 0xplayer", "waited"])
+        self.assertNotIn("http_proxy", self.env)
         self.assertEqual(out, "opened\n")
 
     def test_play_clamps_start(self):
         launched, _ = self.play(self.URLS, start=9)
         self.assertEqual(launched[0][1], "--playlist-start=1")
 
-    def test_play_fails_when_mpv_quits_before_a_window(self):
+    def test_play_fails_when_the_player_quits_with_an_error_before_a_window(self):
         with self.assertRaises(SystemExit) as caught:
             self.play(self.URLS, window_after=99, exits=2)
         self.assertIn("could not play", str(caught.exception.code))
+
+    def test_play_waits_on_the_window_of_a_single_instance_player(self):
+        launched, out = self.play(self.URLS, window_after=2, exits=0, window_gone_after=6)
+        self.assertEqual(out, "opened\n")
+        self.assertEqual(launched[1:], ["focus 0xplayer", "waited"])
+        self.assertEqual(self.looks, 7)
+
+    def test_play_without_a_player_says_so(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.play(self.URLS, players=lambda urls, start: None)
+        self.assertIn("install mpv", str(caught.exception.code))
+
+    def desktop(self, exec_line):
+        path = Path(tempfile.mkdtemp()) / "app.desktop"
+        path.write_text(f"[Desktop Entry]\nExec={exec_line}\n")
+        return lambda mime: path
+
+    def installed(self, *names):
+        return mock.patch.object(omabox.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}" if name in names else None)
+
+    def test_player_is_the_default_video_app_with_the_clicked_video_first(self):
+        with self.installed("vlc", "mpv"):
+            argv = omabox.player_argv(["u0", "u1", "u2"], 1, self.desktop("vlc --started-from-file %U"))
+        self.assertEqual(argv, ["vlc", "--started-from-file", "u1", "u2", "u0"])
+
+    def test_default_mpv_keeps_the_post_order(self):
+        with self.installed("mpv"):
+            argv = omabox.player_argv(["u0", "u1"], 1, self.desktop("mpv --player-operation-mode=pseudo-gui -- %U"))
+        self.assertEqual(argv, ["mpv", "--playlist-start=1", "--ytdl=no", "--", "u0", "u1"])
+
+    def test_player_falls_back_to_mpv_then_none_when_the_default_app_is_gone(self):
+        with self.installed("mpv"):
+            self.assertEqual(omabox.player_argv(["u0"], 0, self.desktop("celluloid %U"))[0], "mpv")
+        with self.installed("mpv"):
+            self.assertEqual(omabox.player_argv(["u0"], 0, lambda mime: None)[0], "mpv")
+        with self.installed():
+            self.assertIsNone(omabox.player_argv(["u0"], 0, self.desktop("celluloid %U")))
+
+    def test_viewer_skips_a_default_app_that_is_not_installed(self):
+        with self.installed("loupe", "imv"):
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U")), ["loupe"] + self.PATHS)
+        with self.installed("imv"):
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U"))[0], "imv")
+        with self.installed():
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 1, self.desktop("loupe %U")), ["xdg-open", "/c/b.jpg"])
 
     def test_hold_focus_refocuses_mpv_when_the_closing_panel_takes_focus_away(self):
         actives, calls = iter(["0xmpv", "0xterm", "0xmpv"]), []
@@ -1951,56 +2006,62 @@ class ViewerTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.play([url])
 
-    def tunnel(self, request, connect):
-        client, ours = socket.socketpair()
-        worker = threading.Thread(target=omabox.tunnel, args=(client, connect))
-        worker.start()
-        ours.sendall(request)
-        return ours, worker
+    def upstream(self, body):
+        """A local video host that honours Range like a CDN; returns its base URL."""
 
-    def test_tunnel_relays_a_connect_to_the_checked_address(self):
-        far, upstream = socket.socketpair()
-        dialed = []
+        class Host(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/v.mp4":
+                    self.send_error(404)
+                    return
+                first, last, status = 0, len(body) - 1, 200
+                ranged = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+                if ranged:
+                    first, last, status = int(ranged[1]), int(ranged[2] or last), 206
+                self.send_response(status)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(last - first + 1))
+                self.send_header("Set-Cookie", "tracker=1")
+                if ranged:
+                    self.send_header("Content-Range", f"bytes {first}-{last}/{len(body)}")
+                self.end_headers()
+                self.wfile.write(body[first:last + 1])
 
-        def connect(address, timeout):
-            dialed.append(address)
-            return upstream
+            def log_message(self, format, *args):
+                pass
 
-        ours, worker = self.tunnel(b"CONNECT video.twimg.com:443 HTTP/1.1\r\nHost: video.twimg.com:443\r\n\r\nhello", connect)
-        self.assertEqual(ours.recv(100), b"HTTP/1.1 200 Connection established\r\n\r\n")
-        self.assertEqual(far.recv(100), b"hello")
-        far.sendall(b"world")
-        self.assertEqual(ours.recv(100), b"world")
-        ours.close()
-        far.close()
-        worker.join(5)
-        self.assertEqual(dialed, [("video.twimg.com", 443)])
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Host)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
 
-    def test_tunnel_refuses_private_targets_and_plain_requests(self):
-        def refuse(address, timeout):
-            raise OSError("non-public address refused")
+    def fetch(self, url, headers=None):
+        request = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            error.close()
+            return error.code, error.headers, b""
 
-        for request in (b"CONNECT 192.168.1.1:443 HTTP/1.1\r\n\r\n", b"GET http://cdn.example/a.mp4 HTTP/1.1\r\n\r\n"):
-            ours, worker = self.tunnel(request, refuse)
-            self.assertEqual(ours.recv(100), b"HTTP/1.1 403 Forbidden\r\n\r\n")
-            worker.join(5)
-            ours.close()
+    def test_relay_serves_each_video_with_ranges_for_seeking(self):
+        body = bytes(range(256)) * 40
+        base = self.upstream(body)
+        plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        local = omabox.start_relay([base + "/v.mp4", base + "/gone.mp4"], opener=plain)
+        self.assertRegex(local[0], r"^http://127\.0\.0\.1:\d+/[\w-]{20,}/0\.mp4$")
+        status, headers, data = self.fetch(local[0])
+        self.assertEqual((status, headers["Content-Type"], data), (200, "video/mp4", body))
+        self.assertIsNone(headers["Set-Cookie"])
+        status, headers, data = self.fetch(local[0], {"Range": "bytes=100-199"})
+        self.assertEqual((status, headers["Content-Range"], data), (206, f"bytes 100-199/{len(body)}", body[100:200]))
+        self.assertEqual(self.fetch(local[1])[0], 404)
+        self.assertEqual(self.fetch(local[0].rsplit("/", 2)[0] + "/guess/0.mp4")[0], 404)
 
-    def desktop(self, exec_line):
-        path = Path(tempfile.mkdtemp()) / "app.desktop"
-        path.write_text(f"[Desktop Entry]\nExec={exec_line}\n")
-        return lambda mime: path
-
-    def installed(self, *names):
-        return mock.patch.object(omabox.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}" if name in names else None)
-
-    def test_viewer_skips_a_default_app_that_is_not_installed(self):
-        with self.installed("loupe", "imv"):
-            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U")), ["loupe"] + self.PATHS)
-        with self.installed("imv"):
-            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U"))[0], "imv")
-        with self.installed():
-            self.assertEqual(omabox.viewer_argv(self.PATHS, 1, self.desktop("loupe %U")), ["xdg-open", "/c/b.jpg"])
+    def test_relay_refuses_videos_on_the_lan(self):
+        local = omabox.start_relay([self.upstream(b"secret") + "/v.mp4"])
+        self.assertEqual(self.fetch(local[0]), (502, mock.ANY, b""))
 
     def test_multi_file_viewers_get_every_picture_clicked_first(self):
         self.assertEqual(omabox.expand_exec("imv %F", self.PATHS, 1), ["imv", "/c/b.jpg", "/c/c.gif", "/c/a.png"])
