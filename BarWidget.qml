@@ -263,7 +263,7 @@ BarWidget {
 
   Process {
     running: true
-    command: ["mkdir", "-p", root.stateHome + "/omabox"]
+    command: ["mkdir", "-p", "-m", "700", root.stateHome + "/omabox"]
     onExited: root.stateDirReady = true
   }
 
