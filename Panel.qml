@@ -74,8 +74,17 @@ Panel {
   property var cliQueue: []
   // HH:MM of the daily delivery (`omabox delivery`), "" until loaded; -/+ in sources move it, deliveryApply saves.
   property string deliveryTime: ""
-  // From `omabox delivery --json`, refreshed while the panel is open.
+  // From `omabox delivery --json`, refreshed while the panel is open: a fetch is running, and the name of an unreadable
+  // items.json the CLI moved aside (shown until that file is gone).
   property bool fetching: false
+  property string cliRecoveredFile: ""
+  property bool deliveryKnown: false
+  // items.json names the moved-aside file too, so the notice is there from the first frame; the CLI's answer wins
+  // once it came, as it also knows whether that file still exists.
+  readonly property string recoveredFile: deliveryKnown ? cliRecoveredFile
+    : String(feedState.recovered && feedState.recovered.file || "")
+  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")) + "/omabox"
+  readonly property string stateDirLabel: stateDir.indexOf(home + "/") === 0 ? "~" + stateDir.slice(home.length) : stateDir
   property string weeklyDay: "mon"
   property var cliDone: null
   // The welcome card shows on the feed until it is dismissed once; dismissing saves `welcomed` in shell.json.
@@ -715,7 +724,8 @@ Panel {
   function loadDelivery() {
     runCli(["delivery", "--json"], function(code, text) {
       var result = null
-      try { result = JSON.parse(text) } catch (e) {}
+      // The JSON is the last line; a state recovery prints its notice to stderr first, merged in here.
+      try { result = JSON.parse(String(text).trim().split("\n").pop()) } catch (e) {}
       if (code !== 0 || !result || !result.time) return
       if (!deliveryApply.running) root.deliveryTime = result.time
       root.weeklyDay = result.weekly_day || "mon"
@@ -725,6 +735,8 @@ Panel {
 
   function deliveryStatus(result) {
     root.fetching = result.fetching === true
+    root.cliRecoveredFile = String(result.recovered || "")
+    root.deliveryKnown = true
   }
 
   // Half-hour steps, wrapping past midnight; saved once the stepping stops.
@@ -2035,6 +2047,9 @@ Panel {
             : root.busy ? "Looking…"
             : root.message !== "" ? root.message
             : root.fetching ? "Fetching new posts…"
+            : root.view === "feed" && !failed && root.recoveredFile !== ""
+              ? "Omabox could not read its saved posts and started over. The old file is " + root.stateDirLabel + "/"
+                + root.recoveredFile + "."
             : root.view === "feed"
               ? Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
                 + (root.errorSources.length > 0 ? "  ·  failed: " + root.errorSources.join(", ") : "")
@@ -2044,7 +2059,8 @@ Panel {
             : root.busy ? root.faint
             : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
             : root.fetching ? root.faint
-            : failed ? Color.urgent : root.faint
+            : failed ? Color.urgent
+            : root.view === "feed" && root.recoveredFile !== "" ? root.dim : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1
