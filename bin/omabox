@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HOME = Path.home()
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omabox" / "sources.toml"
@@ -1578,9 +1579,9 @@ def clear_read(items, ids=None, now=None):
 
 
 def next_morning(now=None, at="08:00"):
-    now = now or datetime.now().astimezone()
+    now = local_time(now)
     hour, minute = map(int, at.split(":"))
-    morning = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    morning = wall_time(now.date() + timedelta(days=1), hour, minute, now.tzinfo)
     return morning.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -1799,6 +1800,37 @@ def download_feed(url, cached=None, opener=urllib.request.urlopen):
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def local_zone():
+    """The local time zone with its DST rules (TZ, else /etc/localtime), or None when it has no IANA name."""
+    name = os.environ.get("TZ", "").removeprefix(":")
+    if not name:
+        try:
+            name = os.readlink("/etc/localtime").split("zoneinfo/", 1)[1]
+        except (OSError, IndexError):
+            return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def local_time(moment=None):
+    """moment (default now) in the local zone. A fixed UTC offset, what astimezone() gives, is wrong for any other
+    day across a DST change, so delivery times are worked out on zone-aware datetimes."""
+    moment = moment or datetime.now(timezone.utc)
+    if isinstance(moment.tzinfo, ZoneInfo):
+        return moment
+    zone = local_zone()
+    return moment.astimezone(zone) if zone else moment.astimezone()
+
+
+def wall_time(day, hour, minute, zone):
+    """The moment the local clock reads hour:minute on day; zone is a ZoneInfo, else the C library's local rules."""
+    if isinstance(zone, ZoneInfo):
+        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
+    return datetime.fromtimestamp(time.mktime((day.year, day.month, day.day, hour, minute, 0, 0, 0, -1))).astimezone()
 
 
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -3291,21 +3323,30 @@ def delivery_time(state):
         return DEFAULT_DELIVERY
 
 
+def delivery_moment(state, day, zone):
+    hour, minute = map(int, delivery_time(state).split(":"))
+    return wall_time(day, hour, minute, zone)
+
+
 def last_delivery_moment(state, now=None):
     """The most recent delivery time at or before now, in local time."""
-    now = now or datetime.now().astimezone()
-    hour, minute = map(int, delivery_time(state).split(":"))
-    moment = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return moment if moment <= now else moment - timedelta(days=1)
+    now = local_time(now)
+    moment = delivery_moment(state, now.date(), now.tzinfo)
+    return moment if moment <= now else delivery_moment(state, now.date() - timedelta(days=1), now.tzinfo)
+
+
+def next_delivery_moment(state, now=None):
+    now = local_time(now)
+    return delivery_moment(state, last_delivery_moment(state, now).date() + timedelta(days=1), now.tzinfo)
 
 
 def tick_plan(state, now=None):
     """What a tick does now ("deliver", "retry" or None) and the seconds until the next tick is worth running.
     A delivery missed while the machine was off or asleep comes at the next tick, like systemd's Persistent=true;
     a pause holds deliveries until the first delivery time after it ends."""
-    now = now or datetime.now().astimezone()
+    now = local_time(now)
     moment = last_delivery_moment(state, now)
-    wait = (moment + timedelta(days=1) - now).total_seconds()
+    wait = (next_delivery_moment(state, now) - now).total_seconds()
     delivered = state.get("delivered")
     until = state.get("paused_until")
     held = bool(until) and datetime.fromisoformat(until) > moment
@@ -3389,7 +3430,7 @@ def cmd_delivery(args):
             save_state(state)
     at = delivery_time(state)
     day = weekly_day(state)
-    upcoming = (last_delivery_moment(state) + timedelta(days=1)).strftime("%a %H:%M")
+    upcoming = next_delivery_moment(state).strftime("%a %H:%M")
     if args.json:
         print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming, "recovered": recovered_file(state)}))
         return

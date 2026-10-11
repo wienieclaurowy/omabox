@@ -7,11 +7,13 @@ import importlib.util
 import io
 import ipaddress
 import json
+import os
 import re
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -1205,6 +1207,63 @@ class DeliveryTimeTest(unittest.TestCase):
         now = datetime(2026, 9, 26, 23, 30).astimezone()
         morning = datetime.fromisoformat(omabox.next_morning(now, "06:45")).astimezone(now.tzinfo)
         self.assertEqual((morning.day, morning.hour, morning.minute), (27, 6, 45))
+
+
+@contextlib.contextmanager
+def local_clock(utc, zone="Europe/Amsterdam"):
+    """The process runs in zone and omabox's datetime.now() reads utc (an aware moment)."""
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return utc.astimezone(tz) if tz else utc.astimezone().replace(tzinfo=None)
+
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    time.tzset()
+    try:
+        with mock.patch.object(omabox, "datetime", Clock):
+            yield
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+def utc(*fields):
+    return datetime(*fields, tzinfo=timezone.utc)
+
+
+class DaylightSavingTest(unittest.TestCase):
+    def test_night_clocks_go_back(self):
+        # 2026-10-25 03:00 CEST becomes 02:00 CET; 07:30 CET is 06:30 UTC
+        with local_clock(utc(2026, 10, 25, 6, 30)):
+            self.assertEqual(omabox.last_delivery_moment({}), utc(2026, 10, 24, 6, 0))
+            self.assertEqual(omabox.next_delivery_moment({}), utc(2026, 10, 25, 7, 0))
+            self.assertIsNone(omabox.tick_plan({"items": [], "errors": {}, "delivered": "2026-10-24T06:00:30Z"})[0])
+            self.assertEqual(omabox.tick_plan({"items": [], "errors": {}, "delivered": "2026-10-24T05:59:00Z"})[0], "deliver")
+
+    def test_night_clocks_go_forward(self):
+        # 2026-03-29 02:00 CET becomes 03:00 CEST; 07:30 CEST is 05:30 UTC
+        with local_clock(utc(2026, 3, 29, 5, 30)):
+            self.assertEqual(omabox.last_delivery_moment({}), utc(2026, 3, 28, 7, 0))
+            self.assertEqual(omabox.next_delivery_moment({}), utc(2026, 3, 29, 6, 0))
+            self.assertEqual(omabox.tick_plan({"items": [], "errors": {}, "delivered": "2026-03-28T06:30:00Z"})[0], "deliver")
+            self.assertEqual(omabox.tick_plan({"items": [], "errors": {}, "delivered": "2026-03-28T07:00:30Z"}), (None, omabox.TICK_MAX_SECONDS))
+
+    def test_snooze_across_the_change(self):
+        with local_clock(utc(2026, 10, 24, 21, 30)):
+            self.assertEqual(omabox.next_morning(at="06:45"), "2026-10-25T05:45:00Z")
+        with local_clock(utc(2026, 3, 28, 22, 30)):
+            self.assertEqual(omabox.next_morning(at="06:45"), "2026-03-29T04:45:00Z")
+
+    def test_given_zone_is_kept(self):
+        zone = omabox.ZoneInfo("America/New_York")
+        # 2026-11-01 02:00 EDT becomes 01:00 EST
+        now = datetime(2026, 11, 1, 7, 30, tzinfo=zone)
+        self.assertEqual(omabox.last_delivery_moment({}, now), utc(2026, 10, 31, 12, 0))
+        self.assertEqual(omabox.next_delivery_moment({}, now), utc(2026, 11, 1, 13, 0))
 
 
 class XTokenSaveTest(unittest.TestCase):
