@@ -449,8 +449,16 @@ Panel {
     if (item === undefined) item = currentItem()
     var link = item ? Model.webLink(item.link) : ""
     if (!link) return
-    Quickshell.execDetached(["wl-copy", "--", link])
-    note("Copied " + link)
+    copyText(link, "Copied " + link)
+  }
+
+  // The note shows once wl-copy answered, so a missing or failing wl-copy is reported instead of "Copied". wl-copy forks
+  // a child that serves the clipboard; its output goes to /dev/null so that child holds none of this Process's pipes.
+  function copyText(text, done) {
+    if (copyProc.running) return
+    copyProc.done = done
+    copyProc.command = ["bash", "-c", "command -v wl-copy >/dev/null || exit 127; exec wl-copy -- \"$1\" >/dev/null 2>&1", "--", text]
+    copyProc.running = true
   }
 
   // Pictures open in the image viewer, videos in the video player, from media ({ kind, index }, Model.mediaAt; default: the
@@ -678,8 +686,7 @@ Panel {
     var row = index >= 0 && index < noteRows.length ? noteRows[index] : null
     var text = row ? Model.plainBody(row.body) || String(row.summary || "") : ""
     if (!text) return
-    Quickshell.execDetached(["wl-copy", "--", text])
-    note("Copied: “" + (text.length > 60 ? text.slice(0, 60) + "…" : text) + "”")
+    copyText(text, "Copied: “" + (text.length > 60 ? text.slice(0, 60) + "…" : text) + "”")
   }
 
   function toggleHints() {
@@ -1198,6 +1205,19 @@ Panel {
       root.openingVideo = ""
       if (videoPlayer.shown) root.controller.show()
       else root.note(videoPlayer.noPlayer ? "No video player found. Install mpv to play videos." : "The video did not play.")
+    }
+  }
+
+  Process {
+    id: copyProc
+    property string done: ""
+    onExited: function(code) {
+      if (code === 0) {
+        root.note(done)
+        return
+      }
+      root.messageError = true
+      root.message = code === 127 ? "Not copied: wl-copy is not installed." : "Not copied: wl-copy failed."
     }
   }
 
