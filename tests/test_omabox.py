@@ -154,7 +154,7 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(all(entry["guid"] for entry in entries))
         self.assertEqual([entry["guid"] for entry in omabox.parse_feed(feed)], [entry["guid"] for entry in entries])
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
-        self.assertEqual(omabox.merge(state, "Gulls", entries, "2026-09-27T09:00:00Z"), 2)
+        self.assertEqual(omabox.merge(state, "Gulls", entries, "2026-09-27T09:00:00Z"), 1)
         self.assertEqual(len(state["items"]), 2)
 
     def test_sloppy_xml_is_read(self):
@@ -260,7 +260,8 @@ class MergeTest(unittest.TestCase):
     def test_first_fetch_leaves_only_newest_unread(self):
         state = self.fresh()
         added = omabox.merge(state, "Omarchy", list(omabox.parse_feed(ATOM_FEED)), "2026-09-26T08:00:00Z")
-        self.assertEqual(added, 2)
+        # the backlog stored as read is no news: only the unread post counts
+        self.assertEqual((added, len(state["items"])), (1, 2))
         unread = [i["title"] for i in state["items"] if not i["read"]]
         self.assertEqual(unread, ["v4.0.4"])
         self.assertNotIn("img", state["items"][0]["html"])
@@ -997,7 +998,7 @@ class MuteTest(unittest.TestCase):
                    entry("3", "Plain post", "<p>text</p>", "2026-09-26T08:00:00Z"),
                    entry("4", "Older post", "<p>text</p>", "2026-09-25T08:00:00Z")]
         added = omabox.merge(state, "S", entries, "2026-09-27T08:00:00Z", muted=omabox.mute_filter(["giveaway"]))
-        self.assertEqual(added, 2)
+        self.assertEqual(added, 1)
         self.assertEqual({i["title"]: i["read"] for i in state["items"]}, {"Plain post": False, "Older post": True})
 
     def test_invalid_rule_does_not_stop_a_fetch(self):

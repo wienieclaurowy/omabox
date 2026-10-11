@@ -1459,6 +1459,7 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
     """images: optional factory entry -> Sanitizer image hook (ImageFetcher at fetch time).
     mentions_base links @names (X sources); cards fetches link previews for short posts (network, fetch time only).
     muted: mute_filter predicate; matching entries are never stored or counted.
+    Returns how many new posts were stored unread.
     article: (link, title) -> fetch_article fields, tried for new unread posts with a web link; failing, the post
     keeps only its feed html."""
     items = state["items"]
@@ -1524,7 +1525,8 @@ def merge(state, source, entries, fetched_at, images=None, mentions_base="", car
                 print(f"{source}: no full article for {item['link']}: {article_error(error)}", file=sys.stderr)
         items.append(item)
         by_id[iid] = item
-        added += 1
+        # only unread posts are news: a first fetch stores the backlog as read
+        added += not item["read"]
     ours = sorted((i for i in items if i["source"] == source), key=lambda i: i["published"], reverse=True)
     dropped = {i["id"] for position, i in enumerate(ours) if position >= KEEP_PER_SOURCE and not i.get("later")
                and (i["read"] or position >= KEEP_UNREAD_PER_SOURCE)}
@@ -3406,7 +3408,7 @@ def cmd_tick(args):
         refresh_versions(sources)
         state = load_state()
         action, _ = tick_plan(state)
-        # The first delivery stores old posts as read, so "40 new posts" would overstate it.
+        # No notification for the first delivery: it only seeds one unread post per source.
         notify = bool(state.get("delivered"))
         if action == "retry":
             with locked():
