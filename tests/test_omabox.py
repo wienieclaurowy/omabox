@@ -1986,6 +1986,22 @@ class ViewerTest(unittest.TestCase):
             worker.join(5)
             ours.close()
 
+    def desktop(self, exec_line):
+        path = Path(tempfile.mkdtemp()) / "app.desktop"
+        path.write_text(f"[Desktop Entry]\nExec={exec_line}\n")
+        return lambda mime: path
+
+    def installed(self, *names):
+        return mock.patch.object(omabox.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}" if name in names else None)
+
+    def test_viewer_skips_a_default_app_that_is_not_installed(self):
+        with self.installed("loupe", "imv"):
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U")), ["loupe"] + self.PATHS)
+        with self.installed("imv"):
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 0, self.desktop("loupe %U"))[0], "imv")
+        with self.installed():
+            self.assertEqual(omabox.viewer_argv(self.PATHS, 1, self.desktop("loupe %U")), ["xdg-open", "/c/b.jpg"])
+
     def test_multi_file_viewers_get_every_picture_clicked_first(self):
         self.assertEqual(omabox.expand_exec("imv %F", self.PATHS, 1), ["imv", "/c/b.jpg", "/c/c.gif", "/c/a.png"])
         self.assertEqual(omabox.expand_exec("loupe %U", self.PATHS, 0), ["loupe"] + self.PATHS)

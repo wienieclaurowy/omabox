@@ -2016,12 +2016,20 @@ def expand_exec(exec_line, paths, start):
     return argv if placed else argv + [ordered[0]]
 
 
-def viewer_argv(paths, start):
-    """The default image viewer's command, then imv, then xdg-open."""
-    desktop = default_desktop_file(IMAGE_MIME.get(Path(paths[start]).suffix, "image/png"))
+def default_app_argv(mime, paths, start, desktop_file=default_desktop_file):
+    """argv of the default app for mime, or None when none is set or its program is gone: mimeapps.list keeps
+    naming an app after it is uninstalled."""
+    desktop = desktop_file(mime)
     exec_line = desktop_exec(desktop) if desktop else None
-    if exec_line:
-        return expand_exec(exec_line, paths, start)
+    argv = expand_exec(exec_line, paths, start) if exec_line else None
+    return argv if argv and shutil.which(argv[0]) else None
+
+
+def viewer_argv(paths, start, desktop_file=default_desktop_file):
+    """The default image viewer's command, then imv, then xdg-open."""
+    argv = default_app_argv(IMAGE_MIME.get(Path(paths[start]).suffix, "image/png"), paths, start, desktop_file)
+    if argv:
+        return argv
     if shutil.which("imv"):
         return ["imv", "-n", paths[start]] + paths
     return ["xdg-open", paths[start]]
