@@ -587,7 +587,11 @@ Panel {
   function runUpdate(item) {
     if (item === undefined) item = currentItem()
     if (!item || Model.versionTag(item, feedState.installed) !== "newer") return
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", "omarchy-update"])
+    // Version tags are only refreshed at delivery; `fetch --offline` redoes them right after the update so "newer"
+    // clears. The launcher runs this in the terminal and checks the last status, so the update's status goes last.
+    var bin = "'" + root.omaboxBin.replace(/'/g, "'\\''") + "'"
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
+      "omarchy-update; status=$?; " + bin + " fetch --offline >/dev/null 2>&1; (exit $status)"])
     root.close()
   }
 
