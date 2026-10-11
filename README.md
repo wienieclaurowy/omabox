@@ -6,9 +6,12 @@ one panel behind one bar icon.
 
 It shows no likes, views or repost counts anywhere, so you read posts for what they say.
 
-| Feed | Notifications | Sources |
-|---|---|---|
-| ![The feed: one delivery, unread posts marked with a dot](docs/screenshots/feed.png) | ![Notifications kept for 7 days](docs/screenshots/notifications.png) | ![Sources, the delivery time and each source's cadence](docs/screenshots/sources.png) |
+<p align="center">
+  <img src="docs/screenshots/feed.png" alt="The feed: one delivery, unread posts marked with a dot" width="32%">
+  <img src="docs/screenshots/notifications.png" alt="Notifications kept for 7 days" width="32%">
+  <img src="docs/screenshots/sources.png" alt="Sources, the delivery time and each source's cadence" width="32%">
+</p>
+<p align="center"><b>Feed</b> · <b>Notifications</b> · <b>Sources</b></p>
 
 Omabox follows your Omarchy theme; these show Tokyo Night, Catppuccin Latte and Everforest. Every post,
 source and notification in the screenshots is made up.
