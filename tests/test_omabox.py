@@ -308,6 +308,56 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(omabox.load_state(path)["items"], state["items"])
 
 
+class StateFileTest(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(tempfile.mkdtemp()) / "omabox" / "items.json"
+        self.path.parent.mkdir()
+
+    def load(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            state = omabox.load_state(self.path)
+        return state, errors.getvalue()
+
+    def test_unreadable_state_is_moved_aside_not_overwritten(self):
+        for broken in (b'{"items": [{"id": "a"', b"[1, 2]", b'{"items": {"a": 1}}', b'{"items": ["a"]}', b'"text"',
+                       b'{"errors": []}', b"\xff\xfe{"):
+            self.path.write_bytes(broken)
+            state, errors = self.load()
+            self.assertEqual(state["items"], [], broken)
+            self.assertIn("was unreadable; moved to items.json.corrupt-", errors)
+            (aside,) = self.path.parent.glob("items.json.corrupt-*")
+            self.assertEqual(aside.read_bytes(), broken)
+            self.assertEqual(omabox.recovered_file(state, self.path), aside.name)
+            stored = json.loads(self.path.read_text())
+            self.assertEqual(stored["recovered"]["file"], aside.name)
+            self.assertEqual(self.load(), (stored | {"items": [], **{k: {} for k in omabox.SOURCE_STATE_KEYS}}, ""))
+            aside.unlink()
+            omabox.save_state(state, self.path)
+            self.assertNotIn("recovered", json.loads(self.path.read_text()))
+
+    def test_recovery_inside_the_lock_does_not_wait_on_itself(self):
+        self.path.write_bytes(b"{")
+        saved = omabox.STATE_PATH
+        omabox.STATE_PATH = self.path
+        self.addCleanup(setattr, omabox, "STATE_PATH", saved)
+        done = []
+
+        def run():
+            with omabox.locked(), contextlib.redirect_stderr(io.StringIO()):
+                done.append(omabox.load_state())
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(5)
+        self.assertEqual(len(done), 1)
+
+    def test_save_leaves_no_temporary_file(self):
+        omabox.save_state({"items": [{"id": "a", "title": "Zażółć"}]}, self.path)
+        self.assertEqual([p.name for p in self.path.parent.iterdir() if p.name != "items.lock"], ["items.json"])
+        self.assertEqual(omabox.load_state(self.path)["items"][0]["title"], "Zażółć")
+
+
 class CadenceTest(unittest.TestCase):
     # Saturday 2026-09-26 09:00 local
     now = datetime(2026, 9, 26, 9, 0).astimezone()

@@ -1135,27 +1135,72 @@ def item_id(source, guid):
 SOURCE_STATE_KEYS = ("installed", "errors", "fetched", "icons", "profiles", "http", "failing_since")
 
 
-def load_state(path=None):
-    path = path or STATE_PATH
+def read_state(path):
+    """The state stored at path, {} when there is none, None when the file holds no state object."""
     try:
-        with open(path) as f:
-            state = json.load(f)
-    except (OSError, ValueError):
-        state = {}
+        state = json.loads(Path(path).read_bytes())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        return None
+    if not isinstance(state, dict) or not isinstance(state.get("items", []), list):
+        return None
+    if not all(isinstance(item, dict) for item in state.get("items", [])):
+        return None
+    return state if all(isinstance(state.get(key, {}), dict) for key in SOURCE_STATE_KEYS) else None
+
+
+def recover_state(path):
+    """Moves an unreadable state file aside, so it is never silently replaced, and stores an empty state that names
+    the moved file: the panel and `omabox doctor` show it while that file exists."""
+    with locked(path):
+        state = read_state(path)
+        if state is not None:
+            return state
+        moment = datetime.now(timezone.utc)
+        aside = path.with_name(f"{path.name}.corrupt-{moment:%Y%m%dT%H%M%SZ}")
+        os.replace(path, aside)
+        print(f"omabox: {home_relative(path)} was unreadable; moved to {aside.name}, starting empty", file=sys.stderr)
+        state = {"recovered": {"file": aside.name, "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ")}}
+        save_state(state, path)
+        return state
+
+
+def load_state(path=None):
+    path = Path(path or STATE_PATH)
+    state = read_state(path)
+    if state is None:
+        state = recover_state(path)
     state.setdefault("items", [])
     for key in SOURCE_STATE_KEYS:
         state.setdefault(key, {})
     return state
 
 
+def recovered_file(state, path=None):
+    """Name of the unreadable state file moved aside, while it is still there; "" otherwise."""
+    name = (state.get("recovered") or {}).get("file", "")
+    return name if name and (Path(path or STATE_PATH).parent / name).exists() else ""
+
+
 def save_state(state, path=None):
+    """Atomic and durable: the bar watches the file and must only ever see a complete one."""
     path = Path(path or STATE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if state.get("recovered") and not recovered_file(state, path):
+        state.pop("recovered")
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=1, ensure_ascii=False)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 GLYPHS = {
@@ -1684,13 +1729,25 @@ def opml_import(sources, data, cadence=None):
     return sources, added, skipped
 
 
+HELD_LOCKS = set()
+
+
 @contextlib.contextmanager
-def locked():
+def locked(path=None):
     # The panel marks items read while the timer may be fetching; both read-modify-write items.json.
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_PATH.with_suffix(".lock"), "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    # Re-entrant per process: flock on a second open of the file would wait on this process's own lock.
+    lock_path = Path(path or STATE_PATH).with_suffix(".lock")
+    if lock_path in HELD_LOCKS:
         yield
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        HELD_LOCKS.add(lock_path)
+        try:
+            yield
+        finally:
+            HELD_LOCKS.discard(lock_path)
 
 
 def download(url, headers=None):
@@ -3316,7 +3373,7 @@ def cmd_delivery(args):
     day = weekly_day(state)
     upcoming = (last_delivery_moment(state) + timedelta(days=1)).strftime("%a %H:%M")
     if args.json:
-        print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming}))
+        print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming, "recovered": recovered_file(state)}))
         return
     print(f"daily delivery at {at}, weekly sources on {WEEKDAY_NAMES[day]}, next {upcoming}")
 
@@ -3532,6 +3589,10 @@ def cmd_doctor(args):
         sources = []
         line(False, f"sources.toml: {error}")
     state = load_state()
+    recovered = recovered_file(state)
+    if recovered:
+        line(False, f"state: items.json was unreadable and started over; the old file is {recovered} "
+                    "(delete it once checked)")
     line(STATE_PATH.exists(), f"state: {len(state['items'])} posts, {sum(not i.get('read') for i in state['items'])} unread ({STATE_PATH})")
     action, wait = tick_plan(state)
     print(f"  delivery: daily at {delivery_time(state)}, weekly sources on {WEEKDAY_NAMES[weekly_day(state)]}; "
