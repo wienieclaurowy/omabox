@@ -352,6 +352,20 @@ class StateFileTest(unittest.TestCase):
         worker.join(5)
         self.assertEqual(len(done), 1)
 
+    def test_state_is_private(self):
+        self.path.parent.chmod(0o755)
+        self.path.write_text('{"items": []}')
+        self.path.chmod(0o644)
+        omabox.save_state({"items": []}, self.path)
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        fresh = Path(tempfile.mkdtemp()) / "new" / "items.json"
+        with omabox.locked(fresh):
+            omabox.save_state({"items": []}, fresh)
+        self.assertEqual({p.name: p.stat().st_mode & 0o777 for p in fresh.parent.iterdir()},
+                         {"items.json": 0o600, "items.lock": 0o600})
+        self.assertEqual(fresh.parent.stat().st_mode & 0o777, 0o700)
+
     def test_save_leaves_no_temporary_file(self):
         omabox.save_state({"items": [{"id": "a", "title": "Zażółć"}]}, self.path)
         self.assertEqual([p.name for p in self.path.parent.iterdir() if p.name != "items.lock"], ["items.json"])
@@ -1288,6 +1302,23 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertEqual(omabox.archive_notifications(history, archive, now), 1)
         self.assertEqual(sorted(p.name for p in archive.iterdir()), [fresh])
         self.assertEqual(omabox.archive_notifications(history, archive, now), 0)
+
+    def test_archive_is_private(self):
+        root = Path(tempfile.mkdtemp())
+        history, archive = root / "history", root / "archive"
+        history.mkdir()
+        archive.mkdir(mode=0o755)
+        archive.chmod(0o755)
+        now = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+        stamp = int(now.timestamp() * 1000)
+        (history / f"{stamp}-1.json").write_text('{"summary": "hi"}')
+        (archive / f"{stamp}-2.json").write_text("{}")
+        (archive / f"{stamp}-2.json").chmod(0o644)
+        omabox.archive_notifications(history, archive, now)
+        self.assertEqual(archive.stat().st_mode & 0o777, 0o700)
+        self.assertEqual({p.name: p.stat().st_mode & 0o777 for p in archive.iterdir()},
+                         {f"{stamp}-1.json": 0o600, f"{stamp}-2.json": 0o600})
+        self.assertEqual((archive / f"{stamp}-1.json").read_text(), '{"summary": "hi"}')
 
 
 class ShortPostTest(unittest.TestCase):

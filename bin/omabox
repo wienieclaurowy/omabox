@@ -1135,6 +1135,22 @@ def item_id(source, guid):
 SOURCE_STATE_KEYS = ("installed", "errors", "fetched", "icons", "profiles", "http", "failing_since")
 
 
+def private_dir(path):
+    """A directory only the owner can enter; one made with looser modes earlier is tightened."""
+    path = Path(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.stat().st_mode & 0o077:
+        path.chmod(0o700)
+    return path
+
+
+def open_private(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode="w"):
+    """open() that creates the file 0600 and narrows an existing one to 0600."""
+    descriptor = os.open(path, flags, 0o600)
+    os.fchmod(descriptor, 0o600)
+    return os.fdopen(descriptor, mode, encoding=None if "b" in mode else "utf-8")
+
+
 def read_state(path):
     """The state stored at path, {} when there is none, None when the file holds no state object."""
     try:
@@ -1186,11 +1202,11 @@ def recovered_file(state, path=None):
 def save_state(state, path=None):
     """Atomic and durable: the bar watches the file and must only ever see a complete one."""
     path = Path(path or STATE_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     if state.get("recovered") and not recovered_file(state, path):
         state.pop("recovered")
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open_private(tmp) as f:
         json.dump(state, f, indent=1, ensure_ascii=False)
         f.write("\n")
         f.flush()
@@ -1583,18 +1599,21 @@ NOTE_NAME_RE = re.compile(r"^(\d{10,})-\d+\.json$")
 def archive_notifications(history=None, archive=None, now=None):
     """Omarchy keeps its last 10 notifications; this keeps a copy of each for NOTE_KEEP_DAYS days."""
     history, archive = Path(history or NOTE_HISTORY_DIR), Path(archive or NOTE_ARCHIVE_DIR)
-    archive.mkdir(parents=True, exist_ok=True)
+    private_dir(archive)
     copied = 0
     if history.is_dir():
         for path in history.iterdir():
             if NOTE_NAME_RE.match(path.name) and not (archive / path.name).exists():
-                shutil.copyfile(path, archive / path.name)
+                with open(path, "rb") as source, open_private(archive / path.name, mode="wb") as target:
+                    shutil.copyfileobj(source, target)
                 copied += 1
     cutoff_ms = ((now or datetime.now(timezone.utc)) - timedelta(days=NOTE_KEEP_DAYS)).timestamp() * 1000
     for path in archive.iterdir():
         match = NOTE_NAME_RE.match(path.name)
         if match and int(match.group(1)) < cutoff_ms:
             path.unlink(missing_ok=True)
+        elif match and path.stat().st_mode & 0o077:
+            path.chmod(0o600)
     return copied
 
 
@@ -1740,8 +1759,8 @@ def locked(path=None):
     if lock_path in HELD_LOCKS:
         yield
         return
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as handle:
+    private_dir(lock_path.parent)
+    with open_private(lock_path, os.O_WRONLY | os.O_CREAT) as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         HELD_LOCKS.add(lock_path)
         try:
@@ -3324,9 +3343,8 @@ def refresh_versions(sources):
 def cmd_tick(args):
     """One step of the plugin's scheduler: archive notifications, refresh versions, deliver or retry when due,
     then print the seconds until the next tick."""
-    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR") or STATE_PATH.parent) / "omabox-tick.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as handle:
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent)) / "omabox-tick.lock"
+    with open_private(lock_path, os.O_WRONLY | os.O_CREAT) as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
