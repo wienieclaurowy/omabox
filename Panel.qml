@@ -247,6 +247,11 @@ Panel {
   function openReader(index) {
     if (index < 0 || index >= rows.length) return
     closePickers()
+    // A click on a search result: the hidden search field would keep the keys.
+    if (root.mode === "search") {
+      root.mode = "list"
+      focusCatcher()
+    }
     var row = rows[index]
     root.cursor = index
     root.readingId = view === "notifications" ? "note:" + row.file : row.id
