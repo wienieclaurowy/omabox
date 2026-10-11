@@ -2417,8 +2417,20 @@ Panel {
         width: parent.width - Style.space(20)
         spacing: Style.space(3)
 
+        // The source name and the repost's author give way (elide) so the time and tags stay clear of the hover buttons.
         Row {
+          id: metaRow
           spacing: Style.space(8)
+          readonly property real room: rowColumn.width - rowActions.width - Style.space(6)
+          readonly property real fixedWidth: {
+            var width = 0, shown = 0
+            for (var i = 0; i < children.length; i++) {
+              if (!children[i].visible) continue
+              shown++
+              if (children[i] !== sourceLabel && children[i] !== repostLabel) width += children[i].width
+            }
+            return width + spacing * Math.max(0, shown - 1)
+          }
 
           Rectangle {
             visible: row.item !== null && !row.item.read
@@ -2438,9 +2450,13 @@ Panel {
           }
 
           Text {
+            id: sourceLabel
             anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, Math.max(Style.space(40),
+              metaRow.room - metaRow.fixedWidth - (repostLabel.visible ? repostLabel.width : 0)))
             textFormat: Text.PlainText
-            text: row.item ? (row.item.source + "  ·  " + Model.relativeTime(row.item.published, root.now)).toUpperCase() : ""
+            elide: Text.ElideRight
+            text: row.item ? row.item.source.toUpperCase() : ""
             color: row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2449,8 +2465,22 @@ Panel {
           }
 
           Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: row.item ? ("·  " + Model.relativeTime(row.item.published, root.now)).toUpperCase() : ""
+            color: row.metaColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1
+            font.bold: true
+          }
+
+          Text {
+            id: repostLabel
             visible: !!row.item.repost
             anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, Math.max(Style.space(60), (metaRow.room - metaRow.fixedWidth) / 2))
+            elide: Text.ElideRight
             textFormat: Text.PlainText
             text: row.item.repost ? ("·  󰑖 " + row.item.repost.name).toUpperCase() : ""
             color: row.metaColor
@@ -2543,6 +2573,7 @@ Panel {
       }
 
       Row {
+        id: noteActions
         z: 1
         visible: noteHover.hovered
         anchors.top: parent.top
@@ -2587,7 +2618,9 @@ Panel {
         spacing: Style.space(3)
 
         Text {
+          width: Math.min(implicitWidth, parent.width - noteActions.width - Style.space(6))
           textFormat: Text.PlainText
+          elide: Text.ElideRight
           text: [Model.appLabel(note.modelData), Model.relativeTime(new Date(note.modelData.timestamp || 0).toISOString(), root.now)]
             .filter(function(part) { return part !== "" }).join("  ·  ").toUpperCase()
           color: note.dimColor

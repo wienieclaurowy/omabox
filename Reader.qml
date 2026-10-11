@@ -332,10 +332,21 @@ Column {
     }
   }
 
+  // The source name gives way (elides) so the date, reading time and tags stay on the line.
   Row {
+    id: metaRow
     visible: root.profile === null
     topPadding: Style.space(6)
     spacing: Style.space(8)
+    readonly property real fixedWidth: {
+      var width = 0, shown = 0
+      for (var i = 0; i < children.length; i++) {
+        if (!children[i].visible) continue
+        shown++
+        if (children[i] !== sourceLabel) width += children[i].width
+      }
+      return width + spacing * Math.max(0, shown - 1)
+    }
 
     SourceIcon {
       anchors.verticalCenter: parent.verticalCenter
@@ -347,12 +358,26 @@ Column {
     }
 
     Text {
+      id: sourceLabel
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.min(implicitWidth, Math.max(Style.space(40), root.width - metaRow.fixedWidth))
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      text: root.item ? String(root.item.source || "").toUpperCase() : ""
+      color: root.panel ? root.panel.dim : Color.foreground
+      font.family: root.panel ? root.panel.fontFamily : Style.font.family
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+      font.bold: true
+    }
+
+    Text {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: root.item && root.panel
-        ? [root.item.source, Qt.formatDateTime(new Date(root.item.published), root.item.note ? "MMM d yyyy, HH:mm" : "MMM d yyyy"),
+        ? [Qt.formatDateTime(new Date(root.item.published), root.item.note ? "MMM d yyyy, HH:mm" : "MMM d yyyy"),
             Model.readingTime(root.item)]
-          .filter(function(part) { return part !== "" }).join("  ·  ").toUpperCase()
+          .filter(function(part) { return part !== "" }).map(function(part) { return "·  " + part }).join("  ").toUpperCase()
         : ""
       color: root.panel ? root.panel.dim : Color.foreground
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
