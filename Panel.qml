@@ -2109,6 +2109,18 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
               }
 
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                text: "What Omabox does with it: the token stays in a file only you can read, and goes only to one fixed, "
+                  + "checked version of RSSHub that runs on this computer during a delivery and stops right after. That version "
+                  + "can only read X: it has no code that posts, likes, follows, sends messages or deletes anything."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
               Repeater {
                 model: [
                   "1.  In your browser, sign in to x.com with the account Omabox should use.",
@@ -2163,8 +2175,7 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "It stays on this computer, readable by you alone. Signing out of x.com, or \"Log out of all other sessions\" "
-                  + "in X's settings, makes it useless at once."
+                text: "Signing out of x.com, or \"Log out of all other sessions\" in X's settings, makes the token useless at once."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
