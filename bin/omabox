@@ -2023,6 +2023,31 @@ def is_youtube(url):
     return host == "youtube.com" or host.endswith(".youtube.com")
 
 
+def is_hnrss(url):
+    return (urllib.parse.urlparse(url).hostname or "").lower() == "hnrss.org"
+
+
+HN_ARTICLE_RE = re.compile(r'\s*<p>\s*Article URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
+HN_COMMENTS_RE = re.compile(r'\s*<p>\s*Comments URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
+HN_COUNT_RE = re.compile(r"\s*<p>\s*(?:Points|# Comments):\s*\d+\s*</p>", re.I)
+
+
+def hn_entry(entry):
+    """hnrss ends each body with Article URL, Comments URL, Points and # Comments paragraphs. The counts go (Omabox
+    shows none); the URLs become one line: the article's site, then the discussion."""
+    body = entry["html"]
+    article, comments = HN_ARTICLE_RE.search(body), HN_COMMENTS_RE.search(body)
+    body = HN_COUNT_RE.sub("", HN_COMMENTS_RE.sub("", HN_ARTICLE_RE.sub("", body)))
+    body = re.sub(r"(?:\s*<hr\s*/?>)+\s*$", "", body.strip())
+    links = []
+    if article:
+        site = (urllib.parse.urlparse(html.unescape(article.group(1))).hostname or "").removeprefix("www.")
+        links.append(f'<a href="{article.group(1)}">{html.escape(site or "article")}</a>')
+    if comments:
+        links.append(f'<a href="{comments.group(1)}">Discussion on Hacker News</a>')
+    return {**entry, "html": body + (f"<p>{' · '.join(links)}</p>" if links else "")}
+
+
 class FeedLinkFinder(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -2541,6 +2566,8 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         muted = mute_filter(source.get("mute"), lambda problem: print(f"{name}: {problem}, skipped", file=sys.stderr))
         article = extract if source.get("full_text") and not needs_rsshub(url) else None
         entries = list(parse_x_feed(data) if x_feed else parse_feed(data))
+        if is_hnrss(url):
+            entries = [hn_entry(entry) for entry in entries]
         store = prepare_merge(snapshot, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or url),
                               mentions_base=mentions, cards=True, muted=muted, article=article)
         looks = {"icons": {name: snapshot["icons"].get(name, {})}, "profiles": {}}

@@ -85,6 +85,23 @@ BLUESKY_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
 <guid isPermaLink="false">at://did:plc:q4m2x7c9h3k5t8w1b6n0r2pz/app.bsky.feed.post/3kx7fqm2pa1zt</guid></item>
 </channel></rss>"""
 
+HN_FEED = b"""<rss version="2.0"><channel><title>Hacker News: Front Page</title>
+<item><title><![CDATA[Lantern 2.3: window groups you can name]]></title><description><![CDATA[
+<p>Article URL: <a href="https://lantern.example/blog/groups?ref=hn&amp;v=2">https://lantern.example/blog/groups?ref=hn&amp;v=2</a></p>
+<p>Comments URL: <a href="https://news.ycombinator.com/item?id=4100">https://news.ycombinator.com/item?id=4100</a></p>
+<p>Points: 25</p>
+<p># Comments: 11</p>
+]]></description><pubDate>Sat, 26 Sep 2026 07:00:00 +0000</pubDate><link>https://lantern.example/blog/groups?ref=hn&amp;v=2</link>
+<guid isPermaLink="false">https://news.ycombinator.com/item?id=4100</guid></item>
+<item><title><![CDATA[Ask HN: What do you read once a day?]]></title><description><![CDATA[
+<p>What do you read once a day?</p>
+<hr><p>Comments URL: <a href="https://news.ycombinator.com/item?id=4101">https://news.ycombinator.com/item?id=4101</a></p>
+<p>Points: 3</p>
+<p># Comments: 0</p>
+]]></description><pubDate>Sat, 26 Sep 2026 06:00:00 +0000</pubDate><link>https://news.ycombinator.com/item?id=4101</link>
+<guid isPermaLink="false">https://news.ycombinator.com/item?id=4101</guid></item>
+</channel></rss>"""
+
 
 class SanitizeTest(unittest.TestCase):
     def test_drops_images_scripts_and_unsafe_links(self):
@@ -232,6 +249,24 @@ class ParseTest(unittest.TestCase):
         hearts = BLUESKY_FEED.replace(b"the bread stall", b"&lt;3 the bread stall")
         self.assertIn("<3 the bread stall is open!<br><br>It closes", next(omabox.parse_feed(hearts))["html"])
         self.assertEqual(next(omabox.parse_feed(RSS_FEED))["html"].count("<br>"), 0)
+
+    def test_hacker_news_posts_show_no_counts_and_one_link_line(self):
+        gathered = omabox.gather_source(omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json"),
+                                        {"name": "Hacker News", "url": "https://hnrss.org/frontpage"},
+                                        "2026-09-27T08:00:00Z", get=lambda url, cached: (HN_FEED, {}))
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gathered.store(state)
+        ask, link = sorted(state["items"], key=lambda item: item["title"])
+        self.assertEqual(link["html"], '<p><a href="https://lantern.example/blog/groups?ref=hn&amp;v=2">lantern.example</a>'
+                                       ' · <a href="https://news.ycombinator.com/item?id=4100">Discussion on Hacker News</a></p>')
+        self.assertEqual(link["excerpt"], "lantern.example · Discussion on Hacker News")
+        self.assertNotIn("Points", ask["html"])
+        self.assertNotIn("Comments:", ask["html"])
+        self.assertTrue(ask["html"].startswith("<p>What do you read once a day?</p>"))
+        self.assertTrue(ask["html"].endswith('<p><a href="https://news.ycombinator.com/item?id=4101">Discussion on Hacker News</a></p>'))
+        mastodon = {"name": "Tidepool", "url": "https://mastodon.example/@tidepool.rss"}
+        self.assertFalse(omabox.is_hnrss(mastodon["url"]))
 
     def test_version_of(self):
         self.assertEqual(omabox.version_of("v4.0.4"), "4.0.4")
