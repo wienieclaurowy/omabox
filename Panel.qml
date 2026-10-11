@@ -137,6 +137,16 @@ Panel {
   }
   readonly property var currentSource: view === "sources" && cursor < sources.length ? sources[cursor] : null
   readonly property var muteRules: currentSource && currentSource.mute ? currentSource.mute : []
+  // Lists and the reader take what the screen leaves after the panel's own chrome; the Style caps keep their usual
+  // size on taller screens. `panel` is the KeyboardPanel below, whose availableCardHeight is the screen minus bar and gaps.
+  readonly property real bodyMaxHeight: panel.availableCardHeight > 0 ? panel.availableCardHeight - panel.verticalContentInset : 1e6
+  // What the body shows under the lists.
+  readonly property real tailHeight: [listSeparator, statusLine, confirmRow, hintsFlow]
+    .reduce(function(sum, item) { return sum + (item.visible ? item.height + body.spacing : 0) }, 0)
+
+  function listHeight(list) {
+    return Math.min(Style.space(560), list.contentHeight, Math.max(Style.space(120), bodyMaxHeight - list.y - tailHeight))
+  }
 
   onItemsChanged: keepPlace(feedList, items, "id")
   onReadingIndexChanged: {
@@ -1557,6 +1567,7 @@ Panel {
           id: reader
           visible: root.reading
           width: parent.width
+          maxHeight: root.bodyMaxHeight - reader.y - root.tailHeight - (messageLine.visible ? messageLine.height + parent.spacing : 0)
           panel: root
           item: root.readingItem
         }
@@ -1886,6 +1897,7 @@ Panel {
         }
 
         Text {
+          id: messageLine
           visible: root.busy || root.message !== ""
           width: parent.width
           textFormat: Text.PlainText
@@ -1915,7 +1927,7 @@ Panel {
           id: feedList
           visible: root.view === "feed" && !root.reading && count > 0
           width: parent.width
-          height: visible ? Math.min(Style.space(560), contentHeight) : 0
+          height: visible ? root.listHeight(feedList) : 0
           clip: true
           spacing: Style.space(2)
           boundsBehavior: Flickable.StopAtBounds
@@ -1927,7 +1939,7 @@ Panel {
           id: notificationList
           visible: root.view === "notifications" && !root.reading && count > 0
           width: parent.width
-          height: visible ? Math.min(Style.space(560), contentHeight) : 0
+          height: visible ? root.listHeight(notificationList) : 0
           clip: true
           spacing: Style.space(2)
           boundsBehavior: Flickable.StopAtBounds
@@ -1939,7 +1951,7 @@ Panel {
           id: sourceList
           visible: root.view === "sources" && count > 0
           width: parent.width
-          height: visible ? Math.min(Style.space(560), contentHeight) : 0
+          height: visible ? root.listHeight(sourceList) : 0
           clip: true
           spacing: Style.space(2)
           boundsBehavior: Flickable.StopAtBounds
@@ -1948,11 +1960,13 @@ Panel {
         }
 
         PanelSeparator {
+          id: listSeparator
           width: parent.width
           foreground: root.fg
         }
 
         Text {
+          id: statusLine
           visible: (root.view !== "sources" || root.mode === "confirm") && !root.reading
           width: parent.width
           textFormat: Text.PlainText
@@ -1970,6 +1984,7 @@ Panel {
         }
 
         Row {
+          id: confirmRow
           visible: (root.view === "sources" && root.mode === "confirm") || root.mode === "confirm-clear"
           spacing: Style.space(6)
 
@@ -1991,6 +2006,7 @@ Panel {
         }
 
         Flow {
+          id: hintsFlow
           visible: root.hintsVisible || root.confirming
           width: parent.width
           spacing: Style.space(12)

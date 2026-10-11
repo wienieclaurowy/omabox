@@ -11,6 +11,8 @@ Column {
   property var panel: null
   property var item: null
   property alias flick: flick
+  // Height the panel can give the whole reader, header included.
+  property real maxHeight: 1e6
 
   readonly property string tag: item && panel ? Model.versionTag(item, panel.feedState.installed) : ""
   // X posts: author header like the original (avatar, name, @handle) instead of the source meta line.
@@ -437,7 +439,7 @@ Column {
   Flickable {
     id: flick
     width: parent.width
-    height: Math.min(Style.space(620), contentHeight)
+    height: Math.min(Style.space(620), contentHeight, Math.max(Style.space(120), root.maxHeight - flick.y))
     contentWidth: width
     contentHeight: body.implicitHeight + Style.space(28)
     clip: true
