@@ -1812,9 +1812,11 @@ class ConditionalGetTest(unittest.TestCase):
         class Response:
             def __init__(self):
                 self.headers = headers or {}
+                self.left = body
 
-            def read(self):
-                return body
+            def read(self, amount=-1):
+                chunk, self.left = self.left, b""
+                return chunk
 
             def __enter__(self):
                 return self
@@ -1852,6 +1854,20 @@ class ConditionalGetTest(unittest.TestCase):
         omabox.download_feed("https://a.example/feed", {**self.CACHED, "media": omabox.MEDIA_VERSION - 1}, opener)
         self.assertIsNone(seen[0].get_header("If-none-match"))
         self.assertIsNone(seen[0].get_header("If-modified-since"))
+
+    def test_downloads_are_capped_in_size_and_time(self):
+        class Trickle:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, amount):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        self.assertEqual(omabox.read_capped(Trickle([b"ab", b"cd"]), 4, 10), b"abcd")
+        with self.assertRaisesRegex(ValueError, "too large"):
+            omabox.read_capped(Trickle([b"ab", b"cde"]), 4, 10)
+        with self.assertRaises(TimeoutError):
+            omabox.read_capped(Trickle([b"ab", b"cd"]), 10, -1)
 
     def test_other_http_errors_still_raise(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:

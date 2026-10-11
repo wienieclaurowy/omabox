@@ -306,17 +306,36 @@ class PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
 PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandler, PublicHTTPSHandler)
 
 
-def download_public(url, limit):
-    """Fetches driven by feed content (images, favicons, article pages): public http(s) hosts only, size-capped.
-    Returns the URL after redirects, the Content-Type and the body."""
+DOWNLOAD_SECONDS = 30
+FEED_SECONDS = 60
+MAX_FEED_BYTES = 20 * 1024 * 1024
+
+
+def read_capped(response, limit, seconds):
+    """The body, ValueError past limit bytes, TimeoutError after seconds. Socket timeouts count per read only, and
+    read1 returns what one socket read brings, so a server trickling bytes cannot hold a download for long."""
+    deadline = time.monotonic() + seconds
+    read = getattr(response, "read1", None) or response.read
+    chunks, size = [], 0
+    while chunk := read(65536):
+        size += len(chunk)
+        if size > limit:
+            raise ValueError("too large")
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"download took longer than {seconds}s")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def download_public(url, limit, seconds=DOWNLOAD_SECONDS):
+    """Fetches driven by feed content (images, favicons, article pages): public http(s) hosts only, size-capped and
+    time-capped. Returns the URL after redirects, the Content-Type and the body."""
     if not url.startswith(("https://", "http://")) or not public_host(url):
         raise ValueError(f"non-public address refused: {url}")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with PUBLIC_OPENER.open(request, timeout=15) as response:
-        data = response.read(limit + 1)
+        data = read_capped(response, limit, seconds)
         final_url, content_type = response.geturl(), response.headers.get("Content-Type", "")
-    if len(data) > limit:
-        raise ValueError("too large")
     return final_url, content_type, data
 
 
@@ -1830,7 +1849,7 @@ def locked(path=None):
 def download(url, headers=None):
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(request, timeout=30) as response:
-        return response.geturl(), feed_body(response.read(), response.headers)
+        return response.geturl(), feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
 
 
 def download_feed(url, cached=None, opener=urllib.request.urlopen):
@@ -1845,7 +1864,8 @@ def download_feed(url, cached=None, opener=urllib.request.urlopen):
             headers["If-Modified-Since"] = cached["modified"]
     try:
         with opener(urllib.request.Request(rsshub_keyed(url), headers=headers), timeout=30) as response:
-            data, reply = feed_body(response.read(), response.headers), response.headers
+            data = feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
+            reply = response.headers
     except urllib.error.HTTPError as error:
         if error.code == 304:
             error.close()
