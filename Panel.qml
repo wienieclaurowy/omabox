@@ -90,10 +90,16 @@ Panel {
   readonly property var list: view === "feed" ? feedList : view === "notifications" ? notificationList : sourceList
   // The reader shows feed posts and, as note: items, notifications (Model.noteAsItem).
   readonly property bool reading: readingId !== "" && (view === "feed" || view === "notifications")
-  readonly property var readingPost: !reading ? null
-    : view === "notifications"
-      ? (cursor < noteRows.length && "note:" + noteRows[cursor].file === readingId ? Model.noteAsItem(noteRows[cursor]) : null)
-      : (cursor < items.length && items[cursor].id === readingId ? items[cursor] : null)
+  // Found by id, not cursor: deliveries, snoozes waking and filters move or drop rows under the open post.
+  readonly property int readingIndex: {
+    if (!reading) return -1
+    var list = view === "notifications" ? noteRows : items
+    for (var i = 0; i < list.length; i++)
+      if ((view === "notifications" ? "note:" + list[i].file : list[i].id) === readingId) return i
+    return -1
+  }
+  readonly property var readingPost: readingIndex < 0 ? null
+    : view === "notifications" ? Model.noteAsItem(noteRows[readingIndex]) : items[readingIndex]
   // A stored full article is what the reader shows; feedVersionId is the post switched back to its feed html.
   property string feedVersionId: ""
   // Stays set after the viewer or player closes, until the next open(): the reader keeps its body (and scroll) meanwhile.
@@ -133,6 +139,10 @@ Panel {
   readonly property var muteRules: currentSource && currentSource.mute ? currentSource.mute : []
 
   onItemsChanged: keepPlace(feedList, items, "id")
+  onReadingIndexChanged: {
+    if (readingIndex >= 0) root.cursor = readingIndex
+    else if (reading) Qt.callLater(closeGoneReader)
+  }
   onNoteRowsChanged: keepPlace(notificationList, noteRows, "file")
 
   // A new JS array as model resets a ListView to its top, and the rows change on every read mark, snooze and file
@@ -277,6 +287,13 @@ Panel {
     closeSnooze()
     root.readingId = ""
     Qt.callLater(function() { root.list.positionViewAtIndex(root.cursor, ListView.Contain) })
+  }
+
+  // The open post left the list (read later off inside that filter, pruned): back to the list at the same place.
+  function closeGoneReader() {
+    if (!reading || readingIndex >= 0) return
+    root.cursor = Math.max(0, Math.min(root.cursor, rows.length - 1))
+    closeReader()
   }
 
   function stepReader(delta) {
