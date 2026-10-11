@@ -903,6 +903,14 @@ def media_group_html(entry):
     return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
 
 
+def with_guid(entry):
+    """Entries with neither guid nor link get one from what they say, so each keeps its own item id."""
+    if not entry["guid"]:
+        content = "\0".join((entry["title"], entry["published"], entry["html"]))
+        entry["guid"] = "sha1:" + hashlib.sha1(content.encode()).hexdigest()
+    return entry
+
+
 def rss_namespace(root):
     """"" for RSS 0.9x/2.0, the RSS 1.0 namespace for an RDF document (whose items sit beside the channel)."""
     if root.tag == "rss":
@@ -917,30 +925,32 @@ def parse_feed(data):
     ns = "" if root.tag == ATOM + "feed" else rss_namespace(root)
     if root.tag == ATOM + "feed":
         for entry in root.findall(ATOM + "entry"):
+            # not stripped: stored item ids hash the id as the feed spells it
+            guid = atom_text(entry, ATOM + "id")
             link = ""
             for candidate in entry.findall(ATOM + "link"):
                 if candidate.get("rel", "alternate") == "alternate":
                     link = candidate.get("href", "")
                     break
-            yield {
-                "guid": atom_text(entry, ATOM + "id") or link,
+            yield with_guid({
+                "guid": guid if guid.strip() else link,
                 "title": html.unescape(atom_text(entry, ATOM + "title")).strip(),
                 "link": web_link(link),
                 "published": iso_utc(atom_text(entry, ATOM + "published") or atom_text(entry, ATOM + "updated")),
                 "html": atom_text(entry, ATOM + "content") or atom_text(entry, ATOM + "summary") or media_group_html(entry),
-            }
+            })
         return
     for item in root.iter(ns + "item"):
         link = (item.findtext(ns + "link") or "").strip()
         body = item.findtext(RSS_CONTENT) or item.findtext(ns + "description") or ""
-        yield {
+        yield with_guid({
             "guid": (item.findtext("guid") or item.get(RDF + "about") or link).strip(),
             "title": html.unescape(item.findtext(ns + "title") or "").strip(),
             "link": web_link(link),
             "published": iso_utc(item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date")),
             # tagless descriptions (Bluesky) are plain text whose line breaks matter
             "html": body if MARKUP_TAG_RE.search(body) else body.strip().replace("\n", "<br>"),
-        }
+        })
 
 
 X_REPOST_HEAD_RE = re.compile(r"^RT\s+([^<]{1,50})<br>")
@@ -1021,7 +1031,7 @@ def parse_x_feed(data):
                      "avatar": html.unescape(face.group(1)) if face else "",
                      "published": status_time(ref[1]) if ref else "",
                      "html": inner}
-        yield {
+        yield with_guid({
             "guid": str(entry.get("id") or own).strip(),
             "title": title,
             "link": web_link(link),
@@ -1030,7 +1040,7 @@ def parse_x_feed(data):
             "repost": repost,
             "quote": quote,
             "reply_to": reply_to,
-        }
+        })
 
 
 VERSION_RE = re.compile(r"v?(\d+(?:\.\d+)+)")

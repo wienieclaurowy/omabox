@@ -142,6 +142,18 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(omabox.feed_title(feed), "Harbour Notes")
         self.assertEqual(omabox.feed_home(feed), "https://example.com/")
 
+    def test_entries_without_guid_or_link_keep_apart(self):
+        feed = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Gull count</title><description>Twelve</description><pubDate>Sat, 26 Sep 2026 08:00:00 +0000</pubDate></item>
+<item><title>Gull count</title><description>Fourteen</description><pubDate>Sun, 27 Sep 2026 08:00:00 +0000</pubDate></item>
+</channel></rss>"""
+        entries = list(omabox.parse_feed(feed))
+        self.assertTrue(all(entry["guid"] for entry in entries))
+        self.assertEqual([entry["guid"] for entry in omabox.parse_feed(feed)], [entry["guid"] for entry in entries])
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        self.assertEqual(omabox.merge(state, "Gulls", entries, "2026-09-27T09:00:00Z"), 2)
+        self.assertEqual(len(state["items"]), 2)
+
     def test_rss(self):
         (entry,) = omabox.parse_feed(RSS_FEED)
         self.assertEqual(entry["title"], "Post & more")
