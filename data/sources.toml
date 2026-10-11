@@ -1,0 +1,17 @@
+# Feeds Omabox delivers. Any Atom or RSS URL works; `omabox add <url>` also takes a web page, a GitHub repo,
+# a YouTube channel (@handle, /channel/, /c/, /user/), a Bluesky, Mastodon or X profile, a subreddit or Reddit
+# user (reddit.com/r/name, /u/name), news.ycombinator.com (front page, /newest, /best, /ask, /show) or any hnrss.org feed.
+# cadence: daily (every morning), weekly (Monday morning) or paused.
+# version_command: shell command printing the installed version; release titles are compared with it.
+# Written by omabox add/remove/rename/cadence/opml import and the panel's sources view: comments here are not kept.
+
+[[source]]
+name = "Omarchy"
+url = "https://github.com/omacom/omarchy/releases.atom"
+cadence = "daily"
+version_command = "omarchy-version"
+
+[[source]]
+name = "DHH"
+url = "https://world.hey.com/dhh/feed.atom"
+cadence = "daily"

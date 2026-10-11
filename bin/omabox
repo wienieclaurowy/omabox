@@ -1,0 +1,3520 @@
+#!/usr/bin/env python3
+"""Omabox: a quiet, once-a-day feed inbox for the Omarchy bar."""
+
+import argparse
+import concurrent.futures
+import contextlib
+import fcntl
+import hashlib
+import html
+import http.client
+import ipaddress
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+import sys
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime, parsedate_to_datetime
+from html.parser import HTMLParser
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omabox" / "sources.toml"
+STATE_PATH = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "omabox" / "items.json"
+KEEP_PER_SOURCE = 30
+# ceiling so a never-read chatty source cannot grow the state file forever; read-later posts have none
+KEEP_UNREAD_PER_SOURCE = 200
+UNREAD_ON_FIRST_FETCH = 1
+EXCERPT_CHARS = 220
+try:
+    VERSION = json.loads((Path(__file__).resolve().parent.parent / "manifest.json").read_text())["version"]
+except (OSError, ValueError, KeyError):
+    VERSION = "unknown"
+USER_AGENT = f"omabox/{VERSION} (+https://github.com/wienieclaurowy/omabox)"
+
+ATOM = "{http://www.w3.org/2005/Atom}"
+RSS_CONTENT = "{http://purl.org/rss/1.0/modules/content/}encoded"
+MEDIA = "{http://search.yahoo.com/mrss/}"
+MARKUP_TAG_RE = re.compile(r"<[A-Za-z/!]")
+
+BLOCK_TAGS = {"p", "div", "ul", "ol", "li", "blockquote", "pre", "br"}
+INLINE_TAGS = {"b", "strong", "i", "em", "code", "a"}
+HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+SKIP_CONTENT_TAGS = {"script", "style", "iframe", "svg", "noscript"}
+VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source", "wbr"}
+
+
+class Sanitizer(HTMLParser):
+    # Output feeds a QML Text in RichText mode, which fetches <img> sources itself: remote images never pass,
+    # only what `images` returns (local cache refs). Links kept only for http(s), headings flattened to bold.
+    # <video> needs the hook's video method (ImageFetcher); without it a video is dropped.
+    def __init__(self, images=None):
+        super().__init__(convert_charrefs=True)
+        self.images = images
+        self.out = []
+        self.text = []
+        self.skip_depth = 0
+        self.open_tags = []
+        self.video = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in SKIP_CONTENT_TAGS:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if self.video is not None:
+            # fallback text and tracks inside <video> are dropped; a <source> supplies the file when src is missing
+            if tag == "source" and not self.video.get("src"):
+                self.video["src"] = dict(attrs).get("src") or ""
+            return
+        if tag == "video":
+            self.video = dict(attrs)
+        elif tag in HEADING_TAGS:
+            self.out.append('<p class="h">' if tag in ("h1", "h2") else '<p class="sub">')
+            self.open_tags.append(tag)
+        elif tag == "img":
+            if self.images:
+                self.out.append(self.images(dict(attrs)))
+        elif tag == "br":
+            self.out.append("<br>")
+            self.text.append("\n")
+        elif tag == "a":
+            href = dict(attrs).get("href") or ""
+            if href.startswith(("https://", "http://")):
+                self.out.append(f'<a href="{html.escape(href, quote=True)}">')
+                self.open_tags.append("a")
+            else:
+                self.open_tags.append("a-dropped")
+        elif tag in BLOCK_TAGS or tag in INLINE_TAGS:
+            self.out.append(f"<{tag}>")
+            self.open_tags.append(tag)
+        if tag in BLOCK_TAGS:
+            self.text.append(" ")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag in SKIP_CONTENT_TAGS:
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if self.skip_depth or tag in VOID_TAGS:
+            return
+        if self.video is not None:
+            if tag == "video":
+                self.end_video()
+            return
+        want = "a-dropped" if tag == "a" and "a-dropped" in self.open_tags[-1:] else tag
+        if want not in self.open_tags:
+            return
+        while self.open_tags:
+            top = self.open_tags.pop()
+            self.out.append(self.closing(top))
+            if top == want:
+                break
+        if tag in BLOCK_TAGS or tag in HEADING_TAGS:
+            self.text.append(" ")
+
+    def end_video(self):
+        video, self.video = self.video, None
+        hook = getattr(self.images, "video", None)
+        if hook:
+            self.out.append(hook(video))
+
+    @staticmethod
+    def closing(tag):
+        if tag in HEADING_TAGS:
+            return "</p>"
+        if tag == "a-dropped":
+            return ""
+        return f"</{tag}>"
+
+    def handle_data(self, data):
+        if self.skip_depth or self.video is not None:
+            return
+        self.out.append(html.escape(data, quote=False))
+        self.text.append(data)
+
+    def result(self):
+        if self.video is not None:
+            self.end_video()
+        while self.open_tags:
+            self.out.append(self.closing(self.open_tags.pop()))
+        return "".join(self.out).strip(), re.sub(r"\s+", " ", "".join(self.text)).strip()
+
+
+def sanitize(markup, images=None):
+    parser = Sanitizer(images)
+    parser.feed(markup or "")
+    parser.close()
+    return parser.result()
+
+
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "omabox"
+IMAGE_DIR = CACHE_DIR / "images"
+ICON_DIR = CACHE_DIR / "icons"
+MAX_IMAGES_PER_ITEM = 12
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+MAX_ICON_BYTES = 256 * 1024
+TRACKING_PIXEL_MAX = 2
+IMAGE_REF_RE = re.compile(r"omabox-(?:img|avatar|poster):([0-9a-f]{20}\.(?:png|jpg|gif|webp))")
+
+
+def image_info(data):
+    """(extension, width, height) for PNG, JPEG, GIF and WebP bytes, else None. SVG is refused on purpose."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return "png", int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        return "gif", int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+        kind = data[12:16]
+        if kind == b"VP8X":
+            return "webp", 1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little")
+        if kind == b"VP8 ":
+            return "webp", int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF
+        if kind == b"VP8L":
+            bits = int.from_bytes(data[21:25], "little")
+            return "webp", (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        return None
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = int.from_bytes(data[i + 2:i + 4], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return "jpg", int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+            i += 2 + length
+    return None
+
+
+def public_address(address):
+    ip = ipaddress.ip_address(address.split("%")[0])
+    # is_global also refuses the RFC 6598 shared address space, which is_private misses; multicast counts as global
+    return ip.is_global and not ip.is_multicast
+
+
+def public_host(url):
+    """False for loopback, private, link-local and reserved targets: feed HTML must not reach the LAN."""
+    host = urllib.parse.urlparse(url).hostname
+    if not host:
+        return False
+    try:
+        return all(public_address(info[4][0]) for info in socket.getaddrinfo(host, None))
+    except OSError:
+        return False
+
+
+def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """socket.create_connection that dials only the addresses it checked. public_host alone is not enough: the
+    connection resolves the name again, and a short-TTL record can answer that second lookup with a LAN address."""
+    host, port = address
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if not all(public_address(info[4][0]) for info in infos):
+        raise OSError(f"non-public address refused: {host}")
+    error = OSError(f"no address for {host}")
+    for family, kind, proto, _, sockaddr in infos:
+        sock = socket.socket(family, kind, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as caught:
+            error = caught
+            sock.close()
+    raise error
+
+
+class PublicConnection:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = connect_public
+
+
+class PublicHTTPConnection(PublicConnection, http.client.HTTPConnection):
+    pass
+
+
+class PublicHTTPSConnection(PublicConnection, http.client.HTTPSConnection):
+    pass
+
+
+def proxied(req):
+    # Through a proxy the connection goes to the proxy, often on the LAN; the proxy resolves the target itself.
+    return req.has_proxy() or bool(req._tunnel_host)
+
+
+class PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(http.client.HTTPConnection if proxied(req) else PublicHTTPConnection, req)
+
+
+class PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(http.client.HTTPSConnection if proxied(req) else PublicHTTPSConnection, req, context=self._context)
+
+
+class PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith(("https://", "http://")) or not public_host(newurl):
+            raise ValueError(f"redirect to non-public address refused: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandler, PublicHTTPSHandler)
+
+
+def download_public(url, limit):
+    """Fetches driven by feed content (images, favicons, article pages): public http(s) hosts only, size-capped.
+    Returns the URL after redirects, the Content-Type and the body."""
+    if not url.startswith(("https://", "http://")) or not public_host(url):
+        raise ValueError(f"non-public address refused: {url}")
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with PUBLIC_OPENER.open(request, timeout=15) as response:
+        data = response.read(limit + 1)
+        final_url, content_type = response.geturl(), response.headers.get("Content-Type", "")
+    if len(data) > limit:
+        raise ValueError("too large")
+    return final_url, content_type, data
+
+
+def download_limited(url, limit):
+    return download_public(url, limit)[2]
+
+
+def declared_size(attrs, key):
+    try:
+        return int(str(attrs.get(key) or "").strip().removesuffix("px"))
+    except ValueError:
+        return None
+
+
+class ImageFetcher:
+    """Sanitizer image hook for one item: downloads to the cache at fetch time, emits omabox-img: refs."""
+
+    def __init__(self, base_url="", fetch=download_limited, directory=None):
+        self.base_url = base_url
+        self.fetch = fetch
+        self.directory = Path(directory or IMAGE_DIR)
+        self.count = 0
+
+    def absolute(self, src):
+        """src joined to the page's URL, or "" when it is not http(s)."""
+        src = (src or "").strip()
+        if self.base_url and src and not src.startswith(("http://", "https://", "data:")):
+            src = urllib.parse.urljoin(self.base_url, src)
+        return src if src.startswith(("https://", "http://")) else ""
+
+    def __call__(self, attrs):
+        src = self.absolute(attrs.get("src"))
+        if not src:
+            return ""
+        width, height = declared_size(attrs, "width"), declared_size(attrs, "height")
+        if (width is not None and width <= TRACKING_PIXEL_MAX) or (height is not None and height <= TRACKING_PIXEL_MAX):
+            return ""
+        placeholder = f'<p><a href="{html.escape(src, quote=True)}">▢ image</a></p>'
+        if self.count >= MAX_IMAGES_PER_ITEM:
+            return placeholder
+        self.count += 1
+        try:
+            picture = cache_image(src, self.fetch, self.directory, MAX_IMAGE_BYTES)
+        except Exception:
+            return placeholder
+        if picture is None:
+            return placeholder
+        name, w, h = picture
+        if w <= TRACKING_PIXEL_MAX or h <= TRACKING_PIXEL_MAX:
+            return ""
+        return f'<p><img src="omabox-img:{name}" width="{w}" height="{h}"></p>'
+
+    def avatar(self, src):
+        """An account picture as an omabox-avatar: ref, "" when it does not download; not counted as a picture."""
+        src = self.absolute(src)
+        try:
+            picture = cache_image(src, self.fetch, self.directory, MAX_ICON_BYTES) if src else None
+        except Exception:
+            picture = None
+        return f'<img src="omabox-avatar:{picture[0]}" class="mini">' if picture else ""
+
+    def video(self, attrs):
+        """A <video> as its poster wrapped in a link to the file: the reader draws a play badge on omabox-poster:
+        pictures and plays the link in mpv (omabox play, https only). A plain link when there is no poster to show."""
+        src = self.absolute(attrs.get("src"))
+        if not src:
+            return ""
+        href = html.escape(src, quote=True)
+        placeholder = f'<p><a href="{href}">▶ video</a></p>'
+        poster = self.absolute(attrs.get("poster"))
+        if not poster or not src.startswith("https://") or self.count >= MAX_IMAGES_PER_ITEM:
+            return placeholder
+        self.count += 1
+        try:
+            picture = cache_image(poster, self.fetch, self.directory, MAX_IMAGE_BYTES)
+        except Exception:
+            return placeholder
+        if picture is None:
+            return placeholder
+        name, w, h = picture
+        return f'<p><a href="{href}"><img src="omabox-poster:{name}" width="{w}" height="{h}"></a></p>'
+
+
+def cache_image(src, fetch, directory, limit):
+    """(file name, width, height) of the picture at src in the cache directory, downloaded the first time, or None
+    when the bytes are no PNG, JPEG, GIF or WebP. Tracking pixels are not written to the cache."""
+    stem = hashlib.sha1(src.encode()).hexdigest()[:20]
+    cached = next(iter(directory.glob(stem + ".*")), None) if directory.exists() else None
+    data = cached.read_bytes() if cached else fetch(src, limit)
+    info = image_info(data)
+    if info is None:
+        return None
+    ext, width, height = info
+    name = f"{stem}.{ext}"
+    if not cached and width > TRACKING_PIXEL_MAX and height > TRACKING_PIXEL_MAX:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes(data)
+    return name, width, height
+
+
+def prune_images(state, directory=None):
+    directory = Path(directory or IMAGE_DIR)
+    if not directory.exists():
+        return
+    used = set()
+    for item in state["items"]:
+        used.update(IMAGE_REF_RE.findall(item.get("html", "") + item.get("full_html", "") + item.get("replies_html", "")))
+        used.add(item.get("repost_avatar") or "")
+    for path in directory.iterdir():
+        if path.name not in used:
+            path.unlink(missing_ok=True)
+
+
+TAG_RE = re.compile(r"<(/?)([a-z0-9]+)[^>]*>")
+OUTPUT_VOID_TAGS = {"br", "img"}
+READING_WPM = 230
+BOILERPLATE_RE = re.compile(
+    r"^\s*(download:|sha-?256|checksum|full changelog|you can upgrade existing machines|install on new machines)", re.I
+)
+CONTRIBUTORS_RE = re.compile(r"contributors", re.I)
+CREDIT_RE = re.compile(
+    r'(\s+by\s+<a href="[^"]*">@[\w.-]+</a>(?:(?:,\s*|\s+and\s+)<a href="[^"]*">@[\w.-]+</a>)*'
+    r'(?:\s+in\s+<a href="[^"]*">[^<]*</a>)?)(?=\s*</li>)'
+)
+
+
+def strip_tags(markup):
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", markup))).strip()
+
+
+def top_level_blocks(markup):
+    """Splits sanitizer output (always balanced) into its top-level elements, keeping loose text as blocks.
+    Top-level inline elements stay in the loose text, so the spaces between them survive."""
+    blocks, depth, start, last, inline = [], 0, 0, 0, False
+    for match in TAG_RE.finditer(markup):
+        closing, tag = match.group(1) == "/", match.group(2)
+        if tag in OUTPUT_VOID_TAGS:
+            continue
+        if not closing:
+            if depth == 0:
+                inline = tag in INLINE_TAGS or tag == "span"
+                if not inline:
+                    if markup[last:match.start()].strip():
+                        blocks.append(markup[last:match.start()])
+                    start = match.start()
+            depth += 1
+        elif depth > 0:
+            depth -= 1
+            if depth == 0 and not inline:
+                blocks.append(markup[start:match.end()])
+                last = match.end()
+    if markup[last:].strip():
+        blocks.append(markup[last:])
+    return blocks
+
+
+def count_items(list_markup):
+    depth = count = 0
+    for match in TAG_RE.finditer(list_markup):
+        closing, tag = match.group(1) == "/", match.group(2)
+        if tag in ("ul", "ol"):
+            depth += -1 if closing else 1
+        elif tag == "li" and not closing and depth == 1:
+            count += 1
+    return count
+
+
+def structure(markup, text):
+    """Release-note shaping: dims credits and install boilerplate (moved last), counts items per heading.
+    Returns html, a "Improvements 3 · Fixes 12" summary ("" when the post has no heading+list) and minutes to read."""
+    markup = CREDIT_RE.sub(r'<span class="credit">\1</span>', markup)
+    blocks = top_level_blocks(markup)
+    body, tail, parts = [], [], []
+    skip = set()
+    for index, block in enumerate(blocks):
+        if index in skip:
+            continue
+        if block.startswith("<p>") and BOILERPLATE_RE.match(strip_tags(block)):
+            tail.append('<p class="meta">' + block[3:])
+            continue
+        heading = block.startswith(('<p class="h">', '<p class="sub">'))
+        if heading and CONTRIBUTORS_RE.search(strip_tags(block)):
+            tail.append('<p class="h meta">' + block[block.index(">") + 1:])
+            if index + 1 < len(blocks) and blocks[index + 1].startswith(("<ul>", "<ol>")):
+                tail.append('<div class="meta">' + blocks[index + 1] + "</div>")
+                skip.add(index + 1)
+            continue
+        body.append(block)
+        following = blocks[index + 1] if index + 1 < len(blocks) else ""
+        if heading and following.startswith(("<ul>", "<ol>")):
+            label = strip_tags(block)
+            if label:
+                parts.append(f"{label} {count_items(following)}")
+    minutes = max(1, round(len(text.split()) / READING_WPM))
+    return "".join(body + tail), "  ·  ".join(parts), minutes
+
+
+URL_TEXT_RE = re.compile(r"https?://[^\s<>\"]+")
+MENTION_RE = re.compile(r"(?<![\w@/.])@(\w{1,15})\b")
+MARKUP_SPLIT_RE = re.compile(r"(<[^>]+>)")
+TRAILING_PUNCTUATION = ".,;:!?)]'\""
+
+
+def split_url(match_text):
+    url = match_text.rstrip(TRAILING_PUNCTUATION)
+    return url, match_text[len(url):]
+
+
+def linkify(markup, mentions_base=""):
+    """Turns bare URLs (and @mentions when mentions_base is set) in sanitizer output into links; text inside <a> is left alone."""
+    out, inside_link = [], 0
+    for part in MARKUP_SPLIT_RE.split(markup):
+        if part.startswith("<"):
+            if re.match(r"<a\b", part):
+                inside_link += 1
+            elif part == "</a>":
+                inside_link = max(0, inside_link - 1)
+            out.append(part)
+            continue
+        if inside_link or not part:
+            out.append(part)
+            continue
+
+        def url_link(match):
+            url, tail = split_url(match.group(0))
+            return f'<a href="{url}">{url}</a>{tail}'
+
+        part = URL_TEXT_RE.sub(url_link, part)
+        if mentions_base:
+            pieces = MARKUP_SPLIT_RE.split(part)
+            for index, piece in enumerate(pieces):
+                if not piece.startswith("<") and (index == 0 or not pieces[index - 1].startswith("<a ")):
+                    pieces[index] = MENTION_RE.sub(lambda m: f'<a href="{mentions_base}{m.group(1)}">@{m.group(1)}</a>', piece)
+            part = "".join(pieces)
+        out.append(part)
+    return "".join(out)
+
+
+class OpenGraphFinder(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.meta = {}
+        self.in_title = False
+        self.title = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta":
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            if key in ("og:title", "og:image", "og:site_name", "twitter:title", "twitter:image") and attrs.get("content"):
+                self.meta.setdefault(key, attrs["content"])
+        elif tag == "title":
+            self.in_title = True
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title += data
+
+
+def link_card(url, images, fetch=download_limited):
+    """Preview card for a short post's link, built at delivery from the page's Open Graph tags. "" when unavailable."""
+    try:
+        page = fetch(url, 1024 * 1024).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    finder = OpenGraphFinder()
+    finder.feed(page)
+    meta = finder.meta
+    title = (meta.get("og:title") or meta.get("twitter:title") or finder.title).strip()
+    if not title:
+        return ""
+    image_url = meta.get("og:image") or meta.get("twitter:image") or ""
+    picture = images({"src": urllib.parse.urljoin(url, image_url)}) if image_url and images else ""
+    picture = picture if "<img" in picture else ""
+    site = meta.get("og:site_name") or (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
+    return (f'{picture}<p class="card"><a href="{html.escape(url, quote=True)}"><b>{html.escape(title)}</b></a>'
+            f'<br><span class="meta">{html.escape(site)}</span></p>')
+
+
+def attach_card(markup, text, images, fetch=download_limited):
+    """For a short post ending in a link: drop the trailing URL and append its preview card, like X does."""
+    urls = [split_url(m.group(0))[0] for m in URL_TEXT_RE.finditer(text)]
+    if not urls or not text.rstrip().endswith(urls[-1]):
+        return markup
+    url = urls[-1]
+    if not url.startswith("https://") or not public_host(url):
+        return markup
+    card = link_card(url, images, fetch)
+    if not card:
+        return markup
+    escaped = html.escape(url, quote=False)
+    cut = markup.rfind(escaped)
+    if cut >= 0:
+        markup = markup[:cut] + markup[cut + len(escaped):]
+    return markup + card
+
+
+MAX_PAGE_BYTES = 5 * 1024 * 1024
+MIN_ARTICLE_CHARS = 250
+MAX_PAGE_DEPTH = 300
+PAGE_VOID_TAGS = VOID_TAGS | {"area", "base", "col", "embed", "param", "track"}
+PAGE_DROP_TAGS = {"nav", "header", "footer", "aside", "script", "style", "form", "noscript", "iframe", "svg", "button",
+                  "template", "dialog", "select", "textarea", "object", "canvas", "video", "audio", "head", "title"}
+PAGE_DROP_ROLES = {"navigation", "banner", "contentinfo", "complementary", "search", "dialog", "alert"}
+# class/id words: strong ones always drop the element, weak ones unless a content word is there too
+STRONG_JUNK = {"comment", "comments", "disqus", "share", "sharing", "social", "related", "newsletter", "subscribe",
+               "outbrain", "taboola", "cookie", "cookies", "consent"}
+WEAK_JUNK = {"sidebar", "menu", "nav", "navbar", "header", "footer", "masthead", "breadcrumb", "breadcrumbs", "pagination",
+             "popup", "modal", "banner", "promo", "ad", "ads", "advert", "advertisement", "sponsor", "sponsored", "signup",
+             "byline", "author", "meta", "tags", "recommended"}
+CONTENT_WORDS = {"article", "body", "content", "main", "story"}
+PARAGRAPH_TAGS = {"p", "pre", "blockquote"}
+P_CLOSERS = {"p", "div", "ul", "ol", "pre", "blockquote", "table", "section", "article", "figure", "header", "footer",
+             "nav", "aside", "main", "form", "hr", "dl"} | HEADING_TAGS
+PAGE_CHARSET_RE = re.compile(rb"<meta[^>]+charset=[\"']?([\w-]+)", re.I)
+# page layout leaves whitespace-only wrappers, which Qt rich text renders as blank lines
+BLOCK_GAP_RE = re.compile(r"(?<=>)\s+(?=</?(?:div|p|ul|ol|li|blockquote)\b)")
+EMPTY_BLOCK_RE = re.compile(r"<(div|p|ul|ol|li|blockquote)>\s*</\1>")
+
+
+class PageNode:
+    __slots__ = ("tag", "attrs", "children")
+
+    def __init__(self, tag, attrs):
+        self.tag, self.attrs, self.children = tag, attrs, []
+
+
+class PageTree(HTMLParser):
+    """Loose DOM of a web page: implicit </p> and </li> closed, stray end tags ignored, depth capped."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = PageNode("#root", {})
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        top = self.stack[-1]
+        if (top.tag == "p" and tag in P_CLOSERS) or (top.tag == "li" and tag == "li"):
+            self.stack.pop()
+        node = PageNode(tag, {key: value or "" for key, value in attrs})
+        self.stack[-1].children.append(node)
+        if tag not in PAGE_VOID_TAGS and len(self.stack) < MAX_PAGE_DEPTH:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.stack[-1].children.append(PageNode(tag, {key: value or "" for key, value in attrs}))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data):
+        self.stack[-1].children.append(data)
+
+
+def junk_node(node, strict):
+    attrs = node.attrs
+    if node.tag in PAGE_DROP_TAGS or attrs.get("role", "").lower() in PAGE_DROP_ROLES:
+        return True
+    if "hidden" in attrs or attrs.get("aria-hidden", "").lower() == "true" or re.search(r"display\s*:\s*none", attrs.get("style", ""), re.I):
+        return True
+    if not strict or node.tag in ("html", "body", "article", "main"):
+        return False
+    words = set(re.split(r"[\s_-]+", f"{attrs.get('class', '')} {attrs.get('id', '')}".lower())) - {""}
+    return bool(words & STRONG_JUNK) or bool(words & WEAK_JUNK and not words & CONTENT_WORDS)
+
+
+def clean_tree(node, strict):
+    copy = PageNode(node.tag, node.attrs)
+    copy.children = [child if isinstance(child, str) else clean_tree(child, strict)
+                     for child in node.children if isinstance(child, str) or not junk_node(child, strict)]
+    return copy
+
+
+def walk(node):
+    for child in node.children:
+        if not isinstance(child, str):
+            yield child
+            yield from walk(child)
+
+
+def node_text(node):
+    return "".join(child if isinstance(child, str) else node_text(child) for child in node.children)
+
+
+def text_size(node):
+    return len(" ".join(node_text(node).split()))
+
+
+def content_node(root):
+    """<article> with the most text, else <main> / role=main, else the element whose paragraphs hold the most
+    non-link text (half of it also counts for the grandparent, so a wrapper of several blocks can win)."""
+    articles = [node for node in walk(root) if node.tag == "article"]
+    mains = [node for node in walk(root) if node.tag == "main" or node.attrs.get("role", "").lower() == "main"]
+    for group in (articles, mains):
+        best = max(group, key=text_size, default=None)
+        if best is not None and text_size(best) >= MIN_ARTICLE_CHARS:
+            return best
+    scores, parents = {}, {}
+    for node in walk(root):
+        for child in node.children:
+            if not isinstance(child, str):
+                parents[id(child)] = node
+    for node in walk(root):
+        if node.tag in PARAGRAPH_TAGS:
+            size = text_size(node) - sum(text_size(link) for link in walk(node) if link.tag == "a")
+            target = parents.get(id(node)) if size >= 25 else None
+        else:
+            # text straight in a <div> between <br>s, no <p>: the element is its own paragraph container
+            size = len(" ".join("".join(c for c in node.children if isinstance(c, str)).split()))
+            target = node if size >= 80 else None
+        share = 1.0
+        while target is not None and share >= 0.5:
+            scores[id(target)] = (scores.get(id(target), (0, target))[0] + size * share, target)
+            target, share = parents.get(id(target)), share / 2
+    if not scores:
+        return None
+    return max(scores.values(), key=lambda pair: pair[0])[1]
+
+
+def picture_source(attrs):
+    """Lazy-loading pages keep the real picture in data-src and a placeholder in src."""
+    for key in ("data-src", "data-lazy-src", "data-original", "src"):
+        value = attrs.get(key, "").strip()
+        if value and not value.startswith("data:"):
+            return value
+    srcset = (attrs.get("srcset") or attrs.get("data-srcset") or "").strip()
+    return srcset.split(",")[0].split()[0] if srcset else ""
+
+
+def serialize_page(node, base_url, out, skip=None):
+    """Markup for sanitize(): links and pictures made absolute against base_url, every other attribute dropped."""
+    for child in node.children:
+        if isinstance(child, str):
+            out.append(html.escape(child, quote=False))
+            continue
+        if child is skip:
+            continue
+        tag = {"figcaption": "p", "tr": "div", "dt": "div", "dd": "div"}.get(child.tag, child.tag)
+        attrs = ""
+        if tag == "a" and child.attrs.get("href", "").strip():
+            attrs = f' href="{html.escape(urllib.parse.urljoin(base_url, child.attrs["href"].strip()), quote=True)}"'
+        elif tag == "img":
+            src = picture_source(child.attrs)
+            if not src:
+                continue
+            attrs = f' src="{html.escape(urllib.parse.urljoin(base_url, src), quote=True)}"'
+            for key in ("width", "height"):
+                if declared_size(child.attrs, key) is not None:
+                    attrs += f' {key}="{declared_size(child.attrs, key)}"'
+        out.append(f"<{tag}{attrs}>")
+        if tag in PAGE_VOID_TAGS:
+            continue
+        serialize_page(child, base_url, out, skip)
+        if tag in ("td", "th"):
+            out.append(" ")
+        out.append(f"</{tag}>")
+    return out
+
+
+def decode_page(data, content_type=""):
+    match = re.search(r"charset=[\"']?([\w-]+)", content_type, re.I) or PAGE_CHARSET_RE.search(data[:4096])
+    charset = match.group(1) if match else "utf-8"
+    charset = charset.decode("ascii", "replace") if isinstance(charset, bytes) else charset
+    try:
+        return data.decode(charset, "replace")
+    except LookupError:
+        return data.decode("utf-8", "replace")
+
+
+def extract_article(page, base_url, title=""):
+    """Main content of an HTML page as markup for sanitize(). A pass that drops share/comment/sidebar-like
+    class names runs first; pages whose wrapper carries such a name get a second pass without it."""
+    tree = PageTree()
+    tree.feed(page)
+    tree.close()
+    for strict in (True, False):
+        node = content_node(clean_tree(tree.root, strict))
+        if node is None or text_size(node) < MIN_ARTICLE_CHARS:
+            continue
+        heading = next((h for h in walk(node) if h.tag in HEADING_TAGS), None)
+        same_title = heading is not None and " ".join(node_text(heading).split()).casefold() == " ".join(title.split()).casefold()
+        return "".join(serialize_page(node, base_url, [], heading if same_title else None))
+    raise ValueError("no article text found on the page")
+
+
+def fetch_article(url, title="", fetch=download_public, image_fetch=download_limited, image_dir=None):
+    """The post's web page reduced to its article: full_html (pictures cached like feed ones), full_summary and
+    full_minutes shaped by structure(). ValueError when the page is not HTML or holds no article."""
+    final_url, content_type, data = fetch(url, MAX_PAGE_BYTES)
+    kind = content_type.split(";")[0].strip().lower()
+    if kind and "html" not in kind:
+        raise ValueError(f"not a web page ({kind})")
+    markup = extract_article(decode_page(data, content_type), final_url, title)
+    body, text = sanitize(markup, ImageFetcher(final_url, image_fetch, image_dir))
+    if len(text) < MIN_ARTICLE_CHARS:
+        raise ValueError("no article text found on the page")
+    body = BLOCK_GAP_RE.sub("", body)
+    while EMPTY_BLOCK_RE.search(body):
+        body = EMPTY_BLOCK_RE.sub("", body)
+    body, summary, minutes = structure(body, text)
+    return {"full_html": linkify(body), "full_summary": summary, "full_minutes": minutes}
+
+
+def article_error(error):
+    return str(error) if isinstance(error, ValueError) else f"{type(error).__name__}: {error}"
+
+
+def excerpt(text, limit=EXCERPT_CHARS):
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut.rstrip(".,;:") + "…"
+
+
+def web_link(url):
+    """url when it is an absolute http(s) link, else "": post links go to xdg-open and the browser as they are."""
+    url = str(url or "").strip()
+    parts = urllib.parse.urlparse(url)
+    return url if parts.scheme.lower() in ("http", "https") and parts.netloc else ""
+
+
+def iso_utc(value):
+    if not value:
+        return ""
+    value = value.strip()
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            moment = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def atom_text(element, tag):
+    node = element.find(tag)
+    if node is None or node.text is None:
+        return ""
+    if node.get("type", "text") == "text" and tag in (ATOM + "content", ATOM + "summary"):
+        return html.escape(node.text)
+    return node.text
+
+
+class NotAFeed(ValueError):
+    pass
+
+
+def paragraphs_html(text):
+    return "".join("<p>" + html.escape(part.strip()).replace("\n", "<br>") + "</p>"
+                   for part in re.split(r"\n\s*\n", text) if part.strip())
+
+
+def media_group_html(entry):
+    """YouTube entries carry no content, only media:group: a thumbnail and a plain-text description."""
+    group = entry.find(MEDIA + "group")
+    if group is None:
+        return ""
+    thumbnail = group.find(MEDIA + "thumbnail")
+    url = thumbnail.get("url", "") if thumbnail is not None else ""
+    picture = f'<img src="{html.escape(url, quote=True)}">' if url else ""
+    return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
+
+
+def parse_feed(data):
+    root = ET.fromstring(data)
+    if root.tag not in (ATOM + "feed", "rss"):
+        raise NotAFeed(f"not an Atom or RSS document (root <{root.tag}>)")
+    if root.tag == ATOM + "feed":
+        for entry in root.findall(ATOM + "entry"):
+            link = ""
+            for candidate in entry.findall(ATOM + "link"):
+                if candidate.get("rel", "alternate") == "alternate":
+                    link = candidate.get("href", "")
+                    break
+            yield {
+                "guid": atom_text(entry, ATOM + "id") or link,
+                "title": html.unescape(atom_text(entry, ATOM + "title")).strip(),
+                "link": web_link(link),
+                "published": iso_utc(atom_text(entry, ATOM + "published") or atom_text(entry, ATOM + "updated")),
+                "html": atom_text(entry, ATOM + "content") or atom_text(entry, ATOM + "summary") or media_group_html(entry),
+            }
+        return
+    for item in root.iter("item"):
+        link = (item.findtext("link") or "").strip()
+        body = item.findtext(RSS_CONTENT) or item.findtext("description") or ""
+        yield {
+            "guid": (item.findtext("guid") or link).strip(),
+            "title": html.unescape(item.findtext("title") or "").strip(),
+            "link": web_link(link),
+            "published": iso_utc(item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date")),
+            # tagless descriptions (Bluesky) are plain text whose line breaks matter
+            "html": body if MARKUP_TAG_RE.search(body) else body.strip().replace("\n", "<br>"),
+        }
+
+
+X_REPOST_HEAD_RE = re.compile(r"^RT\s+([^<]{1,50})<br>")
+X_QUOTE_RE = re.compile(r'(?:<hr\b[^>]*>\s*)?<div class="rsshub-quote">(.*)</div>\s*$', re.S)
+X_QUOTE_NAME_RE = re.compile(r"^([^<:]{1,50}):\s*")
+# RSSHub marks a reply with "Re " before its text, in the body and in the title (after a repost's "RT name: ")
+X_REPLY_MARK_RE = re.compile(r"^Re\s+")
+X_TITLE_REPLY_RE = re.compile(r"^((?:RT [^:]{1,50}:\s*)?)Re\s+(?:@\w{1,15}(?:\s+|$))*")
+X_REPLY_NAMES_RE = re.compile(r"^(?:@\w{1,15}(?:\s+|(?=<)|$))+")
+# the quoted author's avatar, there when the route asks for it (x_feed_url)
+X_QUOTE_AVATAR_RE = re.compile(r'^<img\b[^>]*\bsrc="(https://[^"]+)"[^>]*>')
+X_EPOCH_MS = 1288834974657
+
+
+def status_time(status):
+    """The ISO UTC time an X post id encodes: ids since late 2010 hold milliseconds since X's epoch in their top
+    bits. "" for older, sequential ids."""
+    value = int(status)
+    if value < 1 << 42:
+        return ""
+    moment = datetime.fromtimestamp(((value >> 22) + X_EPOCH_MS) / 1000, timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def reply_names(body):
+    """The @names X prefills at the start of a reply, which it shows as "Replying to" instead of text:
+    (handles in order, the body without them)."""
+    names = X_REPLY_NAMES_RE.match(body)
+    if not names:
+        return [], body
+    return list(dict.fromkeys(re.findall(r"@(\w+)", names.group(0)))), body[names.end():]
+
+
+def drop_status_url(text, status):
+    """The text without a link to post status at its end (before any media), as X shows a quoting post: RSSHub keeps
+    a pasted link to the quoted post, which would otherwise get a link card repeating the quote card."""
+    return re.sub(rf"\s*https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/[\w/]{{1,30}}/status/{status}(?:[?#][^\s<]*)?"
+                  r"(?=(?:\s|<br>)*(?:<(?:img|video|a)\b|$))", "", text, count=1)
+
+
+def parse_x_feed(data):
+    """RSSHub's JSON Feed of an X timeline as parse_feed entries plus repost and quote. Only JSON names the reposted
+    post (_extra.links, one link: repost, else quote, else reply); RSS has the reposter's name and link alone.
+    A repost links to the original post, repost holds its author; a quoted post is cut out of html into quote.
+    reply_to: the accounts a reply answers. A quoted post carries no reply mark, so its leading @names count."""
+    for entry in json.loads(data).get("items") or []:
+        own = str(entry.get("url") or "").strip()
+        link, body = own, str(entry.get("content_html") or "")
+        title = html.unescape(str(entry.get("title") or "")).strip()
+        refs = {str(extra.get("type")): x_post_ref(extra.get("url"))
+                for extra in (entry.get("_extra") or {}).get("links") or [] if isinstance(extra, dict)}
+        repost = None
+        head = X_REPOST_HEAD_RE.match(body)
+        if head:
+            body = body[head.end():]
+            original = refs.get("repost")
+            repost = {"name": html.unescape(head.group(1)).strip(), "handle": original[0] if original else ""}
+            if original:
+                link = f"https://x.com/{original[0]}/status/{original[1]}"
+        reply_to = []
+        mark = X_REPLY_MARK_RE.match(body)
+        if mark:
+            reply_to, body = reply_names(body[mark.end():])
+            title = X_TITLE_REPLY_RE.sub(r"\1", title, count=1)
+        quote = None
+        cut = X_QUOTE_RE.search(body)
+        if cut:
+            body, inner = body[:cut.start()], cut.group(1)
+            face = X_QUOTE_AVATAR_RE.match(inner)
+            inner = inner[face.end():] if face else inner
+            name = X_QUOTE_NAME_RE.match(inner)
+            ref = refs.get("quote")
+            quote_to, inner = reply_names(inner[name.end():] if name else inner)
+            if ref:
+                body, title = drop_status_url(body, ref[1]), drop_status_url(title, ref[1])
+            quote = {"name": html.unescape(name.group(1)).strip() if name else "", "handle": ref[0] if ref else "",
+                     "link": f"https://x.com/{ref[0]}/status/{ref[1]}" if ref else "", "reply_to": quote_to,
+                     "avatar": html.unescape(face.group(1)) if face else "",
+                     "published": status_time(ref[1]) if ref else "",
+                     "html": inner}
+        yield {
+            "guid": str(entry.get("id") or own).strip(),
+            "title": title,
+            "link": web_link(link),
+            "published": iso_utc(entry.get("date_published")),
+            "html": body,
+            "repost": repost,
+            "quote": quote,
+            "reply_to": reply_to,
+        }
+
+
+VERSION_RE = re.compile(r"v?(\d+(?:\.\d+)+)")
+
+
+def version_of(text):
+    match = VERSION_RE.search(text or "")
+    return match.group(1) if match else ""
+
+
+def installed_version(command):
+    try:
+        out = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return version_of(out.strip().split("-")[0])
+
+
+def item_id(source, guid):
+    return hashlib.sha1(f"{source}\0{guid}".encode()).hexdigest()[:16]
+
+
+# Maps keyed by source name: prune drops removed sources from each, rename moves the entry.
+SOURCE_STATE_KEYS = ("installed", "errors", "fetched", "icons", "profiles", "http", "failing_since")
+
+
+def load_state(path=None):
+    path = path or STATE_PATH
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("items", [])
+    for key in SOURCE_STATE_KEYS:
+        state.setdefault(key, {})
+    return state
+
+
+def save_state(state, path=None):
+    path = Path(path or STATE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+GLYPHS = {
+    "github": 0xF02A4,
+    "gitlab": 0xF0BA0,
+    "youtube": 0xF05C3,
+    "reddit": 0xF044D,
+    "twitter": 0xF0544,
+    "mastodon": 0xF0AD1,
+    "bluesky": 0xF1589,  # md-butterfly
+    "hackernews": 0xF0B20,  # md-alpha_y_box: MDI has no Hacker News logo
+    "rss": 0xF046B,
+}
+HOST_GLYPHS = (
+    ("github.com", "github"),
+    ("gitlab.com", "gitlab"),
+    ("youtube.com", "youtube"),
+    ("reddit.com", "reddit"),
+    ("x.com", "twitter"),
+    ("twitter.com", "twitter"),
+    ("bsky.app", "bluesky"),
+    ("news.ycombinator.com", "hackernews"),
+    ("hnrss.org", "hackernews"),
+)
+MASTODON_FEED_RE = re.compile(r"^/@[\w.-]+\.rss$")
+
+
+def glyph_for(url):
+    parts = urllib.parse.urlparse(url)
+    host = parts.netloc.lower().removeprefix("www.")
+    for needle, key in HOST_GLYPHS:
+        if host == needle or host.endswith("." + needle):
+            return chr(GLYPHS[key])
+    if "mastodon" in host or MASTODON_FEED_RE.match(parts.path):
+        return chr(GLYPHS["mastodon"])
+    # RSSHub routes: /twitter/user/<name>
+    if parts.path.startswith(("/twitter/", "/x/")):
+        return chr(GLYPHS["twitter"])
+    return ""
+
+
+class IconLinkFinder(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        rel = (attrs.get("rel") or "").lower().split()
+        if tag == "link" and "icon" in rel and attrs.get("href") and not attrs["href"].lower().endswith(".svg"):
+            self.links.append(attrs["href"])
+
+
+def feed_home(data):
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return ""
+    if root.tag == ATOM + "feed":
+        for link in root.findall(ATOM + "link"):
+            if link.get("rel", "alternate") == "alternate" and link.get("href"):
+                return link.get("href")
+        return ""
+    return (root.findtext("channel/link") or "").strip()
+
+
+def icon_ext(data):
+    if data[:4] == b"\x00\x00\x01\x00":
+        return "ico"
+    info = image_info(data)
+    return info[0] if info else ""
+
+
+def fetch_favicon(feed_url, feed_data=b"", fetch=download_limited, directory=None):
+    """Saves the site's favicon (never SVG) under the cache and returns its path, or "" when none works."""
+    directory = Path(directory or ICON_DIR)
+    parts = urllib.parse.urlparse(feed_url)
+    home = feed_home(feed_data) or f"{parts.scheme}://{parts.netloc}/"
+    candidates = []
+    try:
+        finder = IconLinkFinder()
+        finder.feed(fetch(home, 1024 * 1024).decode("utf-8", "replace"))
+        candidates += [urllib.parse.urljoin(home, href) for href in finder.links]
+    except Exception:
+        pass
+    candidates.append(urllib.parse.urljoin(home, "/favicon.ico"))
+    for url in candidates:
+        if not url.startswith(("https://", "http://")):
+            continue
+        try:
+            data = fetch(url, MAX_ICON_BYTES)
+        except Exception:
+            continue
+        ext = icon_ext(data)
+        if not ext:
+            continue
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{hashlib.sha1(feed_url.encode()).hexdigest()[:20]}.{ext}"
+        path.write_bytes(data)
+        return str(path)
+    return ""
+
+
+def ensure_icon(state, source, feed_data=b"", fetch=download_limited, directory=None):
+    """icon in sources.toml: a glyph, or "favicon"; unset picks a known-site glyph, then the favicon, then RSS."""
+    name = source["name"]
+    override = source.get("icon", "")
+    glyph = "" if override == "favicon" else (override or glyph_for(source["url"]))
+    if glyph:
+        state["icons"][name] = {"glyph": glyph}
+        return
+    current = state["icons"].get(name, {})
+    if current.get("favicon") and Path(current["favicon"]).exists():
+        return
+    favicon = fetch_favicon(source["url"], feed_data, fetch, directory)
+    state["icons"][name] = {"favicon": favicon} if favicon else {"glyph": chr(GLYPHS["rss"])}
+
+
+def feed_profile(data):
+    """Author details an RSSHub X feed carries at channel level: display name, @handle and avatar URL."""
+    if data.lstrip()[:1] == b"{":
+        try:
+            feed = json.loads(data)
+        except ValueError:
+            return None
+        handle = urllib.parse.urlparse(str(feed.get("home_page_url") or "")).path.strip("/").split("/")[0]
+        authors = next((item.get("authors") for item in feed.get("items") or [] if item.get("authors")), None) or [{}]
+        name = str(authors[0].get("name") or "").strip() if isinstance(authors[0], dict) else ""
+        return {"name": name or handle, "handle": handle, "avatar_url": str(feed.get("icon") or "").strip()} if handle else None
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return None
+    channel = root.find("channel")
+    if channel is None:
+        return None
+    link = (channel.findtext("link") or "").strip()
+    handle = urllib.parse.urlparse(link).path.strip("/").split("/")[0]
+    avatar = (channel.findtext("image/url") or "").strip()
+    name = ""
+    for item in channel.iter("item"):
+        name = (item.findtext("author") or "").strip()
+        if name:
+            break
+    if not handle:
+        return None
+    return {"name": name or handle, "handle": handle, "avatar_url": avatar}
+
+
+def ensure_profile(state, source, feed_data, fetch=download_limited, directory=None):
+    profile = feed_profile(feed_data)
+    if not profile:
+        return
+    directory = Path(directory or ICON_DIR)
+    current = state["profiles"].get(source["name"], {})
+    avatar = current.get("avatar", "")
+    if profile["avatar_url"] and (current.get("avatar_url") != profile["avatar_url"] or not Path(avatar).exists()):
+        avatar = ""
+        try:
+            data = fetch(profile["avatar_url"], MAX_ICON_BYTES)
+            info = image_info(data)
+            if info:
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / f"avatar-{hashlib.sha1(profile['avatar_url'].encode()).hexdigest()[:20]}.{info[0]}"
+                path.write_bytes(data)
+                avatar = str(path)
+        except Exception:
+            avatar = ""
+    state["profiles"][source["name"]] = {"name": profile["name"], "handle": profile["handle"],
+                                         "avatar_url": profile["avatar_url"], "avatar": avatar}
+
+
+# Bumped when the stored html format changes; older items get their html rebuilt on the next fetch.
+MEDIA_VERSION = 10
+
+
+def is_short_post(title, text):
+    """Micro-posts (X, Mastodon) repeat their opening as the title, or have none (Bluesky, Mastodon's own RSS);
+    such items get one line, no big heading."""
+    if not (title or "").strip():
+        return bool(text)
+    # RSSHub titles reposts "RT <name>: <text>" while the body starts with the text itself.
+    head = re.sub(r"^RT [^:]{1,50}:\s*(?:Re\s+)?", "", title or "")
+    head = re.sub(r"[.…\s]+$", "", head)[:60]
+    return len(head) >= 20 and head in text[:len(head) + 120]
+
+
+def mute_matcher(rule):
+    """Predicate for one mute rule: /.../ is a case-insensitive regex, anything else a case-insensitive substring.
+    ValueError for a rule that is empty or not a valid regex."""
+    rule = rule.strip()
+    if rule in ("", "//"):
+        raise ValueError("mute rule is empty")
+    if len(rule) >= 2 and rule.startswith("/") and rule.endswith("/"):
+        try:
+            pattern = re.compile(rule[1:-1], re.I)
+        except re.error as error:
+            raise ValueError(f"mute rule {rule}: not a valid regex ({error})") from None
+        return lambda text: pattern.search(text) is not None
+    needle = rule.casefold()
+    return lambda text: needle in text.casefold()
+
+
+def mute_filter(rules, warn=None):
+    """(title, text) -> True when any rule matches, or None without valid rules. Invalid rules go to warn and are
+    skipped: sources.toml is edited by hand too, and one bad regex must not stop a fetch."""
+    matchers = []
+    for rule in rules or ():
+        try:
+            matchers.append(mute_matcher(rule))
+        except ValueError as error:
+            if warn:
+                warn(str(error))
+    if not matchers:
+        return None
+    return lambda title, text: any(match(title) or match(text) for match in matchers)
+
+
+def mutes_all(state, source, muted):
+    """How many posts the source has stored when muted matches every one of them (two or more), else 0."""
+    texts = [(item["title"], sanitize(item.get("html", ""))[1]) for item in state["items"] if item["source"] == source]
+    return len(texts) if len(texts) >= 2 and all(muted(title, text) for title, text in texts) else 0
+
+
+def drop_muted(state, source, muted):
+    """Removes the source's stored posts that match, except read-later ones. Returns how many went."""
+    kept = [item for item in state["items"] if item["source"] != source or item.get("later")
+            or not muted(item["title"], sanitize(item.get("html", ""))[1])]
+    dropped = len(state["items"]) - len(kept)
+    state["items"] = kept
+    return dropped
+
+
+def merge(state, source, entries, fetched_at, images=None, mentions_base="", cards=False, muted=None, article=None):
+    """images: optional factory entry -> Sanitizer image hook (ImageFetcher at fetch time).
+    mentions_base links @names (X sources); cards fetches link previews for short posts (network, fetch time only).
+    muted: mute_filter predicate; matching entries are never stored or counted.
+    article: (link, title) -> fetch_article fields, tried for new unread posts with a web link; failing, the post
+    keeps only its feed html."""
+    items = state["items"]
+    by_id = {item["id"]: item for item in items}
+    first_fetch = not any(item["source"] == source for item in items)
+    entries = sorted(entries, key=lambda e: e["published"], reverse=True)
+    if muted:
+        # plain sanitize: the image hook would download pictures of posts about to be dropped
+        entries = [entry for entry in entries
+                   if not muted(entry["title"], sanitize(entry["html"] + (entry.get("quote") or {}).get("html", ""))[1])]
+    entries = entries[:KEEP_PER_SOURCE]
+    added = 0
+    for position, entry in enumerate(entries):
+        iid = item_id(source, entry["guid"])
+        existing = by_id.get(iid)
+        if existing is not None and existing.get("media") == MEDIA_VERSION:
+            continue
+        body, text = sanitize(entry["html"], images(entry) if images else None)
+        body, summary, minutes = structure(body, text)
+        short = is_short_post(entry["title"], text)
+        if cards and short:
+            body = attach_card(body, text, images(entry) if images else None)
+        body = linkify(body, mentions_base)
+        if entry.get("reply_to"):
+            body = replying_to(entry["reply_to"], mentions_base) + body
+        if entry.get("quote"):
+            body = re.sub(r"(?:\s*<br>)+\s*$", "", body)
+            body += quote_markup(entry["quote"], images(entry) if images else None, mentions_base)
+        title = excerpt(text, 110) if short else (entry["title"] or excerpt(text, 80) or "(untitled)")
+        shaped = {"html": body, "excerpt": "" if short else excerpt(text), "summary": summary, "minutes": minutes,
+                  "short": short, "title": title, "media": MEDIA_VERSION}
+        if entry.get("repost"):
+            shaped.update(repost=entry["repost"], link=entry["link"])
+        if existing is not None:
+            if existing.get("link") != shaped.get("link", existing.get("link")):
+                # comments fetched under the repost's own id are always empty; the original's are wanted
+                for key in REPLY_KEYS:
+                    existing.pop(key, None)
+            existing.update(shaped)
+            continue
+        item = {
+            "id": iid,
+            "source": source,
+            "title": title,
+            "link": entry["link"],
+            "published": entry["published"] or fetched_at,
+            "fetched": fetched_at,
+            "version": version_of(entry["title"]),
+            "excerpt": shaped["excerpt"],
+            "summary": summary,
+            "minutes": minutes,
+            "short": short,
+            "html": body,
+            "media": MEDIA_VERSION,
+            "read": first_fetch and position >= UNREAD_ON_FIRST_FETCH,
+        }
+        if entry.get("repost"):
+            item["repost"] = entry["repost"]
+        if article and not item["read"] and not short and item["link"].startswith(("https://", "http://")):
+            try:
+                item.update(article(item["link"], title), full_fetched=fetched_at)
+            except Exception as error:
+                print(f"{source}: no full article for {item['link']}: {article_error(error)}", file=sys.stderr)
+        items.append(item)
+        by_id[iid] = item
+        added += 1
+    ours = sorted((i for i in items if i["source"] == source), key=lambda i: i["published"], reverse=True)
+    dropped = {i["id"] for position, i in enumerate(ours) if position >= KEEP_PER_SOURCE and not i.get("later")
+               and (i["read"] or position >= KEEP_UNREAD_PER_SOURCE)}
+    state["items"] = [i for i in items if i["id"] not in dropped]
+    return added
+
+
+DURATION_RE = re.compile(r"^(\d+)\s*([mhdw])$")
+DURATION_UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def parse_duration(text):
+    match = DURATION_RE.match(text.strip().lower())
+    if not match:
+        raise ValueError(f"duration like 90m, 12h, 3d or 2w expected, got {text!r}")
+    return timedelta(**{DURATION_UNITS[match.group(2)]: int(match.group(1))})
+
+
+def catch_up(items, older=None, source=None, now=None):
+    """Marks unread posts read: every one, or those published more than `older` ago, optionally of one source.
+    Snoozed posts wait for their time and read-later flags stay. Returns how many were marked."""
+    now = now or datetime.now(timezone.utc)
+    now_stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = (now - older).strftime("%Y-%m-%dT%H:%M:%SZ") if older else None
+    marked = 0
+    for item in items:
+        if item["read"] or (source and item["source"] != source):
+            continue
+        if iso_utc(item.get("snoozed_until")) > now_stamp or (cutoff and iso_utc(item["published"]) > cutoff):
+            continue
+        item["read"] = True
+        marked += 1
+    return marked
+
+
+def clear_read(items, ids=None, now=None):
+    """Hides read posts from the feed (cleared: True); with ids, those posts, marked read as well. Read-later and
+    snoozed posts stay. The item is kept, so the next fetch sees it as known instead of adding it back as new.
+    Returns how many were cleared."""
+    now = now or datetime.now(timezone.utc)
+    wanted = set(ids) if ids else None
+    cleared = 0
+    for item in items:
+        if item.get("cleared") or item.get("later") or is_snoozed(item, now):
+            continue
+        if (item["id"] not in wanted) if wanted is not None else not item["read"]:
+            continue
+        item["read"] = True
+        item["cleared"] = True
+        cleared += 1
+    return cleared
+
+
+def next_morning(now=None, at="08:00"):
+    now = now or datetime.now().astimezone()
+    hour, minute = map(int, at.split(":"))
+    morning = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return morning.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def paused(state, now=None):
+    until = state.get("paused_until", "")
+    now = now or datetime.now(timezone.utc)
+    return bool(until) and datetime.fromisoformat(until) > now
+
+
+NOTE_HISTORY_DIR = HOME / ".local/state/omarchy/notifications/history"
+NOTE_ARCHIVE_DIR = STATE_PATH.parent / "notifications"
+NOTE_KEEP_DAYS = 7
+NOTE_NAME_RE = re.compile(r"^(\d{10,})-\d+\.json$")
+
+
+def archive_notifications(history=None, archive=None, now=None):
+    """Omarchy keeps its last 10 notifications; this keeps a copy of each for NOTE_KEEP_DAYS days."""
+    history, archive = Path(history or NOTE_HISTORY_DIR), Path(archive or NOTE_ARCHIVE_DIR)
+    archive.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    if history.is_dir():
+        for path in history.iterdir():
+            if NOTE_NAME_RE.match(path.name) and not (archive / path.name).exists():
+                shutil.copyfile(path, archive / path.name)
+                copied += 1
+    cutoff_ms = ((now or datetime.now(timezone.utc)) - timedelta(days=NOTE_KEEP_DAYS)).timestamp() * 1000
+    for path in archive.iterdir():
+        match = NOTE_NAME_RE.match(path.name)
+        if match and int(match.group(1)) < cutoff_ms:
+            path.unlink(missing_ok=True)
+    return copied
+
+
+CADENCES = ("daily", "weekly", "paused")
+SOURCES_HEADER = """\
+# Feeds Omabox delivers. Any Atom or RSS URL works; `omabox add <url>` also takes a web page, a GitHub repo,
+# a YouTube channel (@handle, /channel/, /c/, /user/), a Bluesky, Mastodon or X profile, a subreddit or Reddit
+# user (reddit.com/r/name, /u/name), news.ycombinator.com (front page, /newest, /best, /ask, /show) or any hnrss.org feed.
+# cadence: daily (every morning), weekly (Monday morning) or paused.
+# version_command: shell command printing the installed version; release titles are compared with it.
+# mute: posts whose title or text contains one of these words are never stored; "/.../" is a regex. Case-insensitive.
+# X sources leave replies out; `omabox mute NAME --reposts` leaves reposts out too (a route parameter in the url).
+# full_text = true: new posts also get the whole article from their web page at delivery, for feeds that only carry
+# a summary (`omabox fulltext NAME on`). Not for X sources.
+# Written by omabox add/remove/rename/cadence/mute/unmute/fulltext/opml import and the panel's sources view: comments
+# here are not kept.
+"""
+
+
+DEFAULT_SOURCES = Path(__file__).resolve().parent.parent / "data" / "sources.toml"
+
+
+def load_sources(path=None):
+    if path is None and not CONFIG_PATH.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(DEFAULT_SOURCES, CONFIG_PATH)
+    path = path or CONFIG_PATH
+    with open(path, "rb") as f:
+        try:
+            config = tomllib.load(f)
+        except tomllib.TOMLDecodeError as error:
+            raise ValueError(f"{home_relative(path)}: {error}") from None
+    raw_sources = config.get("source", [])
+    if not isinstance(raw_sources, list) or not all(isinstance(raw, dict) for raw in raw_sources):
+        raise ValueError(f"{home_relative(path)}: sources are [[source]] tables")
+    sources = []
+    for raw in raw_sources:
+        if not raw.get("name") or not raw.get("url"):
+            raise ValueError(f"source needs name and url: {raw}")
+        for key in ("name", "url", "cadence", "icon", "version_command"):
+            if key in raw and not isinstance(raw[key], str):
+                raise ValueError(f"{raw['name']}: {key} must be a string")
+        if raw.get("cadence", "daily") not in CADENCES:
+            raise ValueError(f"{raw['name']}: cadence must be one of {', '.join(CADENCES)}")
+        mute = raw.get("mute", [])
+        if not isinstance(mute, list) or not all(isinstance(rule, str) for rule in mute):
+            raise ValueError(f"{raw['name']}: mute must be a list of strings")
+        if not isinstance(raw.get("full_text", False), bool):
+            raise ValueError(f"{raw['name']}: full_text must be true or false")
+        raw.setdefault("cadence", "daily")
+        sources.append(raw)
+    return sources
+
+
+def toml_string(value):
+    # JSON string escapes are a subset of TOML basic-string escapes.
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def save_sources(sources, path=None):
+    path = Path(path or CONFIG_PATH)
+    blocks = []
+    for source in sources:
+        lines = ["[[source]]"]
+        for key in ("name", "url", "cadence", "icon", "version_command"):
+            if source.get(key):
+                lines.append(f"{key} = {toml_string(source[key])}")
+        if source.get("mute"):
+            lines.append(f"mute = [{', '.join(toml_string(rule) for rule in source['mute'])}]")
+        if source.get("full_text"):
+            lines.append("full_text = true")
+        blocks.append("\n".join(lines))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(SOURCES_HEADER + "\n" + "\n\n".join(blocks) + "\n")
+    os.replace(tmp, path)
+
+
+def name_taken(sources, name):
+    return any(s["name"] == name for s in sources)
+
+
+def unique_name(sources, name):
+    candidate, n = name, 2
+    while name_taken(sources, candidate):
+        candidate, n = f"{name} ({n})", n + 1
+    return candidate
+
+
+OMABOX_NS = "https://github.com/wienieclaurowy/omabox"
+
+
+def opml_export(sources, now=None):
+    ET.register_namespace("omabox", OMABOX_NS)
+    root = ET.Element("opml", version="2.0")
+    head = ET.SubElement(root, "head")
+    ET.SubElement(head, "title").text = "Omabox sources"
+    ET.SubElement(head, "dateCreated").text = format_datetime(now or datetime.now(timezone.utc), usegmt=True)
+    body = ET.SubElement(root, "body")
+    for source in sources:
+        ET.SubElement(body, "outline", {"text": source["name"], "title": source["name"], "type": "rss",
+                                        "xmlUrl": source["url"], f"{{{OMABOX_NS}}}cadence": source["cadence"]})
+    ET.indent(root)
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
+
+
+def opml_feeds(data):
+    """(name, url, cadence) for every outline with a feed URL; group outlines only nest others."""
+    root = ET.fromstring(data)
+    if root.tag != "opml":
+        raise ValueError(f"not an OPML document (root <{root.tag}>)")
+    for outline in root.iter("outline"):
+        url = next((value for key, value in outline.attrib.items() if key.lower() == "xmlurl"), "").strip()
+        if url:
+            name = " ".join((outline.get("text") or outline.get("title") or "").split())
+            yield name, url, outline.get(f"{{{OMABOX_NS}}}cadence", "")
+
+
+def opml_import(sources, data, cadence=None):
+    """sources plus the document's feeds not subscribed yet, and how many were added and skipped. No network."""
+    sources = list(sources)
+    urls = {s["url"] for s in sources}
+    added = skipped = 0
+    for name, url, own_cadence in opml_feeds(data):
+        if url in urls or not url.startswith(("https://", "http://")):
+            skipped += 1
+            continue
+        name = unique_name(sources, name or urllib.parse.urlparse(url).hostname or url)
+        sources.append({"name": name, "url": url, "cadence": cadence or (own_cadence if own_cadence in CADENCES else "daily")})
+        urls.add(url)
+        added += 1
+    return sources, added, skipped
+
+
+@contextlib.contextmanager
+def locked():
+    # The panel marks items read while the timer may be fetching; both read-modify-write items.json.
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_PATH.with_suffix(".lock"), "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def download(url, headers=None):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.geturl(), response.read()
+
+
+def download_feed(url, cached=None, opener=urllib.request.urlopen):
+    """Conditional GET: (body, validators), body None when the server answers 304 Not Modified."""
+    cached = cached or {}
+    headers = {"User-Agent": USER_AGENT}
+    # Validators stand for items built by one MEDIA_VERSION; after a bump the body is needed to rebuild them.
+    if cached.get("media") == MEDIA_VERSION:
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("modified"):
+            headers["If-Modified-Since"] = cached["modified"]
+    try:
+        with opener(urllib.request.Request(url, headers=headers), timeout=30) as response:
+            data, reply = response.read(), response.headers
+    except urllib.error.HTTPError as error:
+        if error.code == 304:
+            error.close()
+            return None, cached
+        raise
+    validators = {key: value for key, value in (("etag", reply.get("ETag")), ("modified", reply.get("Last-Modified"))) if value}
+    return data, ({**validators, "media": MEDIA_VERSION} if validators else {})
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def weekly_day(state):
+    """Weekday index (Monday 0) weekly sources come in on: `omabox delivery --weekly-day`, Monday by default."""
+    day = state.get("weekly_day", "mon")
+    return WEEKDAYS.index(day) if day in WEEKDAYS else 0
+
+
+def is_due(source, last_fetched, now=None, weekday=0):
+    now = now or datetime.now().astimezone()
+    if source["cadence"] == "paused":
+        return False
+    if not last_fetched:
+        return True
+    last = datetime.fromisoformat(last_fetched).astimezone(now.tzinfo)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if source["cadence"] == "weekly":
+        start -= timedelta(days=(now.weekday() - weekday) % 7)
+    return last < start
+
+
+GITHUB_REPO_RE = re.compile(r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?(?:$|/releases/?$)")
+
+
+YOUTUBE_CHANNEL_RE = re.compile(r"^https?://(?:www\.|m\.)?youtube\.com/channel/(UC[\w-]{22})(?:[/?#]|$)", re.I)
+BLUESKY_PROFILE_RE = re.compile(r"^https?://(?:www\.)?bsky\.app/profile/([\w.:-]+)/?(?:[?#].*)?$", re.I)
+HN_PAGE_RE = re.compile(r"^https?://news\.ycombinator\.com(?:/(news|newest|best|ask|show|jobs)?)?/?(?:[?#].*)?$", re.I)
+REDDIT_RE = re.compile(r"^https?://(?:(?:www|old|new|np)\.)?reddit\.com/(r|u|user)/(\w[\w-]*)/?(?:[?#].*)?$", re.I)
+# EU visitors can get a cookie-consent interstitial instead of the channel page; SOCS=CAI answers "reject all".
+YOUTUBE_CONSENT = {"Cookie": "SOCS=CAI"}
+
+
+def site_feed(url):
+    """The feed of a YouTube channel id, Bluesky profile, Hacker News list or subreddit/Reddit user, from the
+    URL alone; None for anything else. YouTube @handle, /c/ and /user/ pages link their feed themselves."""
+    youtube = YOUTUBE_CHANNEL_RE.match(url)
+    if youtube:
+        return f"https://www.youtube.com/feeds/videos.xml?channel_id={youtube.group(1)}"
+    bluesky = BLUESKY_PROFILE_RE.match(url)
+    if bluesky:
+        return f"https://bsky.app/profile/{bluesky.group(1)}/rss"
+    hacker_news = HN_PAGE_RE.match(url)
+    if hacker_news:
+        page = (hacker_news.group(1) or "news").lower()
+        return f"https://hnrss.org/{'frontpage' if page == 'news' else page}"
+    reddit = REDDIT_RE.match(url)
+    if reddit:
+        return f"https://www.reddit.com/{'r' if reddit.group(1).lower() == 'r' else 'user'}/{reddit.group(2)}/.rss"
+    return None
+
+
+def is_youtube(url):
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host == "youtube.com" or host.endswith(".youtube.com")
+
+
+class FeedLinkFinder(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        kind = (attrs.get("type") or "").lower()
+        if tag == "link" and "alternate" in (attrs.get("rel") or "").lower() and kind in (
+            "application/atom+xml", "application/rss+xml", "application/feed+xml"
+        ) and attrs.get("href"):
+            self.links.append(attrs["href"])
+
+
+def feed_title(data):
+    root = ET.fromstring(data)
+    if root.tag == ATOM + "feed":
+        return html.unescape(root.findtext(ATOM + "title") or "").strip()
+    return html.unescape(root.findtext("channel/title") or "").strip()
+
+
+def latest_entry(entries):
+    """Newest entry's title and date; posts without a title (Bluesky, Mastodon) show their opening words."""
+    if not entries:
+        return None
+    entry = max(entries, key=lambda e: e["published"])
+    return {"title": entry["title"] or excerpt(sanitize(entry["html"])[1], 80), "published": entry["published"]}
+
+
+def discover(url):
+    """Resolve a page, repo or feed URL to a feed. Returns url, title and the newest entry."""
+    url = url.strip()
+    if not url.startswith(("https://", "http://")):
+        url = "https://" + url
+    github = GITHUB_REPO_RE.match(url)
+    if github:
+        url = f"https://github.com/{github.group(1)}/{github.group(2)}/releases.atom"
+    url = site_feed(url) or url
+    # The panel's add passes discover's own RSSHub URL back in, so those need the container too.
+    x_feed = x_profile_feed(url) or (url if x_route(url) else None)
+    if x_feed:
+        with rsshub_session():
+            try:
+                _, data = download(x_feed)
+            except urllib.error.HTTPError as error:
+                raise ValueError(fetch_error(error, x_feed)) from None
+        entries = list(parse_feed(data))
+        name = x_route(x_feed)[0].rsplit("/", 1)[1]
+        return {"url": x_feed, "title": f"@{name} on X", "latest": latest_entry(entries), "count": len(entries)}
+    final_url, data = download(url, YOUTUBE_CONSENT if is_youtube(url) else None)
+    try:
+        entries = list(parse_feed(data))
+        feed_url = final_url
+    except (ET.ParseError, NotAFeed):
+        finder = FeedLinkFinder()
+        finder.feed(data.decode("utf-8", "replace"))
+        if not finder.links:
+            raise ValueError("no feed found on that page")
+        feed_url = urllib.parse.urljoin(final_url, finder.links[0])
+        final_url, data = download(feed_url)
+        feed_url = final_url
+        entries = list(parse_feed(data))
+    title = feed_title(data)
+    if github:
+        title = f"{github.group(2)} releases"
+    return {"url": feed_url, "title": title or urllib.parse.urlparse(feed_url).netloc, "latest": latest_entry(entries),
+            "count": len(entries)}
+
+
+RSSHUB_IMAGE = os.environ.get("OMABOX_RSSHUB_IMAGE", "docker.io/diygod/rsshub:latest")
+RSSHUB_PORT = int(os.environ.get("OMABOX_RSSHUB_PORT", "1200"))
+RSSHUB_CONTAINER = "omabox-rsshub"
+RSSHUB_BASE = f"http://127.0.0.1:{RSSHUB_PORT}"
+X_TOKEN_PATH = CONFIG_PATH.parent / "x-token"
+X_RESERVED = {"home", "explore", "i", "search", "settings", "notifications", "messages", "login", "signup", "tos", "privacy"}
+X_PROFILE_RE = re.compile(r"^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/(\w{1,15})/?(?:[?#].*)?$", re.I)
+X_POST_RE = re.compile(r"^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/(\w{1,15})/status/(\d+)", re.I)
+
+
+def needs_rsshub(url):
+    parts = urllib.parse.urlparse(url)
+    return parts.hostname in ("127.0.0.1", "localhost") and (parts.port or 80) == RSSHUB_PORT
+
+
+def x_profile_feed(url):
+    """https://x.com/example -> the local RSSHub route for that account, else None."""
+    match = X_PROFILE_RE.match(url.strip())
+    if not match or match.group(1).lower() in X_RESERVED:
+        return None
+    return f"{RSSHUB_BASE}/twitter/user/{match.group(1)}"
+
+
+def x_post_ref(link):
+    """https://x.com/example/status/123 -> ("example", "123"), else None."""
+    match = X_POST_RE.match(link or "")
+    return (match.group(1), match.group(2)) if match else None
+
+
+X_USER_ROUTE_RE = re.compile(r"^(https?://[^/]+/twitter/user/[^/?#]+)(?:/([^/?#]*))?/?$")
+# RSSHub's named routeParams (twitter/utils parseRouteParams); anything else is read as includeRts=...&includeReplies=...
+X_ROUTE_ALIASES = {"exclude_rts": "includeRts=false", "exclude_rts_replies": "includeRts=false",
+                   "exclude_replies_rts": "includeRts=false", "include_replies": "includeReplies=true"}
+
+
+def x_route(url):
+    """(route, routeParams dict) of a local RSSHub X user timeline URL, else None."""
+    match = X_USER_ROUTE_RE.match(url) if needs_rsshub(url) else None
+    if not match:
+        return None
+    raw = match.group(2) or ""
+    return match.group(1), dict(urllib.parse.parse_qsl(X_ROUTE_ALIASES.get(raw, raw)))
+
+
+def x_hidden(url):
+    """RSSHub's user route leaves replies out and keeps reposts unless routeParams say otherwise; it reads any
+    value but "false" and "0" as true."""
+    _, params = x_route(url)
+    off = ("false", "0")
+    return {"reposts": params.get("includeRts", "true").lower() in off,
+            "replies": params.get("includeReplies", "false").lower() in off}
+
+
+def x_route_url(url, reposts=None, replies=None):
+    """url with reposts and/or replies hidden (True) or shown (False); RSSHub's defaults stay out of the URL."""
+    route, params = x_route(url)
+    if reposts is not None:
+        params.pop("includeRts", None)
+        if reposts:
+            params["includeRts"] = "false"
+    if replies is not None:
+        params.pop("includeReplies", None)
+        if not replies:
+            params["includeReplies"] = "true"
+    query = urllib.parse.urlencode(params)
+    return f"{route}/{query}" if query else route
+
+
+def x_feed_url(url):
+    """What a fetch of an X source asks RSSHub for: JSON (parse_x_feed), and on user timelines the quoted authors'
+    avatars too (RSSHub's showQuotedAuthorAvatarInDesc)."""
+    route = x_route(url)
+    if route:
+        url = f"{route[0]}/{urllib.parse.urlencode({**route[1], 'showQuotedAuthorAvatarInDesc': '1'})}"
+    return url + "?format=json"
+
+
+def rsshub_up(timeout=2):
+    try:
+        with urllib.request.urlopen(RSSHUB_BASE + "/", timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def wait_for_rsshub(seconds=90):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if rsshub_up():
+            return
+        time.sleep(1)
+    raise RuntimeError(f"RSSHub did not answer on {RSSHUB_BASE} within {seconds}s")
+
+
+def container_engine(which=shutil.which):
+    """podman first (rootless, what the project is tested with); docker takes the same arguments used here."""
+    return next((tool for tool in ("podman", "docker") if which(tool)), None)
+
+
+@contextlib.contextmanager
+def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rsshub_up, token_path=None, engine=None):
+    """Runs the RSSHub container (rootless podman) only for the duration of a fetch. An RSSHub the user already
+    runs on the port is used and left alone. The X token goes through a 0600 env file deleted right after start,
+    never through argv, so it does not show up in ps or in error messages."""
+    if not needed:
+        yield
+        return
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    # fetch and `omabox replies` share the container: without the lock one run stops it under the other
+    with open(runtime / "omabox-rsshub.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if up():
+            yield
+            return
+        with rsshub_container(run, wait, token_path, engine, runtime):
+            yield
+
+
+@contextlib.contextmanager
+def rsshub_container(run, wait, token_path, engine, runtime):
+    engine = engine or container_engine()
+    if not engine:
+        raise RuntimeError(f"X sources need podman or docker, or an RSSHub already running on {RSSHUB_BASE}")
+    token_path = Path(token_path or X_TOKEN_PATH)
+    token = token_path.read_text().strip() if token_path.exists() else ""
+    if not token:
+        raise RuntimeError(f"X sources need the auth_token cookie in {token_path} (mode 600)")
+    env_file = runtime / "omabox-rsshub.env"
+    run([engine, "rm", "-f", RSSHUB_CONTAINER], capture_output=True, timeout=30)
+    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(f"TWITTER_AUTH_TOKEN={token}\nCACHE_TYPE=memory\nNODE_ENV=production\n")
+        started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER,
+                       "-p", f"127.0.0.1:{RSSHUB_PORT}:1200", "--env-file", str(env_file), RSSHUB_IMAGE],
+                      capture_output=True, text=True, timeout=300)
+    finally:
+        env_file.unlink(missing_ok=True)
+    if started.returncode != 0:
+        raise RuntimeError(f"{engine} run failed: {(started.stderr or '').strip()[-300:]}")
+    try:
+        wait()
+        yield
+    finally:
+        run([engine, "stop", "-t", "5", RSSHUB_CONTAINER], capture_output=True, timeout=60)
+
+
+def home_relative(path):
+    path = Path(path)
+    return f"~/{path.relative_to(HOME)}" if path.is_relative_to(HOME) else str(path)
+
+
+X_TOKEN_ERROR = f"X token rejected: refresh {home_relative(X_TOKEN_PATH)} (auth_token cookie from x.com)"
+# RSSHub's error page reads "Error: Twitter API error: <status>" when X answers >= 400; codes 32/89 are X's
+# "could not authenticate" and "invalid or expired token".
+X_TOKEN_REJECTED_RE = re.compile(r"Twitter API error: 40[13]\b|user lookup failed \(codes?: [\d, ]*\b(?:32|89)\b")
+
+
+def http_error_body(error, limit=256 * 1024):
+    try:
+        with error:
+            return error.read(limit).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def fetch_error(error, url):
+    """The error text stored for a source. RSSHub's error page is only classified, never stored: its
+    "Twitter cookie for token ... is not valid" message carries the first characters of the token."""
+    if isinstance(error, urllib.error.HTTPError) and needs_rsshub(url) and "/twitter/" in url:
+        if X_TOKEN_REJECTED_RE.search(http_error_body(error)):
+            return X_TOKEN_ERROR
+    return f"{type(error).__name__}: {error}"
+
+
+IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def default_desktop_file(mime, run=subprocess.run):
+    """Path of the user's default .desktop for mime, or None."""
+    if not shutil.which("xdg-mime"):
+        return None
+    desktop_id = run(["xdg-mime", "query", "default", mime], capture_output=True, text=True, timeout=5).stdout.strip()
+    if not desktop_id.endswith(".desktop"):
+        return None
+    data_dirs = [os.environ.get("XDG_DATA_HOME") or str(HOME / ".local/share")]
+    data_dirs += (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    return next((path for d in data_dirs if d for path in [Path(d) / "applications" / desktop_id] if path.is_file()), None)
+
+
+def desktop_exec(path):
+    """The Exec= line of a .desktop file's [Desktop Entry] group, or None."""
+    group = None
+    for raw in Path(path).read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            group = line
+        elif group == "[Desktop Entry]" and line.startswith("Exec="):
+            return line[len("Exec="):]
+    return None
+
+
+def expand_exec(exec_line, paths, start):
+    """argv from a desktop Exec line. Multi-file viewers get every picture, rotated so the clicked one comes first."""
+    ordered = paths[start:] + paths[:start]
+    argv, placed = [], False
+    for token in shlex.split(exec_line):
+        if token in ("%F", "%U"):
+            argv += ordered
+            placed = True
+        elif token in ("%f", "%u"):
+            argv.append(ordered[0])
+            placed = True
+        elif token in ("%i", "%c", "%k"):
+            continue
+        else:
+            argv.append(token.replace("%%", "%"))
+    return argv if placed else argv + [ordered[0]]
+
+
+def viewer_argv(paths, start):
+    """The default image viewer's command, then imv, then xdg-open."""
+    desktop = default_desktop_file(IMAGE_MIME.get(Path(paths[start]).suffix, "image/png"))
+    exec_line = desktop_exec(desktop) if desktop else None
+    if exec_line:
+        return expand_exec(exec_line, paths, start)
+    if shutil.which("imv"):
+        return ["imv", "-n", paths[start]] + paths
+    return ["xdg-open", paths[start]]
+
+
+def window_addresses(run=subprocess.run):
+    """Hyprland client window addresses, or None outside Hyprland."""
+    if not shutil.which("hyprctl") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return None
+    out = run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5).stdout
+    try:
+        return {client["address"] for client in json.loads(out)}
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def find_source(sources, name):
+    for source in sources:
+        if source["name"] == name:
+            return source
+    sys.exit(f"no source named {name!r}")
+
+
+def record_error(state, name, text, stamp):
+    """failing_since keeps the first error of a streak, for the "failing for N days" warning."""
+    state["errors"][name] = text
+    state.setdefault("failing_since", {}).setdefault(name, stamp)
+
+
+def record_success(state, name, stamp):
+    state["errors"].pop(name, None)
+    state.setdefault("failing_since", {}).pop(name, None)
+    state["fetched"][name] = stamp
+
+
+FAILING_WARN_DAYS = 3
+QUIET_WARN_DAYS = 90
+
+
+def staleness(source, state, now=None):
+    """{"kind": "failing" | "quiet", "days": N} for a source failing FAILING_WARN_DAYS or whose newest stored post
+    is QUIET_WARN_DAYS old, else None. Paused sources are not fetched, so neither applies to them."""
+    if source["cadence"] == "paused":
+        return None
+    now = now or datetime.now(timezone.utc)
+    name = source["name"]
+    since = state["failing_since"].get(name) if name in state["errors"] else None
+    if since:
+        days = (now - datetime.fromisoformat(since)).days
+        if days >= FAILING_WARN_DAYS:
+            return {"kind": "failing", "days": days}
+    newest = max((item["published"] for item in state["items"] if item["source"] == name), default="")
+    if newest:
+        days = (now - datetime.fromisoformat(newest)).days
+        if days >= QUIET_WARN_DAYS:
+            return {"kind": "quiet", "days": days}
+    return None
+
+
+def stale_text(stale):
+    return f"{'failing' if stale['kind'] == 'failing' else 'no new posts'} for {stale['days']} days"
+
+
+def fetch_source(state, source, stamp, get=download_feed, extract=fetch_article):
+    """Returns how many posts were added (0 on failure or when the feed is unchanged)."""
+    name = source["name"]
+    added = 0
+    try:
+        x_feed = needs_rsshub(source["url"]) and "/twitter/" in source["url"]
+        data, validators = get(x_feed_url(source["url"]) if x_feed else source["url"], state["http"].get(name))
+        if data is None:
+            record_success(state, name, stamp)
+            print(f"{name}: not modified")
+            return 0
+        mentions = "https://x.com/" if x_feed else ""
+        muted = mute_filter(source.get("mute"), lambda problem: print(f"{name}: {problem}, skipped", file=sys.stderr))
+        article = extract if source.get("full_text") and not needs_rsshub(source["url"]) else None
+        entries = list(parse_x_feed(data) if x_feed else parse_feed(data))
+        added = merge(state, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or source["url"]),
+                      mentions_base=mentions, cards=True, muted=muted, article=article)
+        record_success(state, name, stamp)
+        if validators:
+            state["http"][name] = validators
+        else:
+            state["http"].pop(name, None)
+        ensure_icon(state, source, data)
+        if mentions:
+            ensure_profile(state, source, data)
+        print(f"{name}: {added} new")
+    except Exception as error:  # one broken feed must not block the others
+        record_error(state, name, fetch_error(error, source["url"]), stamp)
+        print(f"{name}: {state['errors'][name]}", file=sys.stderr)
+    return added
+
+
+def fetch_via_rsshub(state, sources, stamp, added, fetch=fetch_source):
+    """After X rejects the token RSSHub drops it and serves later user routes as empty guest feeds (200),
+    so the X sources after the first rejection get its error instead of a fetch."""
+    rejected = False
+    for source in sources:
+        name = source["name"]
+        if rejected and "/twitter/" in source["url"]:
+            record_error(state, name, X_TOKEN_ERROR, stamp)
+            continue
+        added[name] = fetch(state, source, stamp)
+        rejected = rejected or state["errors"].get(name) == X_TOKEN_ERROR
+
+
+def network_error(text):
+    """HTTPError is a URLError subclass but keeps its own name, so a feed answering 404 or 500 does not match.
+    429 does: Reddit allows about one anonymous request a minute, so a run with several subreddits hits it."""
+    return text.startswith(("URLError:", "TimeoutError:", "ConnectionResetError:", "ConnectionRefusedError:",
+                            "HTTPError: HTTP Error 429:"))
+
+
+def due_sources(sources, state, args):
+    if args.offline or (paused(state) and not args.all):
+        return []
+    return [source for source in sources
+            if (not args.only or source["name"] in args.only)
+            and (not args.retry or network_error(state["errors"].get(source["name"], "")))
+            and (args.all and source["cadence"] != "paused" or is_due(source, state["fetched"].get(source["name"]), weekday=weekly_day(state)))]
+
+
+def fetch_host(url):
+    """The public host a fetch of url needs DNS for. RSSHub's X routes resolve x.com inside the container."""
+    if needs_rsshub(url):
+        return "x.com" if "/twitter/" in url else None
+    return urllib.parse.urlparse(url).hostname
+
+
+def wait_for_network(hosts, seconds=60, resolve=socket.getaddrinfo, sleep=time.sleep, clock=time.monotonic):
+    """True once any host resolves, False after seconds. The user systemd manager has no network-online.target,
+    so Persistent=true catch-up runs at login start before DHCP finishes."""
+    deadline = clock() + seconds
+    while True:
+        for host in hosts:
+            try:
+                resolve(host, 443)
+                return True
+            except OSError:
+                pass
+        if clock() >= deadline:
+            return False
+        sleep(2)
+
+
+def delivery_message(added_by_source):
+    total = sum(added_by_source.values())
+    names = ", ".join(name for name, count in added_by_source.items() if count)
+    return f"{total} new post{'s' if total != 1 else ''}", names
+
+
+def send_notification(summary, body, view, glyph, run=subprocess.run):
+    """Normal urgency: Omarchy's do-not-disturb silences it into history like any other. Clicking opens view."""
+    open_view = json.dumps(["omarchy-shell", "omabox", "toggleView", view])
+    try:
+        run(["notify-send", "-a", "Omabox", "-u", "normal",
+             "-h", f"string:omarchy-exec-argv:{open_view}",
+             "-h", f"string:omarchy-glyph:{glyph}",
+             f"Omabox: {summary}", body], timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def notify_delivery(added_by_source):
+    summary, body = delivery_message(added_by_source)
+    send_notification(summary, body, "feed", chr(0xF0687))
+
+
+def token_notice(state, notify):
+    """Sources to name in the one rejected-token notification, [] once it went out. The first --notify run that
+    sees the error sends it; runs without --notify leave it for the timer; it rearms when every such error is gone."""
+    waiting = [name for name, error in state["errors"].items() if error == X_TOKEN_ERROR]
+    if not waiting:
+        state.pop("x_token_notified", None)
+        return []
+    if not notify or state.get("x_token_notified"):
+        return []
+    state["x_token_notified"] = True
+    return waiting
+
+
+def notify_token_rejected(waiting, send=send_notification):
+    send("X token rejected", f"Refresh {home_relative(X_TOKEN_PATH)} with the auth_token cookie from x.com. "
+         f"Waiting: {', '.join(waiting)}", "sources", chr(GLYPHS["twitter"]))
+
+
+def prune(state, sources):
+    names = {s["name"] for s in sources}
+    state["items"] = [i for i in state["items"] if i["source"] in names]
+    for key in SOURCE_STATE_KEYS:
+        state[key] = {k: v for k, v in state[key].items() if k in names}
+    prune_images(state)
+    live = {Path(icon["favicon"]).name for icon in state["icons"].values() if icon.get("favicon")}
+    live |= {Path(profile["avatar"]).name for profile in state["profiles"].values() if profile.get("avatar")}
+    if ICON_DIR.exists():
+        for path in ICON_DIR.iterdir():
+            if path.name not in live:
+                path.unlink(missing_ok=True)
+
+
+def cmd_fetch(args):
+    sources = load_sources()
+    # outside the lock: panel actions take it too and must not stall while the network comes up
+    due = due_sources(sources, load_state(), args)
+    if args.retry and not due:
+        return
+    hosts = {fetch_host(source["url"]) for source in due} - {None}
+    if hosts and not wait_for_network(hosts):
+        print("network: no DNS answer after 60s, fetching anyway", file=sys.stderr)
+    added = {}
+    with locked():
+        state = load_state()
+        stamp = now_iso()
+        for source in sources:
+            if source.get("version_command"):
+                version = installed_version(source["version_command"])
+                if version:
+                    state["installed"][source["name"]] = version
+        due = due_sources(sources, state, args)
+        via_rsshub = [source for source in due if needs_rsshub(source["url"])]
+        for source in due:
+            if not needs_rsshub(source["url"]):
+                added[source["name"]] = fetch_source(state, source, stamp)
+        if via_rsshub:
+            try:
+                with rsshub_session():
+                    fetch_via_rsshub(state, via_rsshub, stamp, added)
+            except Exception as error:
+                for source in via_rsshub:
+                    record_error(state, source["name"], f"RSSHub: {error}", stamp)
+                print(f"RSSHub: {error}", file=sys.stderr)
+        prune(state, sources)
+        if paused(state) and not args.all and not args.offline:
+            print(f"paused until {state['paused_until']}")
+        elif not args.offline and not args.only and not args.retry:
+            state["delivered"] = stamp
+            state.pop("paused_until", None)
+        waiting = token_notice(state, args.notify)
+        save_state(state)
+    if waiting:
+        notify_token_rejected(waiting)
+    if args.notify and sum(added.values()) > 0:
+        notify_delivery(added)
+
+
+def source_rows(sources, state, now=None):
+    rows = []
+    for source in sources:
+        name = source["name"]
+        rows.append({
+            "name": name,
+            "url": source["url"],
+            "cadence": source["cadence"],
+            # State files from before per-source fetch times only carry the delivery stamp.
+            "fetched": state["fetched"].get(name) or (state.get("delivered", "") if name not in state["errors"] else ""),
+            "error": state["errors"].get(name, ""),
+            "items": sum(1 for i in state["items"] if i["source"] == name),
+            "icon": state["icons"].get(name, {}),
+            "stale": staleness(source, state, now),
+            "mute": source.get("mute", []),
+            "full_text": bool(source.get("full_text")),
+            "x_hidden": x_hidden(source["url"]) if x_route(source["url"]) else None,
+        })
+    return rows
+
+
+def cmd_sources(args):
+    rows = source_rows(load_sources(), load_state())
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    for row in rows:
+        status = f"error: {row['error']}" if row["error"] else (row["fetched"] or "never fetched")
+        if row["stale"]:
+            status += f" ({stale_text(row['stale'])})"
+        print(f"{row['name']:<20} {row['cadence']:<7} {row['url']}\n{'':<20} {status}")
+
+
+def error_text(error):
+    """Errors Omabox raises on purpose read as they are; anything else keeps its type."""
+    return str(error) if isinstance(error, (ValueError, RuntimeError)) else f"{type(error).__name__}: {error}"
+
+
+def cmd_discover(args):
+    try:
+        found = discover(args.url)
+    except Exception as error:
+        message = error_text(error)
+        if args.json:
+            print(json.dumps({"error": message}))
+            return
+        sys.exit(message)
+    if args.json:
+        print(json.dumps(found, ensure_ascii=False))
+        return
+    print(f"{found['title']}\n{found['url']}")
+    if found["latest"]:
+        print(f"latest: {found['latest']['title']} ({found['latest']['published'][:10]})")
+
+
+def cmd_add(args):
+    sources = load_sources()
+    try:
+        found = discover(args.url)
+    except Exception as error:
+        sys.exit(error_text(error))
+    name = (args.name or found["title"]).strip()
+    if name_taken(sources, name):
+        sys.exit(f"a source named {name!r} already exists")
+    if any(s["url"] == found["url"] for s in sources):
+        sys.exit(f"already subscribed to {found['url']}")
+    source = {"name": name, "url": found["url"], "cadence": args.cadence}
+    sources.append(source)
+    save_sources(sources)
+    print(f"added {name}: {found['url']}")
+    if args.cadence != "paused":
+        with locked(), rsshub_session(needs_rsshub(source["url"])):
+            state = load_state()
+            fetch_source(state, source, now_iso())
+            save_state(state)
+
+
+def cmd_remove(args):
+    sources = load_sources()
+    find_source(sources, args.name)
+    sources = [s for s in sources if s["name"] != args.name]
+    save_sources(sources)
+    with locked():
+        state = load_state()
+        prune(state, sources)
+        save_state(state)
+    print(f"removed {args.name}")
+
+
+def cmd_rename(args):
+    sources = load_sources()
+    new = args.new.strip()
+    if not new:
+        sys.exit("name cannot be empty")
+    if new != args.old and name_taken(sources, new):
+        sys.exit(f"a source named {new!r} already exists")
+    find_source(sources, args.old)["name"] = new
+    save_sources(sources)
+    with locked():
+        state = load_state()
+        for item in state["items"]:
+            if item["source"] == args.old:
+                item["source"] = new
+        for key in SOURCE_STATE_KEYS:
+            if args.old in state[key]:
+                state[key][new] = state[key].pop(args.old)
+        save_state(state)
+    print(f"renamed {args.old} to {new}")
+
+
+def cmd_opml_export(args):
+    text = opml_export(load_sources())
+    if args.file:
+        Path(args.file).write_text(text)
+    else:
+        sys.stdout.write(text)
+
+
+def cmd_opml_import(args):
+    sources = load_sources() if CONFIG_PATH.exists() else []
+    try:
+        sources, added, skipped = opml_import(sources, Path(args.file).read_bytes(), args.cadence)
+    except (OSError, ET.ParseError, ValueError) as error:
+        sys.exit(f"cannot import {args.file}: {error}")
+    if added:
+        save_sources(sources)
+    print(f"added {added}, skipped {skipped}")
+
+
+def cmd_cadence(args):
+    sources = load_sources()
+    find_source(sources, args.name)["cadence"] = args.cadence
+    save_sources(sources)
+    print(f"{args.name}: {args.cadence}")
+
+
+def x_flags(source, args):
+    """(reposts, replies) asked for on the command line, or exits when the source is not an X one."""
+    if (args.reposts or args.replies) and not x_route(source["url"]):
+        sys.exit(f"{source['name']} is not an X source: --reposts and --replies only apply to X user timelines")
+    return args.reposts, args.replies
+
+
+def x_status(url):
+    hidden = x_hidden(url)
+    return f"X: reposts {'hidden' if hidden['reposts'] else 'shown'}, replies {'hidden' if hidden['replies'] else 'shown'}"
+
+
+def print_mute(source):
+    rules = source.get("mute", [])
+    if not rules:
+        print(f"no mute rules for {source['name']}")
+    for rule in rules:
+        try:
+            mute_matcher(rule)
+            print(rule)
+        except ValueError as error:
+            print(f"✗ {error}")
+    if x_route(source["url"]):
+        print(x_status(source["url"]))
+
+
+def cmd_mute(args):
+    sources = load_sources()
+    source = find_source(sources, args.name)
+    reposts, replies = x_flags(source, args)
+    if not args.patterns and not reposts and not replies:
+        print_mute(source)
+        return
+    rules = source.get("mute", [])
+    added = []
+    for pattern in args.patterns:
+        rule = pattern.strip()
+        try:
+            mute_matcher(rule)
+        except ValueError as error:
+            sys.exit(str(error))
+        if rule in rules or rule in added:
+            print(f"already muted: {rule}")
+        else:
+            added.append(rule)
+    stored = load_state()
+    for rule in added:
+        count = mutes_all(stored, args.name, mute_filter([rule]))
+        if count:
+            sys.exit(f"mute rule {rule} matches all {count} stored posts of {args.name}: not added")
+    old_url = source["url"]
+    if added:
+        source["mute"] = rules + added
+    if reposts or replies:
+        source["url"] = x_route_url(source["url"], reposts=True if reposts else None, replies=True if replies else None)
+    if added or source["url"] != old_url:
+        save_sources(sources)
+    dropped = 0
+    if added or source["url"] != old_url:
+        with locked():
+            state = load_state()
+            if added:
+                dropped = drop_muted(state, args.name, mute_filter(added))
+                prune_images(state)
+            if source["url"] != old_url:
+                state["http"].pop(args.name, None)
+            save_state(state)
+    for rule in added:
+        print(f"muted: {rule}")
+    if dropped:
+        print(f"removed {dropped} stored post{'s' if dropped != 1 else ''}")
+    if reposts or replies:
+        print(x_status(source["url"]))
+
+
+def cmd_unmute(args):
+    sources = load_sources()
+    source = find_source(sources, args.name)
+    reposts, replies = x_flags(source, args)
+    if not args.patterns and not reposts and not replies:
+        sys.exit("name the rules to remove" + (", or --reposts / --replies" if x_route(source["url"]) else ""))
+    rules = source.get("mute", [])
+    gone = {pattern.strip() for pattern in args.patterns}
+    missing = sorted(gone - set(rules))
+    if missing:
+        sys.exit(f"{args.name} has no mute rule {missing[0]!r}")
+    source["mute"] = [rule for rule in rules if rule not in gone]
+    if reposts or replies:
+        source["url"] = x_route_url(source["url"], reposts=False if reposts else None, replies=False if replies else None)
+    save_sources(sources)
+    # Posts muted so far were never stored; a full fetch instead of a 304 lets those still in the feed come in.
+    with locked():
+        state = load_state()
+        state["http"].pop(args.name, None)
+        save_state(state)
+    for rule in args.patterns:
+        print(f"unmuted: {rule.strip()}")
+    if reposts or replies:
+        print(x_status(source["url"]))
+
+
+def cmd_fulltext(args):
+    sources = load_sources()
+    source = find_source(sources, args.name)
+    if args.state is None:
+        print(f"{args.name}: full text {'on' if source.get('full_text') else 'off'}")
+        return
+    if args.state == "on" and needs_rsshub(source["url"]):
+        sys.exit(f"{args.name} is an X source: its posts have no article page")
+    if args.state == "on":
+        source["full_text"] = True
+    else:
+        source.pop("full_text", None)
+    save_sources(sources)
+    print(f"{args.name}: full text {args.state}" + (", for posts from the next fetch on" if args.state == "on" else ""))
+
+
+def cmd_list(args):
+    state = load_state()
+    items = sorted(state["items"], key=lambda i: i["published"], reverse=True)
+    for item in items:
+        if item.get("cleared") or (item["read"] and not args.all):
+            continue
+        mark = " " if item["read"] else "•"
+        print(f"{mark} {item['id']}  {item['published'][:10]}  {item['source']}: {item['title']}")
+
+
+def set_read(ids, value, everything=False):
+    with locked():
+        state = load_state()
+        wanted = set(ids)
+        for item in state["items"]:
+            if everything or item["id"] in wanted:
+                item["read"] = value
+                if not value:
+                    item.pop("cleared", None)
+        save_state(state)
+
+
+def cmd_read(args):
+    set_read(args.ids, True, args.all)
+
+
+def cmd_unread(args):
+    set_read(args.ids, False)
+
+
+def cmd_catchup(args):
+    try:
+        older = parse_duration(args.older) if args.older else None
+    except ValueError as error:
+        sys.exit(str(error))
+    if args.source:
+        find_source(load_sources(), args.source)
+    with locked():
+        state = load_state()
+        marked = catch_up(state["items"], older, args.source)
+        if marked:
+            save_state(state)
+    print(f"marked {marked} post{'s' if marked != 1 else ''} read")
+
+
+def cmd_clear_read(args):
+    with locked():
+        state = load_state()
+        cleared = clear_read(state["items"], args.ids)
+        if cleared:
+            save_state(state)
+    print(f"cleared {cleared} read post{'s' if cleared != 1 else ''}")
+
+
+def search_items(items, query=""):
+    """Posts whose title, source or plain text holds every word of query, in any case; newest first."""
+    words = query.lower().split()
+
+    def matches(item):
+        text = " ".join((item.get("title") or "", item.get("source") or "", strip_tags(item.get("html") or ""),
+                         strip_tags(item.get("full_html") or ""))).lower()
+        return all(word in text for word in words)
+
+    found = [item for item in items if not item.get("cleared") and (not words or matches(item))]
+    return sorted(found, key=lambda i: i.get("published") or "", reverse=True)
+
+
+def is_snoozed(item, now=None):
+    now_stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_utc(item.get("snoozed_until")) > now_stamp
+
+
+def search_row(item, now=None):
+    return {"id": item["id"], "title": item.get("title") or "", "source": item.get("source") or "",
+            "published": item.get("published") or "", "link": item.get("link") or "", "read": bool(item.get("read")),
+            "later": bool(item.get("later")), "snoozed": is_snoozed(item, now)}
+
+
+def cmd_search(args):
+    now = datetime.now(timezone.utc)
+    rows = [search_row(item, now) for item in search_items(load_state()["items"], " ".join(args.query))]
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    for row in rows:
+        mark = " " if row["read"] else "•"
+        flags = "".join(f"  [{flag}]" for flag in ("later", "snoozed") if row[flag])
+        print(f"{mark} {row['id']}  {row['published'][:10]}  {row['source']}: {row['title']}{flags}")
+
+
+def relative_date(value, now):
+    """Model.relativeTime's wording: 5m ago, 3h ago, 2d ago, then Sep 20, or Sep 20 2025 in another year."""
+    stamp = iso_utc(value)
+    if not stamp:
+        return ""
+    then = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    minutes = int((now - then).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    if minutes < 24 * 60:
+        return f"{minutes // 60}h ago"
+    if minutes < 7 * 24 * 60:
+        return f"{minutes // (24 * 60)}d ago"
+    local = then.astimezone()
+    return f"{local:%b} {local.day}" + ("" if local.year == now.astimezone().year else f" {local.year}")
+
+
+PICK_LIMIT = 300
+PICK_TIMEOUT = 600
+PICK_WIDTH = 760
+PICK_GLYPHS = {"later": "\U000f00c0", "unread": "●", "read": "○"}
+OMARCHY_MENU_PATH = HOME / ".config/omarchy/extensions/omarchy-menu.jsonc"
+MENU_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+MENU_SNIPPET = """\
+Launcher entry, for ~/.config/omarchy/extensions/omarchy-menu.jsonc (inside the outer braces):
+  "omabox-search": {"icon": "\U000f0349", "label": "Omabox: search posts", "action": "omabox pick", \
+"description": "Find a post and open it in the reader"},
+
+Keybinding, for ~/.config/hypr/bindings.lua:
+  o.bind("SUPER + CTRL + SHIFT + M", "Omabox search", "omabox pick")"""
+
+
+def menu_text(text, limit):
+    """One line for a menu row: a tab would split the option into glyph/label/subtext."""
+    text = " ".join(MENU_CONTROL_RE.sub(" ", str(text or "")).split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def pick_options(items, now=None, limit=PICK_LIMIT):
+    """Omarchy menu options "glyph<TAB>title<TAB>subtext" for the first `limit` posts, and the post id for each
+    "title<TAB>subtext", which is what the menu hands back (never the glyph). Same-looking rows get a counter."""
+    now = now or datetime.now(timezone.utc)
+    options, ids = [], {}
+    for item in items[:limit]:
+        label = menu_text(item.get("title"), 160) or "(untitled)"
+        marks = [menu_text(item.get("source"), 60), relative_date(item.get("published"), now)]
+        marks += [word for word, on in (("unread", not item.get("read")), ("read later", item.get("later")),
+                                        ("snoozed", is_snoozed(item, now))) if on]
+        subtext = " · ".join(mark for mark in marks if mark) or "post"
+        key, count = f"{label}\t{subtext}", 1
+        while key in ids:
+            count += 1
+            key = f"{label}\t{subtext} · {count}"
+        ids[key] = item["id"]
+        glyph = PICK_GLYPHS["later" if item.get("later") else "read" if item.get("read") else "unread"]
+        options.append(f"{glyph}\t{key}")
+    return options, ids
+
+
+def pick_selection(text, ids):
+    return ids.get(text.rstrip("\n"))
+
+
+def menu_select(options, prompt, run=subprocess.run, sleep=time.sleep, clock=time.monotonic, timeout=PICK_TIMEOUT,
+                runtime_dir=None):
+    """The option the user picked in the Omarchy menu's select mode, without its glyph; None when the menu was
+    closed or nothing came back within timeout seconds. ValueError when the menu cannot be shown."""
+    base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    # The menu writes both files after the pick; removing their folder makes a pick after the timeout a no-op.
+    folder = Path(tempfile.mkdtemp(prefix="omabox-pick-", dir=base))
+    selection, done = folder / "selection", folder / "done"
+    try:
+        selection.touch()
+        payload = {"mode": "select", "prompt": prompt, "options": options, "selectionFile": str(selection),
+                   "doneFile": str(done), "width": PICK_WIDTH}
+        try:
+            result = run(["omarchy-shell", "shell", "summon", "omarchy.menu", json.dumps(payload, ensure_ascii=False)],
+                         capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError(f"Omarchy menu unavailable: {error}") from None
+        if result.returncode != 0 or result.stdout.strip() != "ok":
+            raise ValueError(f"Omarchy menu unavailable: {(result.stderr or result.stdout).strip() or 'no answer'}")
+        deadline = clock() + timeout
+        while not done.exists():
+            if clock() > deadline:
+                return None
+            sleep(0.05)
+        return selection.read_text(encoding="utf-8", errors="replace").rstrip("\n") or None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def open_in_reader(post_id, run=subprocess.run):
+    """Opens the post in the Omabox panel's reader through the bar widget's IPC; ValueError when it cannot."""
+    try:
+        result = run(["omarchy-shell", "omabox", "openPost", post_id], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"omarchy-shell: {error}") from None
+    answer = result.stdout.strip()
+    if result.returncode != 0 or answer not in ("reading", "opened"):
+        raise ValueError(f"Omabox panel did not open {post_id}: {answer or result.stderr.strip() or 'no answer'}")
+
+
+def pick_post(query="", run=subprocess.run, select=menu_select, timeout=PICK_TIMEOUT, state=None, now=None):
+    """Shows the posts matching query in the Omarchy menu and opens the chosen one in the reader. Returns its id,
+    or None when the menu was cancelled. ValueError explains a failure."""
+    items = search_items((load_state() if state is None else state)["items"], query)
+    if not items:
+        raise ValueError(f"no posts match {query!r}" if query.strip() else "no posts yet")
+    options, ids = pick_options(items, now)
+    prompt = f"Omabox: {menu_text(query, 40)}" if query.strip() else "Omabox posts"
+    picked = select(options, prompt, run=run, timeout=timeout)
+    post_id = pick_selection(picked, ids) if picked else None
+    if post_id:
+        open_in_reader(post_id, run)
+    return post_id
+
+
+def cmd_pick(args):
+    try:
+        pick_post(" ".join(args.query), timeout=args.timeout)
+    except ValueError as error:
+        sys.exit(str(error))
+
+
+def cmd_open(args):
+    state = load_state()
+    item = next((i for i in state["items"] if i["id"] == args.id), None)
+    if item is None:
+        sys.exit(f"no item {args.id}")
+    if web_link(item["link"]):
+        webbrowser.open(item["link"])
+    set_read([args.id], True)
+
+
+ARTICLE_KEYS = ("full_html", "full_summary", "full_minutes", "full_fetched")
+X_HOSTS = ("x.com", "twitter.com")
+
+
+def article_refusal(item, sources):
+    """Why the post cannot get its full article, or "" when it can."""
+    link = item.get("link") or ""
+    if not link.startswith(("https://", "http://")):
+        return "this post has no web link"
+    host = (urllib.parse.urlparse(link).hostname or "").lower()
+    source = next((s for s in sources if s["name"] == item["source"]), None)
+    if any(host == x or host.endswith("." + x) for x in X_HOSTS) or (source and needs_rsshub(source["url"])):
+        return "X posts have no article page"
+    return ""
+
+
+def load_article(item_id, refresh=False, fetch=download_public, image_fetch=download_limited):
+    """The post's full-article fields and whether they are the stored copy. The page is fetched outside the state
+    lock (the panel's writes must not wait on the network), the result stored under it. ValueError explains a failure."""
+    item = next((i for i in load_state()["items"] if i["id"] == item_id), None)
+    if item is None:
+        raise ValueError(f"no post {item_id}")
+    if item.get("full_html") and not refresh:
+        return {key: item.get(key) for key in ARTICLE_KEYS}, True
+    try:
+        sources = load_sources()
+    except (OSError, ValueError):
+        sources = []
+    problem = article_refusal(item, sources)
+    if problem:
+        raise ValueError(problem)
+    try:
+        fields = fetch_article(item["link"], item.get("title", ""), fetch, image_fetch)
+    except Exception as error:
+        raise ValueError(article_error(error)) from None
+    fields["full_fetched"] = now_iso()
+    update_items([item_id], lambda stored: stored.update(fields))
+    return fields, False
+
+
+def cmd_article(args):
+    if args.forget:
+        with locked():
+            state = load_state()
+            for item in state["items"]:
+                if item["id"] == args.id:
+                    for key in ARTICLE_KEYS:
+                        item.pop(key, None)
+            save_state(state)
+            prune_images(state)
+        print(json.dumps({"id": args.id, "forgotten": True}) if args.json else f"{args.id}: back to the feed version")
+        return
+    try:
+        fields, cached = load_article(args.id, args.refresh)
+    except ValueError as error:
+        if args.json:
+            print(json.dumps({"error": str(error)}, ensure_ascii=False))
+            return
+        sys.exit(str(error))
+    if args.json:
+        print(json.dumps({"id": args.id, **fields, "cached": cached}, ensure_ascii=False))
+        return
+    words = len(strip_tags(fields["full_html"]).split())
+    print(f"{words} words, {fields['full_minutes']} min read" + (" (stored copy; --refresh fetches again)" if cached else ""))
+
+
+# repost_avatar: the reposted author's avatar, which only the tweet route's copy of the post carries
+REPLY_KEYS = ("replies_html", "replies_count", "replies_fetched", "repost_avatar")
+# RSSHub opens a reply's text with "Re " and the @names X prefills (the replied-to account first).
+REPLY_PREFIX_RE = re.compile(r"^\s*Re\s+((?:@\w{1,15}(?:\s+|(?=<)|$))+)")
+
+
+MAX_REPLY_THREADS = 50
+AVATAR_SIZE_RE = re.compile(r"_normal(\.\w+)$")
+PICTURE_TAG_RE = re.compile(r'(<img src="omabox-(?:img|poster):[0-9a-f]{20}\.\w+" width="\d+" height="\d+")>')
+
+
+def parse_replies(data, status_id):
+    """Replies in RSSHub's tweet-detail JSON feed, in X's order (most relevant first; the URL turns RSSHub's date
+    sort off). The feed also carries the post itself, the posts it answers and promoted posts; replies are the "Re "
+    ones with an id above the post's. parent is the id of the post a reply answers, "" when the feed names none."""
+    replies, seen = [], set()
+    for entry in json.loads(data).get("items") or []:
+        ref = x_post_ref(str(entry.get("url") or "").strip())
+        body = str(entry.get("content_html") or "")
+        prefix = REPLY_PREFIX_RE.match(body)
+        if not ref or not prefix or int(ref[1]) <= int(status_id) or ref[1] in seen:
+            continue
+        seen.add(ref[1])
+        authors = entry.get("authors") or [{}]
+        author = authors[0] if isinstance(authors[0], dict) else {}
+        # _extra carries one link: repost, else quote, else reply; a quoting reply names no parent
+        answered = next((x_post_ref(link.get("url")) for link in (entry.get("_extra") or {}).get("links") or []
+                         if link.get("type") == "reply"), None)
+        replies.append({"name": str(author.get("name") or "").strip() or ref[0], "handle": ref[0], "id": ref[1],
+                        "to": re.findall(r"@(\w+)", prefix.group(1))[0], "parent": answered[1] if answered else "",
+                        "avatar": AVATAR_SIZE_RE.sub(r"_bigger\1", str(author.get("avatar") or "")),
+                        "published": iso_utc(entry.get("date_published")), "html": body[prefix.end():]})
+    return replies
+
+
+def post_avatar(data, status_id):
+    """Avatar URL of the post itself in RSSHub's tweet-detail JSON feed, "" when the feed leaves it out."""
+    for entry in json.loads(data).get("items") or []:
+        ref = x_post_ref(str(entry.get("url") or "").strip())
+        if ref and ref[1] == status_id:
+            authors = entry.get("authors") or [{}]
+            author = authors[0] if isinstance(authors[0], dict) else {}
+            return AVATAR_SIZE_RE.sub(r"_200x200\1", str(author.get("avatar") or ""))
+    return ""
+
+
+def thread_replies(replies, author, limit=MAX_REPLY_THREADS):
+    """Threads (a reply to the post, then the replies under it, one level deep) in X's order: the first limit of
+    them and any later one the post's author answered in. A reply joins the thread holding the post it answers;
+    without a parent, the latest thread of the account its first @name points at (the post's author aside)."""
+    author = author.casefold()
+    threads, by_id, by_handle = [], {}, {}
+    for reply in replies:
+        target = reply["to"].casefold()
+        thread = by_id.get(reply["parent"]) if reply["parent"] else by_handle.get(target) if target != author else None
+        if thread is None:
+            thread = []
+            threads.append(thread)
+        thread.append(reply)
+        by_id[reply["id"]] = thread
+        by_handle[reply["handle"].casefold()] = thread
+    return [thread for index, thread in enumerate(threads)
+            if index < limit or any(reply["handle"].casefold() == author for reply in thread)]
+
+
+def fetch_avatars(urls, fetch=download_limited, directory=None):
+    """Avatar URL -> file name in the image cache, for those that download as pictures. In parallel: a post's
+    replies come from dozens of accounts."""
+    directory = Path(directory or IMAGE_DIR)
+
+    def one(url):
+        try:
+            picture = cache_image(url, fetch, directory, MAX_ICON_BYTES)
+        except Exception:
+            picture = None
+        return url, picture[0] if picture else None
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        return {url: name for url, name in pool.map(one, sorted(set(urls))) if name}
+
+
+def local_stamp(value):
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    return moment.strftime("%b %-d, %H:%M" if moment.year == datetime.now().year else "%b %-d %Y, %H:%M")
+
+
+REPLY_BLOCK_STARTS = ("<p", "<div", "<ul", "<ol", "<blockquote", "<pre")
+PICTURE_BLOCK_RE = re.compile(r'<p>(?:<img |<a href="[^"]*"><img src="omabox-poster:)')
+
+
+def reply_paragraphs(body, css):
+    """Sanitizer output with the css class on its paragraphs. Qt rich text drops a wrapping div's margins for the
+    loose text inside it, so spacing and indent sit on each paragraph; picture paragraphs stay as renderHtml wants."""
+    out, loose = [], []
+
+    def flush():
+        text = re.sub(r"^(?:\s|<br>)+|(?:\s|<br>)+$", "", "".join(loose))
+        if text:
+            out.append(f'<p class="{css}">{text}</p>')
+        loose.clear()
+
+    for block in top_level_blocks(body):
+        if not block.startswith(REPLY_BLOCK_STARTS):
+            loose.append(block)
+            continue
+        flush()
+        out.append(f'<p class="{css}">{block[3:]}' if block.startswith("<p>") and not PICTURE_BLOCK_RE.match(block) else block)
+    flush()
+    return "".join(out)
+
+
+def comment_markup(reply, author, images, avatars, depth, children=""):
+    """One reply as a table row: avatar cell, then the author line and text with the replies under it (children).
+    The post author's replies are op cards. Model.renderHtml sizes the avatar and its cell, and reads depth off
+    pictures to fit them in the narrower text column."""
+    op = "op" if reply["handle"].casefold() == author.casefold() else ""
+    body, _ = sanitize(reply["html"], images)
+    body = PICTURE_TAG_RE.sub(rf'\1 depth="{depth}">', body)
+    link = f"https://x.com/{reply['handle']}/status/{reply['id']}"
+    when = local_stamp(reply["published"]) if reply["published"] else "on X"
+    name = html.escape(reply["name"])
+    face = f'<img src="omabox-avatar:{avatars[reply["avatar"]]}">' if reply["avatar"] in avatars else ""
+    who = f'<span class="opname">{name}</span> <span class="badge">AUTHOR</span>' if op else f"<b>{name}</b>"
+    return (f'<table width="100%" cellspacing="0" cellpadding="0" class="{op}comment"><tr>'
+            f'<td class="{op}face" valign="top">{face}</td><td class="{op}cell" valign="top">'
+            f'<p class="who">{who} <span class="meta">@{reply["handle"]} · <a href="{link}">{when}</a></span></p>'
+            + reply_paragraphs(linkify(body, "https://x.com/"), "said") + children + "</td></tr></table>")
+
+
+def quote_markup(quote, images=None, mentions_base=""):
+    """A quoted post as a card under the post's text: avatar, name, handle and time as X heads it, then the text.
+    images: the item's ImageFetcher. depth 0 tells Model.renderHtml the pictures sit inside the card's padding."""
+    body, _ = sanitize(quote["html"], images)
+    body = PICTURE_TAG_RE.sub(r'\1 depth="0">', body)
+    meta = f"@{quote['handle']}" if quote["handle"] else ""
+    if quote["link"]:
+        when = local_stamp(quote["published"]) if quote.get("published") else "on X"
+        meta += f' · <a href="{html.escape(quote["link"], quote=True)}">{when}</a>'
+    who = " ".join(part for part in (f"<b>{html.escape(quote['name'])}</b>" if quote["name"] else "",
+                                     f'<span class="meta">{meta}</span>' if meta else "") if part)
+    face = images.avatar(quote["avatar"]) if images and who and quote.get("avatar") else ""
+    who = f"{face}&nbsp;{who}" if face else who
+    return ('<table width="100%" cellspacing="0" cellpadding="0" class="quote"><tr><td class="quotecell">'
+            + (f'<p class="who">{who}</p>' if who else "") + replying_to(quote.get("reply_to"), mentions_base)
+            + reply_paragraphs(linkify(body, mentions_base), "said") + "</td></tr></table>")
+
+
+def replying_to(handles, mentions_base=""):
+    """X's "Replying to @a, @b and @c" line over a reply's text, "" for none; past three, "and N others"."""
+    names = [f'<a href="{mentions_base}{handle}">@{handle}</a>' if mentions_base else f"@{handle}"
+             for handle in handles or []]
+    if len(names) > 3:
+        names = names[:2] + [f"{len(names) - 2} others"]
+    if not names:
+        return ""
+    return f'<p class="replyto">Replying to {", ".join(names[:-1]) + " and " if len(names) > 1 else ""}{names[-1]}</p>'
+
+
+def replies_markup(threads, author, fetched, images=None, avatars=None):
+    """The comments section under the post: a rule, a heading ]/[ jumps to, then each thread with its replies
+    inside the first reply's text column."""
+    avatars = avatars or {}
+    count = sum(len(thread) for thread in threads)
+    parts = ['<hr class="rule">', f'<p class="section">Comments <span class="count">{count}</span></p>',
+             f'<p class="meta">{"Top replies on X, most relevant first" if count else "No replies on X yet"}'
+             f' · fetched {local_stamp(fetched)}</p>']
+    for first, *rest in threads:
+        children = "".join(comment_markup(reply, author, images, avatars, 2) for reply in rest)
+        parts.append(comment_markup(first, author, images, avatars, 1, children))
+    return "".join(parts)
+
+
+def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session, image_fetch=download_limited):
+    """The X post's reply fields and whether they are the stored copy. Replies come from RSSHub's tweet route (X's
+    first page of them); like load_article, the network runs outside the state lock. ValueError explains a failure."""
+    item = next((i for i in load_state()["items"] if i["id"] == item_id), None)
+    if item is None:
+        raise ValueError(f"no post {item_id}")
+    if "replies_html" in item and not refresh:
+        return {key: item[key] for key in REPLY_KEYS if key in item}, True
+    ref = x_post_ref(item.get("link"))
+    if not ref:
+        raise ValueError("only X posts have replies to show")
+    # JSON, not RSS: only JSON Feed keeps each reply's avatar and the post it answers
+    url = f"{RSSHUB_BASE}/twitter/tweet/{ref[0]}/status/{ref[1]}?format=json&sorted=false"
+    try:
+        with session():
+            _, data = fetch(url)
+        threads = thread_replies(parse_replies(data, ref[1]), ref[0])
+        face = post_avatar(data, ref[1]) if item.get("repost") else ""
+    except RuntimeError as error:
+        raise ValueError(f"RSSHub: {error}") from None
+    except Exception as error:
+        raise ValueError(fetch_error(error, url)) from None
+    shown = [reply for thread in threads for reply in thread]
+    avatars = fetch_avatars([reply["avatar"] for reply in shown if reply["avatar"]] + ([face] if face else []), image_fetch)
+    stamp = now_iso()
+    fields = {"replies_html": replies_markup(threads, ref[0], stamp, ImageFetcher(item["link"], image_fetch), avatars),
+              "replies_count": len(shown), "replies_fetched": stamp}
+    if item.get("repost"):
+        fields["repost_avatar"] = avatars.get(face, "")
+    update_items([item_id], lambda stored: stored.update(fields))
+    return fields, False
+
+
+def cmd_replies(args):
+    try:
+        fields, cached = load_replies(args.id, args.refresh)
+    except ValueError as error:
+        if args.json:
+            print(json.dumps({"error": str(error)}, ensure_ascii=False))
+            return
+        sys.exit(str(error))
+    if args.json:
+        print(json.dumps({"id": args.id, **fields, "cached": cached}, ensure_ascii=False))
+        return
+    count = fields["replies_count"]
+    print(f"{count} {'reply' if count == 1 else 'replies'}" + (" (stored copy; --refresh fetches again)" if cached else ""))
+
+
+def cmd_pause(args):
+    with locked():
+        state = load_state()
+        if args.duration is None:
+            print(f"paused until {state['paused_until']}" if paused(state) else "not paused")
+            return
+        if args.duration.lower() in ("off", "resume", "0"):
+            state.pop("paused_until", None)
+            print("deliveries resumed; the next fetch brings everything due")
+        else:
+            until = datetime.now(timezone.utc) + parse_duration(args.duration)
+            state["paused_until"] = until.strftime("%Y-%m-%dT%H:%M:%SZ")
+            print(f"paused until {state['paused_until']}")
+        save_state(state)
+
+
+DEFAULT_DELIVERY = "08:00"
+DELIVERY_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+RETRY_MINUTES = 30
+# Qt timers stand still during suspend, so the plugin asks again at least this often to catch a missed delivery.
+TICK_MAX_SECONDS = 300
+TICK_MIN_SECONDS = 60
+
+
+def parse_delivery(text):
+    match = DELIVERY_RE.match(text.strip())
+    if not match:
+        raise ValueError(f"time like 07:30 or 18:00 expected, got {text!r}")
+    return f"{int(match[1]):02d}:{match[2]}"
+
+
+def delivery_time(state):
+    """HH:MM of the daily delivery, `omabox delivery` sets it."""
+    try:
+        return parse_delivery(state.get("delivery") or DEFAULT_DELIVERY)
+    except ValueError:
+        return DEFAULT_DELIVERY
+
+
+def last_delivery_moment(state, now=None):
+    """The most recent delivery time at or before now, in local time."""
+    now = now or datetime.now().astimezone()
+    hour, minute = map(int, delivery_time(state).split(":"))
+    moment = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return moment if moment <= now else moment - timedelta(days=1)
+
+
+def tick_plan(state, now=None):
+    """What a tick does now ("deliver", "retry" or None) and the seconds until the next tick is worth running.
+    A delivery missed while the machine was off or asleep comes at the next tick, like systemd's Persistent=true;
+    a pause holds deliveries until the first delivery time after it ends."""
+    now = now or datetime.now().astimezone()
+    moment = last_delivery_moment(state, now)
+    wait = (moment + timedelta(days=1) - now).total_seconds()
+    delivered = state.get("delivered")
+    until = state.get("paused_until")
+    held = bool(until) and datetime.fromisoformat(until) > moment
+    if paused(state, now):
+        wait = min(wait, (datetime.fromisoformat(until) - now).total_seconds())
+    elif not held and (not delivered or datetime.fromisoformat(delivered) < moment):
+        return "deliver", TICK_MIN_SECONDS
+    action = None
+    if any(network_error(text) for text in state["errors"].values()) and not paused(state, now):
+        tried = state.get("retried") or delivered
+        due_at = datetime.fromisoformat(tried) + timedelta(minutes=RETRY_MINUTES) if tried else now
+        if due_at <= now:
+            action = "retry"
+        else:
+            wait = min(wait, (due_at - now).total_seconds())
+    return action, int(max(TICK_MIN_SECONDS, min(TICK_MAX_SECONDS, wait)))
+
+
+def refresh_versions(sources):
+    """Stores installed versions that changed since the last run, so release tags follow an `omarchy update`."""
+    versions = {}
+    for source in sources:
+        if source.get("version_command"):
+            version = installed_version(source["version_command"])
+            if version:
+                versions[source["name"]] = version
+    if not versions or all(load_state()["installed"].get(name) == v for name, v in versions.items()):
+        return
+    with locked():
+        state = load_state()
+        state["installed"].update(versions)
+        save_state(state)
+
+
+def cmd_tick(args):
+    """One step of the plugin's scheduler: archive notifications, refresh versions, deliver or retry when due,
+    then print the seconds until the next tick."""
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR") or STATE_PATH.parent) / "omabox-tick.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(TICK_MIN_SECONDS)
+            return
+        with contextlib.suppress(OSError):
+            archive_notifications()
+        sources = load_sources()
+        refresh_versions(sources)
+        state = load_state()
+        action, _ = tick_plan(state)
+        # The first delivery stores old posts as read, so "40 new posts" would overstate it.
+        notify = bool(state.get("delivered"))
+        if action == "retry":
+            with locked():
+                state = load_state()
+                state["retried"] = now_iso()
+                save_state(state)
+        if action:
+            cmd_fetch(argparse.Namespace(offline=False, all=False, only=None, notify=notify, retry=action == "retry"))
+        print(tick_plan(load_state())[1])
+
+
+def cmd_delivery(args):
+    with locked():
+        state = load_state()
+        if args.time:
+            try:
+                at = parse_delivery(args.time)
+            except ValueError as error:
+                sys.exit(str(error))
+            if at == DEFAULT_DELIVERY:
+                state.pop("delivery", None)
+            else:
+                state["delivery"] = at
+        if args.weekly_day:
+            if args.weekly_day == "mon":
+                state.pop("weekly_day", None)
+            else:
+                state["weekly_day"] = args.weekly_day
+        if args.time or args.weekly_day:
+            save_state(state)
+    at = delivery_time(state)
+    day = weekly_day(state)
+    upcoming = (last_delivery_moment(state) + timedelta(days=1)).strftime("%a %H:%M")
+    if args.json:
+        print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming}))
+        return
+    print(f"daily delivery at {at}, weekly sources on {WEEKDAY_NAMES[day]}, next {upcoming}")
+
+
+def update_items(ids, change):
+    with locked():
+        state = load_state()
+        wanted = set(ids)
+        for item in state["items"]:
+            if item["id"] in wanted:
+                change(item)
+        save_state(state)
+
+
+def cmd_snooze(args):
+    until = args.until or next_morning(at=delivery_time(load_state()))
+    update_items(args.ids, lambda item: item.update({"snoozed_until": until}))
+
+
+def cmd_view(args):
+    """Opens pictures in the default viewer and returns when its window closes. Waits on the window, not the
+    process: single-instance viewers (loupe, eog) hand off to a running copy and exit at once."""
+    paths = [path for path in args.paths if Path(path).is_file()]
+    if not paths:
+        sys.exit("no pictures to show")
+    start = min(max(args.start, 0), len(paths) - 1)
+    argv = viewer_argv(paths, start)
+    before = window_addresses()
+    try:
+        viewer = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as error:
+        sys.exit(f"cannot start {argv[0]}: {error}")
+    if before is None:
+        sys.exit(viewer.wait())
+    window, deadline = None, time.monotonic() + 10
+    while window is None:
+        if time.monotonic() > deadline or (viewer.poll() not in (None, 0)):
+            sys.exit(f"{argv[0]} opened no window")
+        time.sleep(0.2)
+        window = next(iter((window_addresses() or before) - before), None)
+    while window in (window_addresses() or set()):
+        time.sleep(0.3)
+
+
+def pipe(source, sink):
+    try:
+        while data := source.recv(65536):
+            sink.sendall(data)
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            sink.shutdown(socket.SHUT_WR)
+
+
+def tunnel(client, connect=connect_public):
+    """One CONNECT request from mpv: the target is dialed by connect_public, which dials only the addresses it
+    checked, so neither a short-TTL DNS answer nor a redirect to another host can reach the LAN."""
+    with client:
+        request = b""
+        while b"\r\n\r\n" not in request:
+            chunk = client.recv(4096)
+            if not chunk or len(request) > 16384:
+                return
+            request += chunk
+        head, _, early = request.partition(b"\r\n\r\n")
+        method, _, target = head.split(b"\r\n", 1)[0].decode("latin-1").partition(" ")
+        host, _, port = target.split(" ", 1)[0].rpartition(":")
+        try:
+            if method != "CONNECT" or not port.isdigit():
+                raise ValueError(f"not a CONNECT request: {method}")
+            upstream = connect((host.strip("[]"), int(port)), timeout=15)
+        except (OSError, ValueError):
+            client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            return
+        with upstream:
+            upstream.settimeout(None)
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            if early:
+                upstream.sendall(early)
+            back = threading.Thread(target=pipe, args=(upstream, client), daemon=True)
+            back.start()
+            pipe(client, upstream)
+            back.join()
+
+
+def start_tunnels(connect=connect_public):
+    """Loopback CONNECT proxy for mpv, alive as long as this process; returns its http://127.0.0.1:port URL."""
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def serve():
+        while True:
+            client, _ = server.accept()
+            threading.Thread(target=tunnel, args=(client, connect), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{server.getsockname()[1]}"
+
+
+def player_argv(urls, start, proxy):
+    # ffmpeg sends every https connection through http_proxy, segments and redirects too; yt-dlp would not, hence --ytdl=no
+    return ["mpv", f"--playlist-start={start}", "--ytdl=no", f"--stream-lavf-o-append=http_proxy={proxy}", "--", *urls]
+
+
+def focus_window(address, run=subprocess.run):
+    """Lua-config Hyprland (0.56+) takes a Lua call after dispatch; older ones the classic dispatcher."""
+    for request in (f'hl.dsp.focus({{ window = "address:{address}" }})', f"focuswindow address:{address}"):
+        if run(["hyprctl", "dispatch", request], capture_output=True, text=True, timeout=5).stdout.strip() == "ok":
+            return
+
+
+def hold_focus(address, run=subprocess.run, seconds=1.5, every=0.1):
+    """Keeps the window focused for its first moments: it maps while the panel still holds the keyboard, and the
+    closing panel hands focus back to the window that had it before, so mpv would not get q."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            active = json.loads(run(["hyprctl", "activewindow", "-j"], capture_output=True, text=True, timeout=5).stdout)
+            if not isinstance(active, dict) or active.get("address") != address:
+                focus_window(address, run)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            return
+        time.sleep(every)
+
+
+def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.2, wait_seconds=30, tunnels=start_tunnels,
+             focus=hold_focus):
+    """Plays a post's videos in mpv from the clicked one and returns when mpv quits. Prints "opened" once mpv's
+    window is up: X files take about half a second to start, and the panel stays on screen until then.
+    mpv reaches the network only through the tunnel proxy, so feed-supplied addresses stay off the LAN."""
+    urls = args.urls
+    if not all(url.startswith("https://") for url in urls):
+        sys.exit("refused: videos play from https addresses only")
+    start = min(max(args.start, 0), len(urls) - 1)
+    proxy = tunnels()
+    env = {**os.environ, "http_proxy": proxy, "no_proxy": ""}
+    before = windows()
+    try:
+        player = run(player_argv(urls, start, proxy), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    except OSError as error:
+        sys.exit(f"cannot start mpv: {error}")
+    deadline = time.monotonic() + wait_seconds
+    window = None
+    while before is not None:
+        window = next(iter((windows() or before) - before), None)
+        if window:
+            break
+        if player.poll() is not None:
+            sys.exit(f"mpv could not play {urls[start]}")
+        if time.monotonic() > deadline:
+            player.terminate()
+            sys.exit("mpv opened no window")
+        time.sleep(poll_every)
+    print("opened", flush=True)
+    if window:
+        focus(window)
+    player.wait()
+
+
+def cmd_unsnooze(args):
+    update_items(args.ids, lambda item: item.pop("snoozed_until", None))
+
+
+def cmd_later(args):
+    def toggle(item):
+        if args.off or (item.get("later") and not args.on):
+            item.pop("later", None)
+        else:
+            item["later"] = True
+    update_items(args.ids, toggle)
+
+
+def cmd_archive_notifications(args):
+    copied = archive_notifications()
+    if args.verbose:
+        print(f"archived {copied}")
+
+
+def cmd_forget_notification(args):
+    for name in args.names:
+        if not NOTE_NAME_RE.match(name):
+            sys.exit(f"not a notification file name: {name}")
+        (NOTE_ARCHIVE_DIR / name).unlink(missing_ok=True)
+        (NOTE_HISTORY_DIR / name).unlink(missing_ok=True)
+
+
+def cmd_clear_notifications(args):
+    if NOTE_ARCHIVE_DIR.is_dir():
+        for path in NOTE_ARCHIVE_DIR.iterdir():
+            if NOTE_NAME_RE.match(path.name):
+                path.unlink(missing_ok=True)
+
+
+def directory_size(path):
+    return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file()) if Path(path).exists() else 0
+
+
+def cmd_doctor(args):
+    ok, bad = "✓", "✗"
+    problems = 0
+
+    def line(good, text):
+        nonlocal problems
+        problems += 0 if good else 1
+        print(f"{ok if good else bad} {text}")
+
+    try:
+        sources = load_sources()
+        line(True, f"sources.toml: {len(sources)} sources ({CONFIG_PATH})")
+    except Exception as error:
+        sources = []
+        line(False, f"sources.toml: {error}")
+    state = load_state()
+    line(STATE_PATH.exists(), f"state: {len(state['items'])} posts, {sum(not i.get('read') for i in state['items'])} unread ({STATE_PATH})")
+    action, wait = tick_plan(state)
+    print(f"  delivery: daily at {delivery_time(state)}, weekly sources on {WEEKDAY_NAMES[weekly_day(state)]}; "
+          f"the bar widget runs `omabox tick`, next check in {wait // 60} min" + (f" ({action} due)" if action else ""))
+    print(f"  last delivery: {state.get('delivered') or 'never'}")
+    if paused(state):
+        print(f"  paused until {state['paused_until']}")
+    for source in sources:
+        name = source["name"]
+        error = state["errors"].get(name)
+        when = state["fetched"].get(name) or "never"
+        stale = staleness(source, state)
+        note = f" ({stale_text(stale)})" if stale else ""
+        line(not error, f"{name} [{source['cadence']}]: {error or 'fetched ' + when}{note}")
+        mute_filter(source.get("mute"), lambda problem: line(False, f"{name}: {problem}"))
+    notes = len(list(NOTE_ARCHIVE_DIR.glob("*.json"))) if NOTE_ARCHIVE_DIR.exists() else 0
+    print(f"  notification archive: {notes} kept ({NOTE_KEEP_DAYS} days)")
+    print(f"  cache: images {directory_size(IMAGE_DIR) / 1e6:.1f} MB, icons {directory_size(ICON_DIR) / 1e3:.0f} kB")
+    try:
+        launcher = OMARCHY_MENU_PATH.read_text(encoding="utf-8")
+    except OSError:
+        launcher = ""
+    if "omabox pick" not in launcher:
+        print("  launcher search: not in the Omarchy menu yet (omabox pick --help)")
+    for tool, use in (("wl-copy", "copy link (yy)"), ("omarchy-update", "update (U)")):
+        line(shutil.which(tool) is not None, f"{tool}: {use}")
+    viewer = viewer_argv([str(IMAGE_DIR / "x.png")], 0)[0]
+    line(shutil.which(viewer) is not None, f"picture viewer (i): {viewer}")
+    line(shutil.which("mpv") is not None, "video player (i): mpv")
+    if any(needs_rsshub(source["url"]) for source in sources):
+        engine = container_engine()
+        line(engine is not None, f"X sources: {engine or 'needs podman or docker'}")
+    if problems:
+        sys.exit(1)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="omabox")
+    parser.add_argument("--version", action="version", version=f"omabox {VERSION}")
+    sub = parser.add_subparsers(dest="command", required=True)
+    fetch = sub.add_parser("fetch", help="fetch sources that are due")
+    fetch.add_argument("--offline", action="store_true", help="only refresh installed versions")
+    fetch.add_argument("--all", action="store_true", help="fetch every unpaused source, due or not")
+    fetch.add_argument("--only", nargs="+", metavar="NAME", help="limit to these sources")
+    fetch.add_argument("--notify", action="store_true", help="send one notification when new posts arrive")
+    fetch.add_argument("--retry", action="store_true", help="only due sources whose last fetch hit a network error")
+    fetch.set_defaults(func=cmd_fetch)
+    sources = sub.add_parser("sources", help="list sources with their cadence and last fetch")
+    sources.add_argument("--json", action="store_true")
+    sources.set_defaults(func=cmd_sources)
+    disc = sub.add_parser("discover", help="find the feed behind a URL without saving it")
+    disc.add_argument("url")
+    disc.add_argument("--json", action="store_true")
+    disc.set_defaults(func=cmd_discover)
+    add = sub.add_parser("add", help="subscribe to the feed behind a URL")
+    add.add_argument("url", help="a feed, web page, GitHub repo, YouTube channel, Bluesky/Mastodon/X profile, "
+                                 "subreddit, news.ycombinator.com or hnrss.org URL")
+    add.add_argument("--name")
+    add.add_argument("--cadence", choices=CADENCES, default="daily")
+    add.set_defaults(func=cmd_add)
+    remove = sub.add_parser("remove", help="unsubscribe from a source and drop its posts")
+    remove.add_argument("name")
+    remove.set_defaults(func=cmd_remove)
+    rename = sub.add_parser("rename", help="rename a source: rename OLD NEW")
+    rename.add_argument("old")
+    rename.add_argument("new")
+    rename.set_defaults(func=cmd_rename)
+    opml = sub.add_parser("opml", help="export sources to OPML or import them from another reader")
+    opml_sub = opml.add_subparsers(dest="opml_command", required=True)
+    opml_out = opml_sub.add_parser("export", help="write OPML 2.0 to FILE, or stdout")
+    opml_out.add_argument("file", nargs="?")
+    opml_out.set_defaults(func=cmd_opml_export)
+    opml_in = opml_sub.add_parser("import", help="add feeds whose URL is not subscribed yet; no network")
+    opml_in.add_argument("file")
+    opml_in.add_argument("--cadence", choices=CADENCES, help="for every imported feed (default: the file's, else daily)")
+    opml_in.set_defaults(func=cmd_opml_import)
+    mute = sub.add_parser("mute", help="list a source's mute rules, or add words and /regex/ rules")
+    mute.add_argument("name")
+    mute.add_argument("patterns", nargs="*", metavar="PATTERN", help="a word, or /regex/; case-insensitive")
+    mute.add_argument("--reposts", action="store_true", help="X sources: leave reposts out")
+    mute.add_argument("--replies", action="store_true", help="X sources: leave replies out (RSSHub's default)")
+    mute.set_defaults(func=cmd_mute)
+    unmute = sub.add_parser("unmute", help="remove mute rules")
+    unmute.add_argument("name")
+    unmute.add_argument("patterns", nargs="*", metavar="PATTERN")
+    unmute.add_argument("--reposts", action="store_true", help="X sources: bring reposts back")
+    unmute.add_argument("--replies", action="store_true", help="X sources: take replies too")
+    unmute.set_defaults(func=cmd_unmute)
+    fulltext = sub.add_parser("fulltext", help="show, or turn on/off, whole-article fetching for a source's new posts")
+    fulltext.add_argument("name")
+    fulltext.add_argument("state", nargs="?", choices=("on", "off"))
+    fulltext.set_defaults(func=cmd_fulltext)
+    cadence = sub.add_parser("cadence", help="set a source to daily, weekly or paused")
+    cadence.add_argument("name")
+    cadence.add_argument("cadence", choices=CADENCES)
+    cadence.set_defaults(func=cmd_cadence)
+    listing = sub.add_parser("list", help="list unread posts with their ids (--all: read ones too)")
+    listing.add_argument("--all", action="store_true")
+    listing.set_defaults(func=cmd_list)
+    read = sub.add_parser("read", help="mark posts read by id (--all: every post)")
+    read.add_argument("ids", nargs="*")
+    read.add_argument("--all", action="store_true")
+    read.set_defaults(func=cmd_read)
+    catchup = sub.add_parser("catchup", help="mark unread posts read, except snoozed ones")
+    catchup.add_argument("--older", metavar="DURATION", help="only posts published longer ago, e.g. 12h, 3d, 1w")
+    catchup.add_argument("--source", metavar="NAME", help="only this source's posts")
+    catchup.set_defaults(func=cmd_catchup)
+    clearing = sub.add_parser("clear-read", help="hide read posts from the feed (read-later and snoozed ones stay); "
+                                               "with IDs, those posts, marking them read")
+    clearing.add_argument("ids", nargs="*")
+    clearing.set_defaults(func=cmd_clear_read)
+    unread = sub.add_parser("unread", help="mark posts unread, bringing back cleared ones")
+    unread.add_argument("ids", nargs="+")
+    unread.set_defaults(func=cmd_unread)
+    search = sub.add_parser("search", help="posts whose title, source or text holds every word of QUERY; all without one")
+    search.add_argument("query", nargs="*")
+    search.add_argument("--json", action="store_true")
+    search.set_defaults(func=cmd_search)
+    pick = sub.add_parser("pick", help="search posts in the Omarchy menu and open the chosen one in the reader",
+                          description=f"Shows the newest {PICK_LIMIT} posts matching QUERY (all without one) in the "
+                                      "Omarchy menu; the chosen post opens in the Omabox reader.",
+                          epilog=MENU_SNIPPET, formatter_class=argparse.RawDescriptionHelpFormatter)
+    pick.add_argument("query", nargs="*")
+    pick.add_argument("--timeout", type=float, default=PICK_TIMEOUT, help="seconds to wait for a pick (default %(default)s)")
+    pick.set_defaults(func=cmd_pick)
+    opener = sub.add_parser("open", help="open a post's link in the browser and mark it read")
+    opener.add_argument("id")
+    opener.set_defaults(func=cmd_open)
+    article = sub.add_parser("article", help="fetch and store the whole article behind a post's link")
+    article.add_argument("id")
+    article.add_argument("--refresh", action="store_true", help="fetch again even when a copy is stored")
+    article.add_argument("--forget", action="store_true", help="drop the stored copy; the post shows its feed version")
+    article.add_argument("--json", action="store_true")
+    article.set_defaults(func=cmd_article)
+    replies = sub.add_parser("replies", help="fetch and store the replies to an X post")
+    replies.add_argument("id")
+    replies.add_argument("--refresh", action="store_true", help="fetch again even when a copy is stored")
+    replies.add_argument("--json", action="store_true")
+    replies.set_defaults(func=cmd_replies)
+    delivery = sub.add_parser("delivery", help="show the delivery time and weekly day, or set them: "
+                                                "delivery 18:30 --weekly-day sat")
+    delivery.add_argument("time", nargs="?")
+    delivery.add_argument("--weekly-day", type=lambda text: text.strip().lower()[:3], choices=WEEKDAYS,
+                          help="the day weekly sources come in (default mon)")
+    delivery.add_argument("--json", action="store_true")
+    delivery.set_defaults(func=cmd_delivery)
+    pause = sub.add_parser("pause", help="hold deliveries: pause 3d | pause 12h | pause off")
+    pause.add_argument("duration", nargs="?")
+    pause.set_defaults(func=cmd_pause)
+    snooze = sub.add_parser("snooze", help="hide posts until tomorrow's delivery time (or --until ISO)")
+    snooze.add_argument("ids", nargs="+")
+    snooze.add_argument("--until")
+    snooze.set_defaults(func=cmd_snooze)
+    view = sub.add_parser("view", help="show pictures in the default image viewer, return when it closes")
+    view.add_argument("--start", type=int, default=0, help="index of the picture to show first")
+    view.add_argument("paths", nargs="+")
+    view.set_defaults(func=cmd_view)
+    play = sub.add_parser("play", help="play videos in mpv, return when it quits")
+    play.add_argument("--start", type=int, default=0, help="index of the video to play first")
+    play.add_argument("urls", nargs="+")
+    play.set_defaults(func=cmd_play)
+    unsnooze = sub.add_parser("unsnooze", help="bring snoozed posts back now")
+    unsnooze.add_argument("ids", nargs="+")
+    unsnooze.set_defaults(func=cmd_unsnooze)
+    later = sub.add_parser("later", help="toggle posts in the read-later queue")
+    later.add_argument("ids", nargs="+")
+    later.add_argument("--on", action="store_true")
+    later.add_argument("--off", action="store_true")
+    later.set_defaults(func=cmd_later)
+    tick = sub.add_parser("tick", help="what the bar widget runs every few minutes: deliver or retry when due, "
+                                       "archive notifications, print the seconds until the next tick")
+    tick.set_defaults(func=cmd_tick)
+    archive = sub.add_parser("archive-notifications", help="copy new Omarchy notifications into the 7-day archive")
+    archive.add_argument("-v", "--verbose", action="store_true")
+    archive.set_defaults(func=cmd_archive_notifications)
+    forget = sub.add_parser("forget-notification", help="delete notifications by file name")
+    forget.add_argument("names", nargs="+")
+    forget.set_defaults(func=cmd_forget_notification)
+    clear = sub.add_parser("clear-notifications", help="empty the notification archive")
+    clear.set_defaults(func=cmd_clear_notifications)
+    doctor = sub.add_parser("doctor", help="check delivery, sources, cache and tools")
+    doctor.set_defaults(func=cmd_doctor)
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (OSError, ValueError, RuntimeError) as error:
+        sys.exit(f"omabox: {error_text(error)}")
+
+
+if __name__ == "__main__":
+    main()
