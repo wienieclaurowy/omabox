@@ -1216,7 +1216,37 @@ class RsshubTest(unittest.TestCase):
 
     def test_session_reuses_running_rsshub(self):
         calls, _ = self.run_session(up=True)
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [["podman", "rm", "-f", omabox.RSSHUB_CONTAINER]])
+
+    def test_container_is_locked_down_and_keyed(self):
+        calls, env = self.run_session()
+        (start,) = [argv for argv in calls if argv[:2] == ["podman", "run"]]
+        for flag in ("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=512m"):
+            self.assertIn(flag, start)
+        self.assertEqual(start[start.index("--user") + 1], "65534:65534")
+        self.assertEqual(start[start.index("-p") + 1], f"127.0.0.1:{omabox.RSSHUB_PORT}:1200")
+        self.assertIn("@sha256:", start[-1])
+        self.assertRegex(env["text"], r"(?m)^ACCESS_KEY=[\w-]{20,}$")
+        self.assertIn("DEBUG_INFO=false", env["text"])
+        self.assertEqual(omabox.RSSHUB_KEY, "")
+
+    def test_requests_carry_the_key_only_while_the_container_runs(self):
+        route = f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale?format=json"
+        self.assertEqual(omabox.rsshub_keyed(route), route)
+        with mock.patch.object(omabox, "RSSHUB_KEY", "k3y"):
+            self.assertEqual(omabox.rsshub_keyed(route), route + "&key=k3y")
+            self.assertEqual(omabox.rsshub_keyed(f"{omabox.RSSHUB_BASE}/twitter/user/a"),
+                             f"{omabox.RSSHUB_BASE}/twitter/user/a?key=k3y")
+            self.assertEqual(omabox.rsshub_keyed("https://blog.example/feed"), "https://blog.example/feed")
+
+    def test_token_file_readable_by_others_is_tightened(self):
+        token_path = Path(tempfile.mkdtemp()) / "x-token"
+        token_path.write_text("secret-token\n")
+        token_path.chmod(0o644)
+        with omabox.rsshub_session(True, run=lambda argv, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
+                                   wait=lambda: None, up=lambda: False, token_path=token_path, engine="podman"):
+            pass
+        self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
 
     def test_session_needs_token(self):
         with self.assertRaises(RuntimeError):

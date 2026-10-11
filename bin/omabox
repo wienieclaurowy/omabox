@@ -12,8 +12,10 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -1573,7 +1575,7 @@ def locked():
 
 
 def download(url, headers=None):
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.geturl(), response.read()
 
@@ -1589,7 +1591,7 @@ def download_feed(url, cached=None, opener=urllib.request.urlopen):
         if cached.get("modified"):
             headers["If-Modified-Since"] = cached["modified"]
     try:
-        with opener(urllib.request.Request(url, headers=headers), timeout=30) as response:
+        with opener(urllib.request.Request(rsshub_keyed(url), headers=headers), timeout=30) as response:
             data, reply = response.read(), response.headers
     except urllib.error.HTTPError as error:
         if error.code == 304:
@@ -1731,7 +1733,9 @@ def discover(url):
             "count": len(entries)}
 
 
-RSSHUB_IMAGE = os.environ.get("OMABOX_RSSHUB_IMAGE", "docker.io/diygod/rsshub:latest")
+# Pinned to the build whose X code was checked (2026-09-26, git 4b25ea7): its X routes only read. A new pin is a release.
+RSSHUB_IMAGE = os.environ.get(
+    "OMABOX_RSSHUB_IMAGE", "docker.io/diygod/rsshub@sha256:c354046cb6c1fdffedabcf45144b9aa2dbf45a663ae2720932d7f4ef5393b8fb")
 RSSHUB_PORT = int(os.environ.get("OMABOX_RSSHUB_PORT", "1200"))
 RSSHUB_CONTAINER = "omabox-rsshub"
 RSSHUB_BASE = f"http://127.0.0.1:{RSSHUB_PORT}"
@@ -1808,6 +1812,17 @@ def x_feed_url(url):
     return url + "?format=json"
 
 
+# Set while Omabox's own container runs: every request to it carries this per-run ACCESS_KEY, so no other program
+# or web page on the machine can use the logged-in session behind the port.
+RSSHUB_KEY = ""
+
+
+def rsshub_keyed(url):
+    if not RSSHUB_KEY or not needs_rsshub(url):
+        return url
+    return url + ("&" if "?" in url else "?") + "key=" + RSSHUB_KEY
+
+
 def rsshub_up(timeout=2):
     try:
         with urllib.request.urlopen(RSSHUB_BASE + "/", timeout=timeout):
@@ -1839,9 +1854,13 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rss
         yield
         return
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    engine = engine or container_engine()
     # fetch and `omabox replies` share the container: without the lock one run stops it under the other
     with open(runtime / "omabox-rsshub.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
+        if engine:
+            run([engine, "rm", "-f", RSSHUB_CONTAINER], capture_output=True, timeout=30)
         if up():
             yield
             return
@@ -1887,27 +1906,40 @@ def rsshub_container(run, wait, token_path, engine, runtime):
     engine = engine or container_engine()
     if not engine:
         raise RuntimeError(f"X sources need podman or docker, or an RSSHub already running on {RSSHUB_BASE}")
+    global RSSHUB_KEY
     token_path = Path(token_path or X_TOKEN_PATH)
     token = token_path.read_text().strip() if token_path.exists() else ""
     if not token:
         raise XTokenMissing(f"X sources need your X token (the auth_token cookie) in {home_relative(token_path)}")
+    if token_path.stat().st_mode & 0o077:
+        token_path.chmod(0o600)
+    key = secrets.token_urlsafe(24)
+    # DEBUG_INFO=false also hides the index page's list of fetched paths; debug logging would print the token.
+    env = {"TWITTER_AUTH_TOKEN": token, "ACCESS_KEY": key, "CACHE_TYPE": "memory", "NODE_ENV": "production",
+           "DEBUG_INFO": "false", "NO_LOGFILES": "true", "NPM_CONFIG_UPDATE_NOTIFIER": "false"}
     env_file = runtime / "omabox-rsshub.env"
-    run([engine, "rm", "-f", RSSHUB_CONTAINER], capture_output=True, timeout=30)
-    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    env_file.unlink(missing_ok=True)
+    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w") as handle:
-            handle.write(f"TWITTER_AUTH_TOKEN={token}\nCACHE_TYPE=memory\nNODE_ENV=production\n")
+            handle.write("".join(f"{name}={value}\n" for name, value in env.items()))
+        # Locked down: no writes, no capabilities, no root, capped memory and processes. jsdelivr is blocked so the
+        # X query ids come from the pinned image, not from a third-party file fetched at start.
         started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER,
-                       "-p", f"127.0.0.1:{RSSHUB_PORT}:1200", "--env-file", str(env_file), RSSHUB_IMAGE],
+                       "-p", f"127.0.0.1:{RSSHUB_PORT}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
+                       "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--user", "65534:65534",
+                       "--add-host", "cdn.jsdelivr.net:127.0.0.1", "--env-file", str(env_file), RSSHUB_IMAGE],
                       capture_output=True, text=True, timeout=300)
     finally:
         env_file.unlink(missing_ok=True)
     if started.returncode != 0:
         raise RuntimeError(f"{engine} run failed: {(started.stderr or '').strip()[-300:]}")
     try:
+        RSSHUB_KEY = key
         wait()
         yield
     finally:
+        RSSHUB_KEY = ""
         run([engine, "stop", "-t", "5", RSSHUB_CONTAINER], capture_output=True, timeout=60)
 
 
@@ -3548,6 +3580,9 @@ def main(argv=None):
     doctor = sub.add_parser("doctor", help="check delivery, sources, cache and tools")
     doctor.set_defaults(func=cmd_doctor)
     args = parser.parse_args(argv)
+    # A logout or `systemctl stop` must still run the finally blocks that stop the RSSHub container.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda number, frame: sys.exit(128 + number))
     try:
         args.func(args)
     except KeyboardInterrupt:
