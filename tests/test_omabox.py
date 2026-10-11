@@ -1,4 +1,5 @@
 import argparse
+import codecs
 import contextlib
 import http.server
 import importlib.machinery
@@ -153,6 +154,43 @@ class ParseTest(unittest.TestCase):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
         self.assertEqual(omabox.merge(state, "Gulls", entries, "2026-09-27T09:00:00Z"), 2)
         self.assertEqual(len(state["items"]), 2)
+
+    def test_sloppy_xml_is_read(self):
+        lead = b"\n  " + RSS_FEED
+        self.assertEqual(next(omabox.parse_feed(lead))["guid"], "post-1")
+        entities = RSS_FEED.replace(b"Post &amp;amp; more", b"Caf&eacute;&nbsp;notes & more")
+        self.assertEqual(next(omabox.parse_feed(entities))["title"], "Caf\u00e9\u00a0notes & more")
+        cdata = RSS_FEED.replace(b"<link>https://example.com/post</link>",
+                                 b"<link><![CDATA[https://example.com/p?a=1&b=2]]></link>").replace(b"<guid>post-1</guid>", b"&nbsp;")
+        self.assertEqual(next(omabox.parse_feed(cdata))["link"], "https://example.com/p?a=1&b=2")
+        japanese = '<?xml version="1.0" encoding="Shift_JIS"?><rss version="2.0"><channel><item><guid>1</guid>' \
+                   '<title>\u6f6e\u898b\u306e\u8a18\u9332</title></item></channel></rss>'
+        self.assertEqual(next(omabox.parse_feed(japanese.encode("shift_jis")))["title"], "\u6f6e\u898b\u306e\u8a18\u9332")
+        undeclared = omabox.feed_body(japanese.split("?>", 1)[1].encode("shift_jis"),
+                                      {"Content-Type": "application/rss+xml; charset=Shift_JIS"})
+        self.assertEqual(next(omabox.parse_feed(undeclared))["title"], "\u6f6e\u898b\u306e\u8a18\u9332")
+        latin = omabox.feed_body('<rss version="2.0"><channel><title>Fjord caf\u00e9</title></channel></rss>'.encode("latin-1"),
+                                 {"Content-Type": "text/xml; charset=ISO-8859-1"})
+        self.assertEqual(omabox.feed_title(latin), "Fjord caf\u00e9")
+        self.assertEqual(omabox.feed_title(codecs.BOM_UTF16_LE + '<rss><channel><title>Tern</title></channel></rss>'.encode("utf-16-le")), "Tern")
+
+    def test_tolerant_parse_stays_safe(self):
+        bomb = (b'<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY a "aaaaaaaaaa">'
+                + b"".join(b'<!ENTITY %s "%s">' % (bytes([ord("b") + n]), (b"&" + bytes([ord("a") + n]) + b";") * 10)
+                           for n in range(8))
+                + b']><rss version="2.0"><channel><item><title>&i;</title></item></channel></rss>')
+        try:
+            titles = [entry["title"] for entry in omabox.parse_feed(bomb)]
+        except omabox.ET.ParseError:
+            titles = []
+        self.assertLess(len("".join(titles)), 100)
+        external = (b'<!DOCTYPE rss [<!ENTITY e SYSTEM "file:///etc/hostname">]>'
+                    b'<rss version="2.0"><channel><item><guid>1</guid><title>&e;</title></item></channel></rss>')
+        try:
+            titles = [entry["title"] for entry in omabox.parse_feed(external)]
+        except omabox.ET.ParseError:
+            titles = []
+        self.assertNotIn(Path("/etc/hostname").read_text().strip() if Path("/etc/hostname").exists() else "\0", "".join(titles))
 
     def test_rss(self):
         (entry,) = omabox.parse_feed(RSS_FEED)

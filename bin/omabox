@@ -2,11 +2,13 @@
 """Omabox: a quiet, once-a-day feed inbox for the Omarchy bar."""
 
 import argparse
+import codecs
 import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
 import html
+import html.entities
 import http.client
 import http.server
 import ipaddress
@@ -887,6 +889,72 @@ class NotAFeed(ValueError):
     pass
 
 
+XML_ENCODING_RE = re.compile(rb"""^<\?xml[^>]*?\bencoding\s*=\s*["']([A-Za-z][\w.:-]*)["']""")
+XML_RAW_RE = re.compile(r"(<!\[CDATA\[.*?\]\]>|<!--.*?-->)", re.S)
+ENTITY_REF_RE = re.compile(r"&(?:([A-Za-z][A-Za-z0-9]*);|(#[0-9]+;|#[xX][0-9A-Fa-f]+;))?")
+XML_ENTITIES = {"amp", "lt", "gt", "quot", "apos"}
+BOMS = ((codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+class FeedBody(bytes):
+    """A response body with the charset its Content-Type header named, for documents without an XML declaration."""
+    charset = ""
+
+
+def feed_body(data, headers):
+    body = FeedBody(data)
+    match = re.search(r"charset=[\"']?([\w.:-]+)", headers.get("Content-Type") or "", re.I)
+    body.charset = match.group(1) if match else ""
+    return body
+
+
+def xml_text(data):
+    """The document decoded by its byte order mark, else its XML declaration, else the HTTP charset, else UTF-8."""
+    if isinstance(data, str):
+        return data.lstrip("\ufeff \t\r\n")
+    encoding = next((name for bom, name in BOMS if data.startswith(bom)), None)
+    if encoding is None:
+        declared = XML_ENCODING_RE.match(data.lstrip())
+        encoding = declared.group(1).decode() if declared else getattr(data, "charset", "") or "utf-8"
+    try:
+        text = bytes(data).decode(encoding, "replace")
+    except LookupError:
+        text = bytes(data).decode("utf-8", "replace")
+    return text.lstrip("\ufeff \t\r\n")
+
+
+def repair_xml(text):
+    """HTML named entities as character references and bare & escaped, outside CDATA sections and comments."""
+    def entity(match):
+        name = match.group(1)
+        if match.group(2) or name in XML_ENTITIES:
+            return match.group(0)
+        if name is None:
+            return "&amp;"
+        value = html.entities.html5.get(name + ";")
+        return "".join(f"&#{ord(char)};" for char in value) if value else f"&amp;{name};"
+
+    parts = XML_RAW_RE.split(text)
+    return "".join(part if index % 2 else ENTITY_REF_RE.sub(entity, part) for index, part in enumerate(parts))
+
+
+def parse_xml(data):
+    """A feed or OPML document, forgiving whitespace before the declaration, HTML entities and stray &. Expat never
+    loads external entities and refuses entity expansion bombs; repaired text cannot declare new expansions."""
+    text = xml_text(data)
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError as error:
+        repaired = repair_xml(text)
+        if repaired == text:
+            raise
+        try:
+            return ET.fromstring(repaired)
+        except ET.ParseError:
+            raise error from None
+
+
 def paragraphs_html(text):
     return "".join("<p>" + html.escape(part.strip()).replace("\n", "<br>") + "</p>"
                    for part in re.split(r"\n\s*\n", text) if part.strip())
@@ -921,7 +989,7 @@ def rss_namespace(root):
 
 
 def parse_feed(data):
-    root = ET.fromstring(data)
+    root = parse_xml(data)
     ns = "" if root.tag == ATOM + "feed" else rss_namespace(root)
     if root.tag == ATOM + "feed":
         for entry in root.findall(ATOM + "entry"):
@@ -1143,7 +1211,7 @@ class IconLinkFinder(HTMLParser):
 
 def feed_home(data):
     try:
-        root = ET.fromstring(data)
+        root = parse_xml(data)
     except ET.ParseError:
         return ""
     if root.tag == ATOM + "feed":
@@ -1222,7 +1290,7 @@ def feed_profile(data):
         name = str(authors[0].get("name") or "").strip() if isinstance(authors[0], dict) else ""
         return {"name": name or handle, "handle": handle, "avatar_url": str(feed.get("icon") or "").strip()} if handle else None
     try:
-        root = ET.fromstring(data)
+        root = parse_xml(data)
     except ET.ParseError:
         return None
     channel = root.find("channel")
@@ -1590,7 +1658,7 @@ def opml_export(sources, now=None):
 
 def opml_feeds(data):
     """(name, url, cadence) for every outline with a feed URL; group outlines only nest others."""
-    root = ET.fromstring(data)
+    root = parse_xml(data)
     if root.tag != "opml":
         raise ValueError(f"not an OPML document (root <{root.tag}>)")
     for outline in root.iter("outline"):
@@ -1628,7 +1696,7 @@ def locked():
 def download(url, headers=None):
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(request, timeout=30) as response:
-        return response.geturl(), response.read()
+        return response.geturl(), feed_body(response.read(), response.headers)
 
 
 def download_feed(url, cached=None, opener=urllib.request.urlopen):
@@ -1643,7 +1711,7 @@ def download_feed(url, cached=None, opener=urllib.request.urlopen):
             headers["If-Modified-Since"] = cached["modified"]
     try:
         with opener(urllib.request.Request(rsshub_keyed(url), headers=headers), timeout=30) as response:
-            data, reply = response.read(), response.headers
+            data, reply = feed_body(response.read(), response.headers), response.headers
     except urllib.error.HTTPError as error:
         if error.code == 304:
             error.close()
@@ -1730,7 +1798,7 @@ class FeedLinkFinder(HTMLParser):
 
 
 def feed_title(data):
-    root = ET.fromstring(data)
+    root = parse_xml(data)
     if root.tag == ATOM + "feed":
         return html.unescape(root.findtext(ATOM + "title") or "").strip()
     ns = rss_namespace(root)
