@@ -111,6 +111,22 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(entries[0]["published"], "2026-09-15T22:15:08Z")
         self.assertIn("<h2>Fixes</h2>", entries[0]["html"])
 
+    def test_atom_xhtml_content_and_blank_content(self):
+        feed = b"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:x="http://www.w3.org/1999/xhtml">
+ <entry><id>a</id><title type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">Tide <b>tables</b></div></title>
+  <content type="xhtml">
+   <div xmlns="http://www.w3.org/1999/xhtml"><p>Low water at <a href="https://example.com/t">noon</a>.</p><br/></div>
+  </content></entry>
+ <entry><id>b</id><title>Blank</title><content type="html">  </content><summary>Only the summary</summary></entry>
+ <entry><id>c</id><title>Prefixed</title><content type="xhtml"><x:div><x:p>Kelp</x:p></x:div></content></entry>
+</feed>"""
+        first, second, third = omabox.parse_feed(feed)
+        self.assertEqual(first["title"], "Tide tables")
+        self.assertEqual(first["html"], '<div><p>Low water at <a href="https://example.com/t">noon</a>.</p><br></div>')
+        self.assertEqual(second["html"], "Only the summary")
+        self.assertEqual(third["html"], "<div><p>Kelp</p></div>")
+
     def test_rss(self):
         (entry,) = omabox.parse_feed(RSS_FEED)
         self.assertEqual(entry["title"], "Post & more")

@@ -856,13 +856,29 @@ def iso_utc(value):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def local_markup(node):
+    """An XHTML subtree as plain HTML markup: namespace parts of tag and attribute names dropped."""
+    for element in node.iter():
+        element.tag = str(element.tag).rsplit("}", 1)[-1]
+        element.attrib = {key.rsplit("}", 1)[-1]: value for key, value in element.attrib.items()}
+    return ET.tostring(node, encoding="unicode", method="html", short_empty_elements=False)
+
+
 def atom_text(element, tag):
     node = element.find(tag)
-    if node is None or node.text is None:
+    if node is None:
         return ""
-    if node.get("type", "text") == "text" and tag in (ATOM + "content", ATOM + "summary"):
-        return html.escape(node.text)
-    return node.text
+    body = tag in (ATOM + "content", ATOM + "summary")
+    if node.get("type") == "xhtml":
+        # the text sits in a child <div>; node.text is only the whitespace before it
+        if not body:
+            return "".join(node.itertext()).strip()
+        return "".join(local_markup(child) for child in node).strip()
+    if node.text is None:
+        return ""
+    if node.get("type", "text") == "text" and body:
+        return html.escape(node.text).strip()
+    return node.text.strip() if body else node.text
 
 
 class NotAFeed(ValueError):
