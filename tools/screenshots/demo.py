@@ -1,5 +1,5 @@
-"""Writes an invented Omabox setup into a sandbox home for the screenshot harness: sources, delivered posts and a
-notification history. Every name, post and notification is made up.
+"""Writes a sample Omabox setup into a sandbox home for the screenshot harness: sources, delivered posts and a
+notification history.
 
     python3 demo.py SANDBOX-HOME
 """
