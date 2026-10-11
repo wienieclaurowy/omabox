@@ -729,6 +729,40 @@ class ImageTest(unittest.TestCase):
         self.assertIn(f'<img src="omabox-img:{name}" width="640" height="480">', body)
         self.assertEqual((self.dir / name).read_bytes(), png(640, 480))
 
+    @unittest.skipUnless(omabox.shutil.which("magick"), "needs ImageMagick")
+    def test_wide_pictures_are_cached_scaled_down(self):
+        for kind in ("jpg", "png", "webp"):
+            photo = subprocess.run(["magick", "-size", "2000x1500", "gradient:navy-orange", f"{kind}:-"], capture_output=True,
+                                   check=True).stdout
+            self.served[f"https://blog.example/{kind}"] = photo
+            body, _ = omabox.sanitize(f'<img src="/{kind}">', self.fetcher())
+            self.assertIn('width="1600" height="1200"', body, kind)
+            (name,) = omabox.IMAGE_REF_RE.findall(body)
+            self.assertEqual(omabox.image_info((self.dir / name).read_bytes()), (kind, 1600, 1200))
+        self.served["https://blog.example/narrow.png"] = png(1200, 900)
+        body, _ = omabox.sanitize('<img src="/narrow.png">', self.fetcher())
+        self.assertIn('width="1200" height="900"', body)
+
+    def test_pictures_stay_as_they_are_without_a_working_magick(self):
+        wide = jpeg(4000, 3000)
+        self.served["https://blog.example/w.jpg"] = wide
+        with mock.patch.object(omabox.shutil, "which", lambda name: None):
+            body, _ = omabox.sanitize('<img src="/w.jpg">', self.fetcher())
+        self.assertIn('width="4000" height="3000"', body)
+        for failure in (subprocess.TimeoutExpired("magick", 20), OSError("gone")):
+            self.dir = Path(tempfile.mkdtemp())
+            with mock.patch.object(omabox.subprocess, "run", side_effect=failure), \
+                    mock.patch.object(omabox.shutil, "which", lambda name: "/usr/bin/magick"):
+                body, _ = omabox.sanitize('<img src="/w.jpg">', self.fetcher())
+            self.assertIn('width="4000" height="3000"', body)
+            self.assertEqual(next(self.dir.iterdir()).read_bytes(), wide)
+        gif = b"GIF89a" + (4000).to_bytes(2, "little") + (3000).to_bytes(2, "little") + b"\x00" * 8
+        self.served["https://blog.example/a.gif"] = gif
+        with mock.patch.object(omabox.subprocess, "run") as run:
+            body, _ = omabox.sanitize('<img src="/a.gif">', self.fetcher())
+        run.assert_not_called()
+        self.assertIn('width="4000"', body)
+
     def test_skips_tracking_pixels_without_download_when_declared(self):
         body, _ = omabox.sanitize('<img src="https://t.example/p.gif" width="1" height="1">', self.fetcher())
         self.assertEqual(body, "")
