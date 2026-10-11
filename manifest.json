@@ -11,6 +11,47 @@
     "displayName": "Omabox",
     "category": "Notifications",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "readingFont": "iA Writer Quattro S",
+      "readingMeasure": 70,
+      "readerFontDelta": 0,
+      "hints": false
+    },
+    "schema": [
+      {
+        "key": "readingFont",
+        "type": "string",
+        "label": "Reading font",
+        "defaultValue": "iA Writer Quattro S",
+        "description": "Font for post text in the reader."
+      },
+      {
+        "key": "readingMeasure",
+        "type": "integer",
+        "label": "Reader line length (characters)",
+        "min": 45,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 70
+      },
+      {
+        "key": "readerFontDelta",
+        "type": "integer",
+        "label": "Reader text size",
+        "min": -4,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "Relative to the theme; + and - in the reader change it."
+      },
+      {
+        "key": "hints",
+        "type": "boolean",
+        "label": "Key hints",
+        "defaultValue": false,
+        "description": "Show the key hints line; ? in the panel toggles it."
+      }
+    ]
   }
 }
