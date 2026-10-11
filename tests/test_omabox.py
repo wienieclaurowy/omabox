@@ -839,8 +839,27 @@ class ImageTest(unittest.TestCase):
         self.served["https://pbs.twimg.com/thumb/a.jpg"] = jpeg(1280, 720)
         body, _ = omabox.sanitize(self.X_VIDEO, self.fetcher())
         (self.dir / "0123456789abcdef0123.png").write_bytes(png(9, 9))
-        omabox.prune_images({"items": [{"html": body}]}, self.dir)
+        later = time.time() + omabox.PRUNE_GRACE_SECONDS + 1
+        omabox.prune_images({"items": [{"html": body}]}, self.dir, later)
         self.assertEqual([path.name for path in self.dir.iterdir()], omabox.IMAGE_REF_RE.findall(body))
+
+    def test_prune_spares_pictures_written_moments_ago(self):
+        (self.dir).mkdir(parents=True)
+        fresh, old = self.dir / "0123456789abcdef0123.png", self.dir / "abcdef0123456789abcd.png"
+        fresh.write_bytes(png(9, 9))
+        old.write_bytes(png(9, 9))
+        stale = time.time() - omabox.PRUNE_GRACE_SECONDS - 60
+        omabox.os.utime(old, (stale, stale))
+        omabox.prune_images({"items": []}, self.dir)
+        self.assertEqual([path.name for path in self.dir.iterdir()], [fresh.name])
+        # a cache hit refreshes the file, so a post about to reference it again keeps it
+        omabox.os.utime(fresh, (stale, stale))
+        self.served["https://blog.example/fresh.png"] = png(9, 9)
+        stem = omabox.hashlib.sha1(b"https://blog.example/fresh.png").hexdigest()[:20]
+        fresh.rename(self.dir / f"{stem}.png")
+        omabox.sanitize('<img src="/fresh.png">', self.fetcher())
+        omabox.prune_images({"items": []}, self.dir)
+        self.assertEqual([path.name for path in self.dir.iterdir()], [f"{stem}.png"])
 
     def test_merge_rebuilds_items_from_older_format(self):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")

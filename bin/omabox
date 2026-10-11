@@ -454,6 +454,10 @@ def cache_image(src, fetch, directory, limit):
     when the bytes are no PNG, JPEG, GIF or WebP. Wide pictures are cached scaled down; tracking pixels not at all."""
     stem = hashlib.sha1(src.encode()).hexdigest()[:20]
     cached = next(iter(directory.glob(stem + ".*")), None) if directory.exists() else None
+    if cached:
+        # a fresh mtime keeps prune_files off a picture about to be referenced again
+        with contextlib.suppress(OSError):
+            os.utime(cached)
     data = cached.read_bytes() if cached else fetch(src, limit)
     info = image_info(data)
     if info is None:
@@ -468,17 +472,29 @@ def cache_image(src, fetch, directory, limit):
     return f"{stem}.{ext}", width, height
 
 
-def prune_images(state, directory=None):
-    directory = Path(directory or IMAGE_DIR)
+# Fetches, `omabox article` and `omabox replies` download pictures before taking the state lock to store their refs.
+PRUNE_GRACE_SECONDS = 3600
+
+
+def prune_files(directory, used, now=None):
+    """Deletes files in directory not named in used, except those written in the last PRUNE_GRACE_SECONDS."""
+    directory = Path(directory)
     if not directory.exists():
         return
+    cutoff = (now or time.time()) - PRUNE_GRACE_SECONDS
+    for path in directory.iterdir():
+        if path.name not in used:
+            with contextlib.suppress(OSError):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+
+
+def prune_images(state, directory=None, now=None):
     used = set()
     for item in state["items"]:
         used.update(IMAGE_REF_RE.findall(item.get("html", "") + item.get("full_html", "") + item.get("replies_html", "")))
         used.add(item.get("repost_avatar") or "")
-    for path in directory.iterdir():
-        if path.name not in used:
-            path.unlink(missing_ok=True)
+    prune_files(directory or IMAGE_DIR, used, now)
 
 
 TAG_RE = re.compile(r"<(/?)([a-z0-9]+)[^>]*>")
@@ -2590,10 +2606,7 @@ def prune(state, sources):
     prune_images(state)
     live = {Path(icon["favicon"]).name for icon in state["icons"].values() if icon.get("favicon")}
     live |= {Path(profile["avatar"]).name for profile in state["profiles"].values() if profile.get("avatar")}
-    if ICON_DIR.exists():
-        for path in ICON_DIR.iterdir():
-            if path.name not in live:
-                path.unlink(missing_ok=True)
+    prune_files(ICON_DIR, live)
 
 
 def cmd_fetch(args):
