@@ -3630,25 +3630,10 @@ def tick_plan(state, now=None):
     return action, int(max(TICK_MIN_SECONDS, min(TICK_MAX_SECONDS, wait)))
 
 
-def refresh_versions(sources):
-    """Stores installed versions that changed since the last run, so release tags follow an `omarchy update`."""
-    versions = {}
-    for source in sources:
-        if source.get("version_command"):
-            version = installed_version(source["version_command"])
-            if version:
-                versions[source["name"]] = version
-    if not versions or all(load_state()["installed"].get(name) == v for name, v in versions.items()):
-        return
-    with locked():
-        state = load_state()
-        state["installed"].update(versions)
-        save_state(state)
-
-
 def cmd_tick(args):
-    """One step of the plugin's scheduler: archive notifications, refresh versions, deliver or retry when due,
-    then print the seconds until the next tick."""
+    """One step of the plugin's scheduler: archive notifications, deliver or retry when due, then print the seconds
+    until the next tick. It runs every few minutes, so items.json is read once and version commands wait for a
+    delivery."""
     lock_path = Path(os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent)) / "omabox-tick.lock"
     with open_private(lock_path, os.O_WRONLY | os.O_CREAT) as handle:
         try:
@@ -3660,8 +3645,6 @@ def cmd_tick(args):
             archive_notifications()
         with contextlib.suppress(OSError):
             stop_stale_rsshub()
-        sources = load_sources()
-        refresh_versions(sources)
         state = load_state()
         action, _ = tick_plan(state)
         # No notification for the first delivery: it only seeds one unread post per source.
@@ -3672,8 +3655,9 @@ def cmd_tick(args):
                 state["retried"] = now_iso()
                 save_state(state)
         if action:
-            cmd_fetch(argparse.Namespace(offline=False, all=False, only=None, notify=notify, retry=action == "retry"))
-        print(tick_plan(load_state())[1])
+            args = argparse.Namespace(offline=False, all=False, only=None, notify=notify, retry=action == "retry")
+            state = cmd_fetch(args, state) or state
+        print(tick_plan(state)[1])
 
 
 def cmd_delivery(args):

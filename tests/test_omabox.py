@@ -2948,6 +2948,26 @@ class FetchLockTest(unittest.TestCase):
         self.assertEqual([item["source"] for item in state["items"]], ["Late"])
         self.assertNotIn("Tides", state["fetched"])
 
+    def tick(self):
+        loads, versions = [], []
+        real_load, real_version = omabox.load_state, omabox.installed_version
+        with mock.patch.object(omabox, "load_state", lambda *a: loads.append(1) or real_load(*a)), \
+                mock.patch.object(omabox, "installed_version", lambda c: versions.append(c) or real_version(c)), \
+                mock.patch.object(omabox, "archive_notifications", lambda: 0), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            omabox.cmd_tick(argparse.Namespace())
+        return len(loads), len(versions), int(out.getvalue().split()[-1])
+
+    def test_a_tick_reads_the_state_once_and_runs_version_commands_only_to_deliver(self):
+        omabox.save_sources([{"name": "Tides", "url": self.url, "cadence": "daily", "icon": "*",
+                              "version_command": "echo v1.2.3"}])
+        loads, versions, wait = self.tick()
+        self.assertEqual((loads, versions, self.requests), (2, 1, 1))
+        self.assertEqual(omabox.load_state()["installed"], {"Tides": "1.2.3"})
+        self.assertGreaterEqual(wait, omabox.TICK_MIN_SECONDS)
+        loads, versions, wait = self.tick()
+        self.assertEqual((loads, versions, self.requests), (1, 0, 1))
+
     def test_a_second_fetch_skips_while_one_runs(self):
         with omabox.fetch_lock() as alone:
             self.assertTrue(alone)
