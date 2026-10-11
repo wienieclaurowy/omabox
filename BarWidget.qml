@@ -20,12 +20,22 @@ BarWidget {
   // Why the last `omabox tick` failed, "" after one that worked; the feed's status line shows it.
   property string tickProblem: ""
 
-  property var feedState: Model.parseState("")
+  // Every monitor has a copy of this widget. Only the first reads and parses items.json (about 40 ms for 2000 posts)
+  // and keeps the overrides; the others show its result. A copy whose owner is gone (null) falls back to its own.
+  readonly property var stateOwner: {
+    var copies = peers()
+    return copies.length > 0 && copies[0] ? copies[0] : root
+  }
+  readonly property bool ownsState: stateOwner === root || !stateOwner
+  property var ownState: Model.parseState("")
+  property var ownOverrides: ({})
+  property bool ownLoaded: false
+  readonly property var feedState: ownsState ? ownState : stateOwner.feedState
   // false until items.json was read (or found missing) once; the feed's empty state waits for it.
-  property bool stateLoaded: false
-  property var overrides: ({})
+  readonly property bool stateLoaded: ownsState ? ownLoaded : stateOwner.stateLoaded
+  readonly property var overrides: ownsState ? ownOverrides : stateOwner.overrides
   property date now: new Date()
-  readonly property var items: Model.feedItems(feedState, overrides, now)
+  readonly property var items: ownsState ? Model.feedItems(ownState, ownOverrides, now) : stateOwner.items
   readonly property int unread: Model.unreadCount(items)
 
   // Set on every monitor's copy by the IPC handler; whichever copy the shell opens consumes it.
@@ -119,6 +129,10 @@ BarWidget {
   }
 
   function override(ids, fields) {
+    if (!ownsState) {
+      stateOwner.override(ids, fields)
+      return
+    }
     var next = {}
     for (var key in overrides) next[key] = overrides[key]
     for (var i = 0; i < ids.length; i++) {
@@ -127,7 +141,7 @@ BarWidget {
       for (var field in fields) merged[field] = fields[field]
       next[ids[i]] = merged
     }
-    overrides = next
+    ownOverrides = next
   }
 
   function markRead(ids) {
@@ -313,18 +327,18 @@ BarWidget {
   }
 
   FileView {
-    path: root.stateDirReady ? root.statePath : ""
+    path: root.stateDirReady && root.ownsState ? root.statePath : ""
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
     onLoaded: {
-      root.feedState = Model.parseState(text())
-      root.overrides = ({})
-      root.stateLoaded = true
+      root.ownState = Model.parseState(text())
+      root.ownOverrides = ({})
+      root.ownLoaded = true
     }
     onLoadFailed: {
-      root.feedState = Model.parseState("")
-      root.stateLoaded = true
+      root.ownState = Model.parseState("")
+      root.ownLoaded = true
     }
   }
 
