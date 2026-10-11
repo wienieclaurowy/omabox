@@ -543,3 +543,21 @@ function appGlyph(row) {
     if (APP_GLYPHS[i][0].test(hay)) return String.fromCodePoint(APP_GLYPHS[i][1])
   return String.fromCodePoint(0xF009A)
 }
+
+function luminance(c) {
+  function channel(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+  return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+}
+
+function contrastRatio(a, b) {
+  var la = luminance(a), lb = luminance(b)
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+}
+
+// fg at opacity alpha over bg, made opaque; alpha rises until the WCAG ratio reaches minRatio, so a theme where the
+// faded text already reads keeps its look and the others get only as much ink as they need.
+function readableShade(fg, bg, alpha, minRatio) {
+  function mix(a) { return Qt.rgba(fg.r * a + bg.r * (1 - a), fg.g * a + bg.g * (1 - a), fg.b * a + bg.b * (1 - a), 1) }
+  for (var a = alpha; a < 1; a += 0.01) if (contrastRatio(mix(a), bg) >= minRatio) return mix(a)
+  return mix(1)
+}

@@ -17,8 +17,15 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
-  readonly property color dim: Util.alpha(fg, 0.6)
-  readonly property color faint: Util.alpha(fg, 0.4)
+  // Secondary text, solid: dim is for text read as text (excerpts, read titles), faint for small meta and hints.
+  // Targets sit above WCAG's 4.5 and 3 because antialiased thin text renders lighter than its colour.
+  readonly property color dim: Model.readableShade(fg, opaqueCard, 0.6, 4.9)
+  readonly property color faint: Model.readableShade(fg, opaqueCard, 0.4, 3.4)
+  // The same two on the cursor row's fill.
+  readonly property color selectedDim: Model.readableShade(fg, selectedCard, 0.6, 4.9)
+  readonly property color selectedFaint: Model.readableShade(fg, selectedCard, 0.4, 3.4)
+  readonly property color opaqueCard: Qt.rgba(cardColor.r, cardColor.g, cardColor.b, 1)
+  readonly property color selectedCard: Qt.tint(opaqueCard, Style.selectedFillFor(fg, Color.accent))
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // ttf-ia-writer tags every Quattro file as weight 80, so Qt picks Bold unless the style is named explicitly.
   readonly property string readingFont: setting("readingFont", "iA Writer Quattro S")
@@ -118,7 +125,7 @@ Panel {
     gap: Style.space(10),
     accent: "" + Color.accent,
     fg: "" + fg,
-    faint: "" + Qt.tint(cardColor, Util.alpha(fg, 0.45)),
+    faint: "" + faint,
     codeBg: "" + Qt.tint(cardColor, Util.alpha(fg, 0.09)),
     quoteBg: "" + Qt.tint(cardColor, Util.alpha(fg, 0.06)),
     small: Style.font.bodySmall,
@@ -1977,7 +1984,8 @@ Panel {
               ? Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
                 + (root.errorSources.length > 0 ? "  ·  failed: " + root.errorSources.join(", ") : "")
               : root.notifications.length + " from the last 7 days"
-          color: root.confirming ? root.fg : root.faint
+          color: root.confirming ? root.fg
+            : root.view === "feed" && root.hostWidget && root.hostWidget.tickProblem !== "" ? Color.urgent : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1
@@ -2276,6 +2284,9 @@ Panel {
       readonly property var item: modelData
       readonly property string tag: Model.versionTag(item, root.feedState.installed)
       readonly property bool current: index === root.cursor
+      // Read posts recede by colour only: a lighter weight would rewrap the title and change the row's height.
+      readonly property color dimColor: current ? root.selectedDim : root.dim
+      readonly property color metaColor: item.read ? (current ? root.selectedFaint : root.faint) : dimColor
 
       width: ListView.view.width
       height: rowColumn.implicitHeight + Style.space(16) + (rowSnooze.visible ? rowSnooze.height + Style.space(8) : 0)
@@ -2289,8 +2300,7 @@ Panel {
         onHoveredChanged: if (!hovered && root.snoozePickerId === row.item.id) root.closeSnooze()
       }
 
-      // Own line under the post, outside rowColumn so a read post's fade does not dim it; the row grows instead of
-      // the picker covering a long title.
+      // Own line under the post: the row grows instead of the picker covering a long title.
       ChoicePicker {
         id: rowSnooze
         z: 1
@@ -2373,8 +2383,6 @@ Panel {
 
       Column {
         id: rowColumn
-        // Read posts recede; the cursor lifts them enough to read.
-        opacity: !row.item.read ? 1.0 : (row.current ? 0.75 : 0.45)
         x: Style.space(10)
         y: Style.space(8)
         width: parent.width - Style.space(20)
@@ -2395,7 +2403,7 @@ Panel {
           SourceIcon {
             anchors.verticalCenter: parent.verticalCenter
             icon: row.item && root.feedState.icons ? (root.feedState.icons[row.item.source] || {}) : ({})
-            color: root.dim
+            color: row.metaColor
             fontFamily: root.fontFamily
             size: Style.font.body
           }
@@ -2404,7 +2412,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: row.item ? (row.item.source + "  ·  " + Model.relativeTime(row.item.published, root.now)).toUpperCase() : ""
-            color: root.dim
+            color: row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -2416,7 +2424,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: row.item.repost ? ("·  󰑖 " + row.item.repost.name).toUpperCase() : ""
-            color: root.dim
+            color: row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -2428,7 +2436,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: "·  " + (row.tag === "newer" ? "NEWER THAN YOURS" : "INSTALLED")
-            color: row.tag === "newer" ? Color.accent : root.dim
+            color: row.tag === "newer" ? Color.accent : row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -2453,7 +2461,7 @@ Panel {
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           text: row.item.title
-          color: root.fg
+          color: row.item.read ? row.dimColor : root.fg
           font.family: root.readingFont
           font.styleName: "Bold"
           font.pixelSize: Style.font.title
@@ -2468,7 +2476,7 @@ Panel {
           maximumLineCount: 2
           elide: Text.ElideRight
           text: row.item.summary || row.item.excerpt || ""
-          color: root.faint
+          color: row.dimColor
           font.family: row.item.summary ? root.fontFamily : root.readingFont
           font.styleName: row.item.summary ? "" : "Regular"
           font.pixelSize: row.item.summary ? Style.font.caption : Style.font.body
@@ -2485,6 +2493,7 @@ Panel {
       id: note
       required property var modelData
       required property int index
+      readonly property color dimColor: index === root.cursor ? root.selectedDim : root.dim
 
       width: ListView.view.width
       height: noteColumn.implicitHeight + Style.space(16)
@@ -2536,7 +2545,7 @@ Panel {
         width: Style.space(22)
         textFormat: Text.PlainText
         text: Model.appGlyph(note.modelData)
-        color: root.dim
+        color: note.dimColor
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
       }
@@ -2552,7 +2561,7 @@ Panel {
           textFormat: Text.PlainText
           text: [Model.appLabel(note.modelData), Model.relativeTime(new Date(note.modelData.timestamp || 0).toISOString(), root.now)]
             .filter(function(part) { return part !== "" }).join("  ·  ").toUpperCase()
-          color: root.dim
+          color: note.dimColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1
@@ -2579,7 +2588,7 @@ Panel {
           maximumLineCount: 4
           elide: Text.ElideRight
           text: Model.plainBody(note.modelData.body)
-          color: root.dim
+          color: note.dimColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
@@ -2595,6 +2604,8 @@ Panel {
       required property var modelData
       required property int index
       readonly property bool current: index === root.cursor
+      readonly property color dimColor: current ? root.selectedDim : root.dim
+      readonly property color faintColor: current ? root.selectedFaint : root.faint
       readonly property bool renaming: current && root.mode === "rename"
       property alias renameField: renameInput
 
@@ -2674,7 +2685,7 @@ Panel {
             id: sourceIcon
             anchors.verticalCenter: parent.verticalCenter
             icon: source.modelData.icon || ({})
-            color: String(source.modelData.cadence) === "paused" ? root.faint : root.fg
+            color: String(source.modelData.cadence) === "paused" ? source.faintColor : root.fg
             fontFamily: root.fontFamily
             size: Style.font.subtitle
           }
@@ -2688,7 +2699,7 @@ Panel {
             textFormat: Text.PlainText
             elide: Text.ElideRight
             text: source.modelData.name
-            color: source.modelData.cadence === "paused" ? root.dim : root.fg
+            color: source.modelData.cadence === "paused" ? source.dimColor : root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
             font.bold: true
@@ -2732,7 +2743,7 @@ Panel {
           textFormat: Text.PlainText
           elide: Text.ElideMiddle
           text: Model.shortUrl(source.modelData.url)
-          color: root.faint
+          color: source.faintColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
@@ -2745,7 +2756,7 @@ Panel {
           elide: full ? Text.ElideNone : Text.ElideRight
           text: Model.sourceStatus(source.modelData, root.now) + "  ·  " + source.modelData.items + " posts"
             + Model.muteSummary(source.modelData)
-          color: source.modelData.error ? Color.urgent : root.faint
+          color: source.modelData.error ? Color.urgent : source.faintColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -2756,7 +2767,7 @@ Panel {
           textFormat: Text.PlainText
           elide: Text.ElideRight
           text: Model.staleLabel(source.modelData.stale).toUpperCase()
-          color: source.modelData.stale && source.modelData.stale.kind === "failing" ? Color.urgent : root.dim
+          color: source.modelData.stale && source.modelData.stale.kind === "failing" ? Color.urgent : source.dimColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1

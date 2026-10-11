@@ -406,7 +406,7 @@ Column {
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     text: root.item ? root.item.summary || "" : ""
-    color: root.panel ? root.panel.faint : Color.foreground
+    color: root.panel ? root.panel.dim : Color.foreground
     font.family: root.panel ? root.panel.fontFamily : Style.font.family
     font.pixelSize: Style.font.caption
     font.letterSpacing: 0.5
