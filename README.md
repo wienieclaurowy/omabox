@@ -6,6 +6,13 @@ one panel behind one bar icon.
 
 It shows no likes, views or repost counts anywhere, so you read posts for what they say.
 
+| Feed | Notifications | Sources |
+|---|---|---|
+| ![The feed: one delivery, unread posts marked with a dot](docs/screenshots/feed.png) | ![Notifications kept for 7 days](docs/screenshots/notifications.png) | ![Sources, the delivery time and each source's cadence](docs/screenshots/sources.png) |
+
+Omabox follows your Omarchy theme; these show Tokyo Night, Catppuccin Latte and Everforest. Every post,
+source and notification in the screenshots is made up.
+
 ## Why once a day
 
 Omabox is built to be distraction-free. Most feed readers refresh all day long and show a count that keeps
@@ -54,8 +61,11 @@ Optional:
 omarchy plugin add https://github.com/wienieclaurowy/omabox.git --enable
 ```
 
-The icon appears in the bar. The first delivery starts within a minute and brings two starter sources:
-Omarchy's releases and DHH's blog. Remove them or add your own in the panel's Sources view.
+The icon appears in the bar. The first time you open it, a short welcome explains how it works. The first
+delivery starts within a minute and brings two starter sources: Omarchy's releases and DHH's blog. Remove them
+or add your own in the panel's Sources view.
+
+<p align="center"><img src="docs/screenshots/welcome.png" alt="The welcome screen in the middle of the panel" width="420"></p>
 
 To open the panel from a key, add a line like this to `~/.config/hypr/bindings.lua`, with any free key:
 
@@ -89,8 +99,8 @@ The panel has three views: **Feed**, **Notifications** and **Sources** (keys `1`
 
 - In the feed, `j`/`k` move, `l` opens a post, `o` opens it in the browser, `z` snoozes it and `m` adds it
   to read later.
-- In Sources, `n` adds a source, `c` changes its cadence, `m` sets mute words and `-`/`+` move the delivery
-  time.
+- In Sources, `n` adds a source, `c` changes its cadence, `m` sets mute words, `-`/`+` move the delivery
+  time and `t` sets or replaces your X token.
 - `?` shows every key for the view you are in.
 
 ### Settings
@@ -106,19 +116,53 @@ Set these in the widget's entry in `~/.config/omarchy/shell.json`:
 
 ## X sources
 
-X has no public feeds, so Omabox reads X through [RSSHub](https://docs.rsshub.app), which runs locally in a
-podman or docker container only while a fetch needs it. It needs your X login:
+X has no public feeds, so Omabox can only read X with an X login. It is optional: everything else works
+without it.
 
-1. Sign in to x.com in your browser and copy the value of the `auth_token` cookie.
-2. Save it, and nothing else, in `~/.config/omabox/x-token`, then run
-   `chmod 600 ~/.config/omabox/x-token`.
-3. Add an X profile in the Sources view, for example `https://x.com/someone`.
+> [!WARNING]
+> **Your X token is your X login.** Whoever has it can use that account as you, until you sign it out.
+> Reading X this way also goes against X's rules, and X can lock or suspend an account for it.
+> **Use a spare account, not your main one,** and only add a token if you accept that risk.
 
-The first X fetch downloads the RSSHub image, which takes a minute. When X rejects the token, Omabox sends one
-notification asking you to refresh it.
+### What Omabox does to keep the token safe
 
-Reading X this way uses your own account's session, which X's terms do not allow. Your account could be
-limited for it. Omabox fetches each X source once per delivery, and replies only when you open a post.
+Omabox reads X through [RSSHub](https://docs.rsshub.app), an open-source feed generator, run on your own
+computer in a podman or docker container. To make that as safe as it can be:
+
+- **Only one checked version runs.** Omabox pins the exact RSSHub build it was tested with. Its X code only
+  reads: it has no code that posts, likes, reposts, follows, sends messages, changes settings or deletes
+  anything, and it sends the token to x.com only. A new RSSHub version reaches you only in an Omabox release.
+- **It runs only during a delivery.** The container starts when an X source is fetched and stops right after,
+  also when you log out or shut down mid-fetch; one left behind by a crash is removed by the next run.
+  Between deliveries no program holds your token.
+- **Nothing else can use it.** RSSHub listens on your own computer only, and every run gets a new random key
+  that each request must carry, so other programs and web pages cannot use your logged-in session.
+- **It is locked down.** The container cannot write to its files, runs without root rights or extra
+  permissions, has capped memory, and does not load any outside files at start.
+- **The token stays private.** It is kept in `~/.config/omabox/x-token`, readable by you alone, and passed to
+  the container through a private file that is deleted at once. It never appears in a command line or in
+  Omabox's own files.
+
+To revoke it at any time, sign out of x.com in that browser, or use "Log out of all other sessions" in X's
+settings. Press `t` in Sources to replace or remove the saved token.
+
+### Adding an X account
+
+1. In Sources, press `n` (or click `+`) and paste an X profile address, such as `https://x.com/someone`.
+
+   <img src="docs/screenshots/x-add.png" alt="The Sources view with an X profile address in the URL field" width="440">
+
+2. The first time, Omabox asks for your X token. In your browser, sign in to x.com with the account Omabox
+   should use. Open the developer tools (`F12`), then **Application** in Chromium-based browsers or **Storage**
+   in Firefox, then **Cookies** and `https://x.com`. Copy the value of `auth_token`: about 40 letters and digits.
+
+3. Paste it into the hidden **Token** field and press `Enter`. Omabox saves it and adds the profile.
+
+   <img src="docs/screenshots/x-token.png" alt="The X token guide in the middle of the panel, with the warning and a hidden token field" width="440">
+
+The first X fetch downloads the RSSHub image (about a minute). If X later rejects the token, Omabox sends one
+notification; press `t` in Sources to paste a new one. Omabox fetches each X source once per delivery, and
+replies only when you open a post.
 
 ## Privacy
 
@@ -147,10 +191,10 @@ rm -rf ~/.config/omabox ~/.local/state/omabox ~/.cache/omabox
 rm -f ~/.local/bin/omabox
 ```
 
-If you used X sources, also remove the RSSHub image:
+If you used X sources, also remove the RSSHub image, and sign the token out on x.com:
 
 ```sh
-podman rmi docker.io/diygod/rsshub:latest   # or: docker rmi docker.io/diygod/rsshub:latest
+podman rmi $(podman images -q docker.io/diygod/rsshub)   # or the same with docker
 ```
 
 ## Development
@@ -162,6 +206,10 @@ restart the shell after QML changes:
 ln -sfn "$PWD" ~/.config/omarchy/plugins/io.github.wienieclaurowy.omabox
 omarchy restart shell
 ```
+
+The screenshots come from `python3 tools/screenshots/shots.py OUT-DIR feed:tokyo-night ...`, which shows the
+real panel with invented data in a second, sandboxed Quickshell for a few seconds, without touching your own
+shell, theme or Omabox data.
 
 ## License
 
