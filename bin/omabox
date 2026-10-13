@@ -2769,7 +2769,9 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, check=
 
 
 def runtime_dir():
-    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    """XDG_RUNTIME_DIR, else Omabox's private state folder: never the shared temp folder, where another user can
+    make files with these fixed names first."""
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent))
 
 
 RSSHUB_MARKER = "omabox-rsshub.running"
@@ -3279,7 +3281,8 @@ def cmd_fetch(args, state=None):
         if not alone:
             print("another fetch is running: skipped", file=sys.stderr)
             return None
-        stop_stale_rsshub()
+        with contextlib.suppress(OSError):
+            stop_stale_rsshub()
         return run_fetch(args, state)
 
 
@@ -3752,7 +3755,7 @@ def menu_select(options, prompt, run=subprocess.run, sleep=time.sleep, clock=tim
                 runtime_dir=None):
     """The option the user picked in the Omarchy menu's select mode, without its glyph; None when the menu was
     closed or nothing came back within timeout seconds. ValueError when the menu cannot be shown."""
-    base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent)
     # The menu writes both files after the pick; removing their folder makes a pick after the timeout a no-op.
     folder = Path(tempfile.mkdtemp(prefix="omabox-pick-", dir=base))
     selection, done = folder / "selection", folder / "done"

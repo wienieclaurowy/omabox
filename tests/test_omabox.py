@@ -2103,6 +2103,27 @@ class RsshubTest(unittest.TestCase):
             self.run_session(start_code=125)
         self.assertNotIn("secret-token", str(caught.exception))
 
+    def test_without_a_runtime_dir_files_stay_in_the_private_state_folder(self):
+        state = Path(tempfile.mkdtemp()) / "state" / "items.json"
+        shared = Path(tempfile.mkdtemp())
+        shared.chmod(0o1777)
+        with mock.patch.dict(omabox.os.environ, {"TMPDIR": str(shared)}), mock.patch.object(omabox, "STATE_PATH", state):
+            del omabox.os.environ["XDG_RUNTIME_DIR"]
+            self.assertEqual(omabox.runtime_dir(), state.parent)
+            self.assertEqual(state.parent.stat().st_mode & 0o777, 0o700)
+            # files another user planted there under the old fixed names change nothing
+            (shared / omabox.RSSHUB_MARKER).write_text("podman\n")
+            (shared / "omabox-rsshub.lock").mkdir()
+            omabox.stop_stale_rsshub(lambda *a, **k: self.fail("nothing to stop"))
+        self.assertFalse((state.parent / omabox.RSSHUB_MARKER).exists())
+
+    def test_fetch_goes_on_when_the_stale_container_check_fails(self):
+        args = argparse.Namespace(offline=True, all=False, only=None, notify=False, retry=False)
+        with mock.patch.object(omabox, "stop_stale_rsshub", side_effect=PermissionError("lock")), \
+                mock.patch.object(omabox, "run_fetch", lambda args, state=None: "fetched"), \
+                mock.patch.object(omabox, "fetch_lock", lambda: contextlib.nullcontext(True)):
+            self.assertEqual(omabox.cmd_fetch(args), "fetched")
+
     def test_a_container_left_by_a_killed_run_is_removed(self):
         runtime = self.runtime
         calls = []
