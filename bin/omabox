@@ -2442,6 +2442,15 @@ def x_post_ref(link):
     return (match.group(1), match.group(2)) if match else None
 
 
+REDDIT_POST_RE = re.compile(r"^https?://(?:(?:www|old|new|np)\.)?reddit\.com/r/(\w+)/comments/(\w+)(?:[/?#]|$)", re.I)
+
+
+def reddit_post_ref(link):
+    """https://www.reddit.com/r/example/comments/abc/title/ -> ("example", "abc"), else None."""
+    match = REDDIT_POST_RE.match(link or "")
+    return (match.group(1), match.group(2)) if match else None
+
+
 X_USER_ROUTE_RE = re.compile(r"^(https?://[^/]+/twitter/user/[^/?#]+)(?:/([^/?#]*))?/?$")
 # RSSHub's named routeParams (twitter/utils parseRouteParams); anything else is read as includeRts=...&includeReplies=...
 X_ROUTE_ALIASES = {"exclude_rts": "includeRts=false", "exclude_rts_replies": "includeRts=false",
@@ -3692,6 +3701,27 @@ def post_avatar(data, status_id):
     return ""
 
 
+REDDIT_AUTHOR_RE = re.compile(r"<author>\s*<name>/?u/([\w-]+)</name>")
+REDDIT_COMMENTER_RE = re.compile(r"^/?u/([\w-]+) on ")
+
+
+def parse_reddit_comments(data, limit=MAX_REPLY_THREADS):
+    """(post author, threads) from a post's comments feed, fetched with depth=1: top-level comments only, best
+    first. The feed names no parent comments, so answers could not be placed under theirs. Its first entry is the
+    post itself; AutoModerator's pinned notes are left out."""
+    text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+    post = REDDIT_AUTHOR_RE.search(text)
+    threads = []
+    for entry in parse_feed(data):
+        name = REDDIT_COMMENTER_RE.match(entry["title"])
+        if not entry["guid"].startswith("t1_") or not name or name.group(1) == "AutoModerator":
+            continue
+        threads.append([{"name": name.group(1), "handle": name.group(1), "id": entry["guid"][3:], "avatar": "",
+                         "link": entry["link"], "label": "", "mentions": "", "published": entry["published"],
+                         "html": entry["html"].replace('href="/', 'href="https://www.reddit.com/')}])
+    return (post.group(1) if post else ""), threads[:limit]
+
+
 def thread_replies(replies, author, limit=MAX_REPLY_THREADS):
     """Threads (a reply to the post, then the replies under it, one level deep) in X's order: the first limit of
     them and any later one the post's author answered in. A reply joins the thread holding the post it answers;
@@ -3764,15 +3794,17 @@ def comment_markup(reply, author, images, avatars, depth, children=""):
     op = "op" if reply["handle"].casefold() == author.casefold() else ""
     body, _ = sanitize(reply["html"], images)
     body = PICTURE_TAG_RE.sub(rf'\1 depth="{depth}">', body)
-    link = f"https://x.com/{reply['handle']}/status/{reply['id']}"
-    when = local_stamp(reply["published"]) if reply["published"] else "on X"
+    # Reddit comments carry their own link, an empty label (name and handle are one) and no @mentions
+    link = html.escape(reply.get("link") or f"https://x.com/{reply['handle']}/status/{reply['id']}", quote=True)
+    label = reply.get("label", f"@{reply['handle']}")
+    when = local_stamp(reply["published"]) if reply["published"] else "on Reddit" if reply.get("link") else "on X"
     name = html.escape(reply["name"])
     face = f'<img src="omabox-avatar:{avatars[reply["avatar"]]}">' if reply["avatar"] in avatars else ""
     who = f'<span class="opname">{name}</span> <span class="badge">AUTHOR</span>' if op else f"<b>{name}</b>"
     return (f'<table width="100%" cellspacing="0" cellpadding="0" class="{op}comment"><tr>'
             f'<td class="{op}face" valign="top">{face}</td><td class="{op}cell" valign="top">'
-            f'<p class="who">{who} <span class="meta">@{reply["handle"]} · <a href="{link}">{when}</a></span></p>'
-            + reply_paragraphs(linkify(body, "https://x.com/"), "said") + children + "</td></tr></table>")
+            f'<p class="who">{who} <span class="meta">{html.escape(label) + " · " if label else ""}<a href="{link}">{when}</a></span></p>'
+            + reply_paragraphs(linkify(body, reply.get("mentions", "https://x.com/")), "said") + children + "</td></tr></table>")
 
 
 def quote_markup(quote, images=None, mentions_base=""):
@@ -3804,14 +3836,17 @@ def replying_to(handles, mentions_base=""):
     return f'<p class="replyto">Replying to {", ".join(names[:-1]) + " and " if len(names) > 1 else ""}{names[-1]}</p>'
 
 
-def replies_markup(threads, author, fetched, images=None, avatars=None):
+REPLIES_LINES = {"X": ("Top replies on X, most relevant first", "No replies on X yet"),
+                 "Reddit": ("Top comments on Reddit, best first", "No comments on Reddit yet")}
+
+
+def replies_markup(threads, author, fetched, images=None, avatars=None, site="X"):
     """The comments section under the post: a rule, a heading ]/[ jumps to, then each thread with its replies
     inside the first reply's text column."""
     avatars = avatars or {}
     count = sum(len(thread) for thread in threads)
     parts = ['<hr class="rule">', f'<p class="section">Comments <span class="count">{count}</span></p>',
-             f'<p class="meta">{"Top replies on X, most relevant first" if count else "No replies on X yet"}'
-             f' · fetched {local_stamp(fetched)}</p>']
+             f'<p class="meta">{REPLIES_LINES[site][0 if count else 1]} · fetched {local_stamp(fetched)}</p>']
     for first, *rest in threads:
         children = "".join(comment_markup(reply, author, images, avatars, 2) for reply in rest)
         parts.append(comment_markup(first, author, images, avatars, 1, children))
@@ -3819,16 +3854,20 @@ def replies_markup(threads, author, fetched, images=None, avatars=None):
 
 
 def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session, image_fetch=download_limited):
-    """The X post's reply fields and whether they are the stored copy. Replies come from RSSHub's tweet route (X's
-    first page of them); like load_article, the network runs outside the state lock. ValueError explains a failure."""
+    """The X or Reddit post's reply fields and whether they are the stored copy. X replies come from RSSHub's tweet
+    route (X's first page of them); like load_article, the network runs outside the state lock. ValueError explains
+    a failure."""
     item = next((i for i in load_state()["items"] if i["id"] == item_id), None)
     if item is None:
         raise ValueError(f"no post {item_id}")
     if "replies_html" in item and not refresh:
         return {key: item[key] for key in REPLY_KEYS if key in item}, True
+    reddit = reddit_post_ref(item.get("link"))
+    if reddit:
+        return load_reddit_comments(item, reddit, fetch, image_fetch), False
     ref = x_post_ref(item.get("link"))
     if not ref:
-        raise ValueError("only X posts have replies to show")
+        raise ValueError("only X and Reddit posts have comments to show")
     # JSON, not RSS: only JSON Feed keeps each reply's avatar and the post it answers
     url = f"{RSSHUB_BASE}/twitter/tweet/{ref[0]}/status/{ref[1]}?format=json&sorted=false"
     try:
@@ -3849,6 +3888,22 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
         fields["repost_avatar"] = avatars.get(face, "")
     update_items([item_id], lambda stored: stored.update(fields))
     return fields, False
+
+
+def load_reddit_comments(item, ref, fetch=download, image_fetch=download_limited):
+    """Comments from the post's comments feed (Reddit blocks the .json pages): one request, which download paces
+    to Reddit's one a minute, so it can wait up to a minute. The feed has no avatars, so the face cells stay empty."""
+    url = f"https://www.reddit.com/r/{ref[0]}/comments/{ref[1]}/.rss?depth=1"
+    try:
+        _, data = fetch(url)
+        author, threads = parse_reddit_comments(data)
+    except Exception as error:
+        raise ValueError(fetch_error(error, url)) from None
+    stamp = now_iso()
+    fields = {"replies_html": replies_markup(threads, author, stamp, ImageFetcher(item["link"], image_fetch), site="Reddit"),
+              "replies_count": sum(len(thread) for thread in threads), "replies_fetched": stamp}
+    update_items([item["id"]], lambda stored: stored.update(fields))
+    return fields
 
 
 def cmd_replies(args):

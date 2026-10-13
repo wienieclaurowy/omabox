@@ -3004,6 +3004,25 @@ REDDIT_FEED = ("""<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.
                + "</content></entry></feed>").encode()
 
 
+def reddit_comment(cid, author, body):
+    return (f'<entry><author><name>/u/{author}</name></author><id>t1_{cid}</id>'
+            f'<link href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/{cid}/"/>'
+            f'<updated>2026-09-21T14:13:20+00:00</updated><title>/u/{author} on Which wick?</title>'
+            f'<content type="html">{html.escape(f"<div class=\"md\"><p>{body}</p></div>")}</content></entry>')
+
+
+REDDIT_COMMENTS = ('<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom">'
+                   '<entry><author><name>/u/emberfield</name></author><id>t3_1ab3</id>'
+                   '<link href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/"/>'
+                   '<updated>2026-09-21T12:00:00+00:00</updated><title>Which wick?</title>'
+                   '<content type="html">&lt;p&gt;Which wick lasts longest?&lt;/p&gt;</content></entry>'
+                   + reddit_comment("c0", "AutoModerator", "Please read the rules.")
+                   + reddit_comment("c1", "wickmaker", 'Cotton, &amp; braided, see <a href="/r/candles">r/candles</a>.')
+                   + reddit_comment("c2", "emberfield", "Thanks all!")
+                   + reddit_comment("c4", "glowworm", "Hemp for me.")
+                   + "</feed>").encode()
+
+
 REPLIES_FEED = json.dumps({"version": "https://jsonfeed.org/version/1.1", "items": [
     reply_entry("rowanvale", 100, "Rowan", "Thrilled to announce", avatar="https://pbs.twimg.com/profile_images/9/rowanvale_normal.jpg",
                 published="2026-09-26T16:13:00.000Z"),
@@ -3032,6 +3051,8 @@ class RepliesTest(unittest.TestCase):
              "html": "Thrilled to announce", "published": day, "read": False, "short": True},
             {"id": "blog", "source": "Blog", "title": "Post", "link": "https://blog.example/post", "html": "",
              "published": day, "read": False},
+            {"id": "reddit", "source": "r/lanterns", "title": "Which wick?", "html": "",
+             "link": "https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/", "published": day, "read": False},
         ]
         omabox.save_state(state)
         self.urls, self.sessions = [], 0
@@ -3145,7 +3166,7 @@ class RepliesTest(unittest.TestCase):
         self.assertEqual(omabox.fetch_avatars(["https://pbs.twimg.com/a_bigger.jpg"], broken), {})
 
     def test_failures_are_one_line_errors(self):
-        for iid, text in (("blog", "only X posts"), ("nope", "no post nope")):
+        for iid, text in (("blog", "only X and Reddit posts"), ("nope", "no post nope")):
             with self.assertRaisesRegex(ValueError, text):
                 omabox.load_replies(iid, fetch=self.fetch, session=self.session)
         self.assertEqual(self.urls, [])
@@ -3167,11 +3188,41 @@ class RepliesTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), omabox.X_TOKEN_ERROR)
         self.assertNotIn("replies_html", omabox.load_state()["items"][0])
 
+    def test_reddit_comments_thread_under_their_top_comment(self):
+        self.assertEqual(omabox.reddit_post_ref("https://old.reddit.com/r/lanterns/comments/1ab3/which_wick/"),
+                         ("lanterns", "1ab3"))
+        self.assertIsNone(omabox.reddit_post_ref("https://www.reddit.com/r/lanterns/"))
+        author, threads = omabox.parse_reddit_comments(REDDIT_COMMENTS)
+        self.assertEqual(author, "emberfield")
+        self.assertEqual([[r["id"] for r in thread] for thread in threads], [["c1"], ["c2"], ["c4"]])
+        self.assertEqual(threads[0][0]["published"], "2026-09-21T14:13:20Z")
+        markup = omabox.replies_markup(threads, author, "2026-09-27T08:00:00Z", site="Reddit")
+        self.assertIn('<span class="count">3</span>', markup)
+        self.assertIn("Top comments on Reddit, best first", markup)
+        self.assertEqual(markup.count('class="opcomment"'), 1)
+        self.assertIn('<a href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/c4/">', markup)
+        self.assertIn("Cotton, &amp; braided", markup)
+        self.assertIn('<a href="https://www.reddit.com/r/candles">r/candles</a>', markup)
+        self.assertNotIn("@wickmaker", markup)
+        self.assertNotIn("rules", markup)
+        self.assertIn("No comments on Reddit yet", omabox.replies_markup([], author, "2026-09-27T08:00:00Z", site="Reddit"))
+
+    def test_reddit_fetch_reads_the_json_page(self):
+        def fetch(url):
+            self.urls.append(url)
+            return url, REDDIT_COMMENTS
+
+        fields, cached = omabox.load_replies("reddit", fetch=fetch, session=self.session, image_fetch=self.picture)
+        self.assertFalse(cached)
+        self.assertEqual(self.urls, ["https://www.reddit.com/r/lanterns/comments/1ab3/.rss?depth=1"])
+        self.assertEqual((fields["replies_count"], self.sessions), (3, 0))
+        self.assertEqual(omabox.load_replies("reddit", fetch=fetch, session=self.session), (fields, True))
+
     def test_json_error(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             omabox.main(["replies", "blog", "--json"])
-        self.assertEqual(json.loads(out.getvalue()), {"error": "only X posts have replies to show"})
+        self.assertEqual(json.loads(out.getvalue()), {"error": "only X and Reddit posts have comments to show"})
 
 
 class FetchLockTest(unittest.TestCase):
