@@ -414,6 +414,17 @@ class ParseTest(unittest.TestCase):
         self.assertIn("<p>u/wickmaker · <a href", clip["html"])
         self.assertNotIn("v.redd.it</a>", clip["html"])
 
+    def test_reddit_footer_costs_linear_time_on_long_whitespace(self):
+        footer = reddit_footer("wickmaker", "https://lantern.example/guide", "https://www.reddit.com/r/lanterns/comments/1ab2/g/")
+        cut = footer.index("<span>")
+        for body in ("<pre>" + " " * 200000 + "</pre>", "submitted by <a href=\"x\">u/a</a>" + " " * 200000 + "x",
+                     ("submitted by" + "&#32; " * 1000) * 50, " " * 100000 + footer[:cut] + " " * 100000):
+            started = time.monotonic()
+            self.assertEqual(omabox.reddit_entry({"html": body})["html"], body)
+            self.assertLess(time.monotonic() - started, 0.5)
+        entry = omabox.reddit_entry({"html": "<p>text</p> &#32; \n " + footer})
+        self.assertTrue(entry["html"].startswith("<p>text</p><p>u/wickmaker · "), entry["html"])
+
     def test_version_of(self):
         self.assertEqual(omabox.version_of("v4.0.4"), "4.0.4")
         self.assertEqual(omabox.version_of("Omarchy 3.1 is out"), "3.1")

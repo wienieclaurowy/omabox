@@ -2409,10 +2409,30 @@ def hn_entry(entry):
     return {**entry, "html": body + (f"<p>{' · '.join(links)}</p>" if links else "")}
 
 
+# Matched from each "submitted by" (reddit_footer), with possessive runs: a leading whitespace run, or two runs that
+# could split one, made a long run of spaces in a post cost quadratic time.
 REDDIT_FOOTER_RE = re.compile(
-    r'(?:\s|&#32;)*submitted by(?:\s|&#32;)*<a href="[^"]*">\s*/?u/([\w-]+)\s*</a>\s*(?:<br\s*/?>)?\s*'
-    r'(?:<span>\s*)?<a href="([^"]*)">\[link\]</a>(?:\s*</span>)?(?:\s|&#32;)*'
-    r'(?:<span>\s*)?<a href="([^"]*)">\[comments\]</a>(?:\s*</span>)?', re.I)
+    r'submitted by(?:\s|&#32;)*+<a href="[^"]*">\s*+/?u/([\w-]+)\s*+</a>\s*+(?:<br\s*+/?>)?\s*+'
+    r'(?:<span>\s*+)?<a href="([^"]*)">\[link\]</a>(?:\s*+</span>)?(?:\s|&#32;)*+'
+    r'(?:<span>\s*+)?<a href="([^"]*)">\[comments\]</a>(?:\s*+</span>)?', re.I)
+REDDIT_FOOTER_START_RE = re.compile("submitted by", re.I)
+
+
+def reddit_footer(markup):
+    """(start, match) of Reddit's footer, start taking in the whitespace before it; None without one."""
+    for found in REDDIT_FOOTER_START_RE.finditer(markup):
+        footer = REDDIT_FOOTER_RE.match(markup, found.start())
+        if footer:
+            start = footer.start()
+            while start:
+                if markup[start - 1].isspace():
+                    start -= 1
+                elif markup.endswith("&#32;", 0, start):
+                    start -= 5
+                else:
+                    break
+            return start, footer
+    return None
 
 
 REDDIT_VIDEO_LINK_RE = re.compile(r"^https://v\.redd\.it/(\w+)/?$")
@@ -2423,12 +2443,13 @@ def reddit_entry(entry):
     """Reddit ends each body with "submitted by /u/name [link] [comments]". It becomes one line like Hacker News's:
     the poster, the linked site when the post links away from Reddit, then the discussion. A video post's preview
     picture becomes the poster of its video."""
-    footer = REDDIT_FOOTER_RE.search(entry["html"])
-    if not footer:
+    found = reddit_footer(entry["html"])
+    if not found:
         return entry
+    start, footer = found
     user, target, comments = footer.groups()
     host = (urllib.parse.urlparse(html.unescape(target)).hostname or "").lower()
-    body = entry["html"][:footer.start()] + entry["html"][footer.end():]
+    body = entry["html"][:start] + entry["html"][footer.end():]
     video = REDDIT_VIDEO_LINK_RE.match(html.unescape(target))
     if video:
         # the feed's preview picture links to the post; it becomes the poster of the video's DASH manifest
