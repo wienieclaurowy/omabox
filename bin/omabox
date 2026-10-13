@@ -4044,7 +4044,7 @@ def parse_mastodon_replies(data, status_id, limit=MAX_REPLY_THREADS):
         warning = str(status.get("spoiler_text") or "").strip()
         body = MASTODON_MENTIONS_RE.sub("<p>", str(status.get("content") or ""))
         thread.append({"name": str(account.get("display_name") or "").strip() or handle, "handle": handle, "id": sid,
-                       "avatar": str(account.get("avatar_static") or ""), "link": str(status.get("url") or ""),
+                       "avatar": str(account.get("avatar_static") or ""), "link": web_link(status.get("url")),
                        "mentions": "", "published": iso_utc(status.get("created_at")), "likes": status.get("favourites_count") or 0,
                        "html": (f"<p><b>{html.escape(warning)}</b></p>" if warning else "") + body + mastodon_media(status)})
     return threads[:limit]
@@ -4123,15 +4123,16 @@ def comment_markup(reply, author, images, avatars, depth, children=""):
     body, _ = sanitize(reply["html"], images)
     body = PICTURE_TAG_RE.sub(rf'\1 depth="{depth}">', body)
     # Reddit comments carry their own link, an empty label (name and handle are one) and no @mentions
-    link = html.escape(reply.get("link") or f"https://x.com/{reply['handle']}/status/{reply['id']}", quote=True)
+    link = web_link(reply["link"]) if "link" in reply else f"https://x.com/{reply['handle']}/status/{reply['id']}"
     label = reply.get("label", f"@{reply['handle']}")
-    when = local_stamp(reply["published"]) if reply["published"] else "open" if reply.get("link") else "on X"
+    when = local_stamp(reply["published"]) if reply["published"] else "open" if "link" in reply else "on X"
+    when = f'<a href="{html.escape(link, quote=True)}">{when}</a>' if link else when
     name = html.escape(reply["name"])
     face = f'<img src="omabox-avatar:{avatars[reply["avatar"]]}">' if reply["avatar"] in avatars else ""
     who = f'<span class="opname">{name}</span> <span class="badge">AUTHOR</span>' if op else f"<b>{name}</b>"
     return (f'<table width="100%" cellspacing="0" cellpadding="0" class="{op}comment"><tr>'
             f'<td class="{op}face" valign="top">{face}</td><td class="{op}cell" valign="top">'
-            f'<p class="who">{who} <span class="meta">{html.escape(label) + " · " if label else ""}<a href="{link}">{when}</a></span></p>'
+            f'<p class="who">{who} <span class="meta">{html.escape(label) + " · " if label else ""}{when}</span></p>'
             + reply_paragraphs(linkify(body, reply.get("mentions", "https://x.com/")), "said") + children + "</td></tr></table>")
 
 

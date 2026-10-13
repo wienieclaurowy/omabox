@@ -3629,6 +3629,20 @@ class RepliesTest(unittest.TestCase):
         self.assertIn("@ember@other.example · ", markup)
         self.assertEqual(markup.count('class="opcomment"'), 1)
 
+    def test_reply_links_are_web_links_only(self):
+        for url in ("file:///home/someone/.config/omabox/x-token", "javascript:alert(1)", "omabox-img:x", ""):
+            context = json.dumps({"descendants": [{"id": "11", "in_reply_to_id": "10", "url": url, "content": "<p>hi</p>",
+                                                   "account": {"acct": "ember"}, "created_at": "2026-09-27T09:00:00Z"}]})
+            threads = omabox.parse_mastodon_replies(context.encode(), "10")
+            self.assertEqual(threads[0][0]["link"], "")
+            markup = omabox.replies_markup(threads, "lantern", "2026-09-27T10:00:00Z", site="Mastodon")
+            self.assertNotIn("href", markup.split('class="said"')[0].split('class="who"')[1])
+        threads[0][0]["link"] = "file:///etc/passwd"
+        self.assertNotIn("file:", omabox.replies_markup(threads, "lantern", "2026-09-27T10:00:00Z", site="Mastodon"))
+        threads[0][0]["link"] = "https://social.example/@ember/11"
+        self.assertIn('href="https://social.example/@ember/11"',
+                      omabox.replies_markup(threads, "lantern", "2026-09-27T10:00:00Z", site="Mastodon"))
+
     def test_fediverse_fetches_go_to_the_public_apis(self):
         state = omabox.load_state()
         state["items"] += [
