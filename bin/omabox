@@ -296,14 +296,25 @@ class PublicHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(http.client.HTTPSConnection if proxied(req) else PublicHTTPSConnection, req, context=self._context)
 
 
-class PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
+class WebRedirects(urllib.request.HTTPRedirectHandler):
+    """Redirects to http(s) only: urllib's own handler also follows ftp://."""
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not newurl.startswith(("https://", "http://")) or not public_host(newurl):
+        if not newurl.startswith(("https://", "http://")):
+            raise ValueError(f"redirect to a non-web address refused: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class PublicOnlyRedirects(WebRedirects):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if newurl.startswith(("https://", "http://")) and not public_host(newurl):
             raise ValueError(f"redirect to non-public address refused: {newurl}")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandler, PublicHTTPSHandler)
+# feeds the user runs on this machine or the local network
+LAN_OPENER = urllib.request.build_opener(WebRedirects)
 # Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route and the key
 LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -2122,9 +2133,44 @@ def paced_open(url, send):
         return response
 
 
-def download(url, headers=None):
+def private_target(url):
+    """True when url's host resolves, and only to addresses on this machine or the local network. A failed lookup
+    counts as public, the strict side: a second lookup may answer differently."""
+    host = urllib.parse.urlparse(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return bool(infos) and not any(public_address(info[4][0]) for info in infos)
+
+
+def feed_opener(url):
+    """The opener for a feed download, http(s) only. A feed at a public address can redirect to public hosts only;
+    one on this machine or the local network, as self-hosted feeds are, anywhere."""
+    if not url.startswith(("https://", "http://")):
+        raise ValueError(f"not a web address: {url}")
+    if needs_rsshub(url):
+        return LOOPBACK_OPENER
+    return LAN_OPENER if private_target(url) else PUBLIC_OPENER
+
+
+def linked_feed(typed, url):
+    """(url, opener) for a feed a page links to; refused when it points off the web or at Omabox's RSSHub. Behind
+    a public address the user typed, only public hosts: PUBLIC_OPENER checks again when it connects."""
+    if not url.startswith(("https://", "http://")) or needs_rsshub(url):
+        raise ValueError(f"refused the page's feed link: {url}")
+    if private_target(typed):
+        return url, None
+    if private_target(url):
+        raise ValueError(f"refused the page's feed link to a local address: {url}")
+    return url, PUBLIC_OPENER.open
+
+
+def download(url, headers=None, opener=None):
+    send = opener or feed_opener(url).open
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
-    send = LOOPBACK_OPENER.open if needs_rsshub(url) else urllib.request.urlopen
     with paced_open(url, lambda: send(request, timeout=30)) as response:
         # an RSSHub answer keeps the stored address: the live one carries the per-run key
         final_url = url if needs_rsshub(url) else response.geturl()
@@ -2134,7 +2180,7 @@ def download(url, headers=None):
 def download_feed(url, cached=None, opener=None):
     """Conditional GET: (body, validators), body None when the server answers 304 Not Modified."""
     cached = cached or {}
-    opener = opener or (LOOPBACK_OPENER.open if needs_rsshub(url) else urllib.request.urlopen)
+    opener = opener or feed_opener(url).open
     headers = {"User-Agent": USER_AGENT}
     # Validators stand for items built by one MEDIA_VERSION; after a bump the body is needed to rebuild them.
     if cached.get("media") == MEDIA_VERSION:
@@ -2430,9 +2476,9 @@ def remembered_feed(url):
     return None
 
 
-def discover_download(url, headers=None):
+def discover_download(url, headers=None, opener=None):
     data = remembered_feed(url)
-    return (url, data) if data is not None else download(url, headers)
+    return (url, data) if data is not None else download(url, headers, opener=opener)
 
 
 def discovered_or_download(url, cached=None):
@@ -2473,8 +2519,8 @@ def discover(url):
         finder.feed(data.decode("utf-8", "replace"))
         if not finder.links:
             raise ValueError("no feed found on that page")
-        linked = urllib.parse.urljoin(final_url, finder.links[0])
-        final_url, data = discover_download(linked)
+        linked, opener = linked_feed(url, urllib.parse.urljoin(final_url, finder.links[0]))
+        final_url, data = discover_download(linked, opener=opener)
         feed_url = final_url
         entries = list(parse_feed(data))
         remember_feed([linked, final_url], data)

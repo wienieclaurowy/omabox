@@ -179,7 +179,7 @@ def recording_server(test, status=200, body=b"", headers=None):
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     test.addCleanup(server.server_close)
     test.addCleanup(server.shutdown)
     return server.server_port, seen
@@ -778,9 +778,12 @@ class DiscoverTest(unittest.TestCase):
         self.pages = {}
         self.real = omabox.download
 
-        def fake(url, headers=None):
+        self.openers = {}
+
+        def fake(url, headers=None, opener=None):
             self.requested.append(url)
             self.headers[url] = headers
+            self.openers[url] = opener
             return url, self.pages[url]
 
         omabox.download = fake
@@ -901,6 +904,29 @@ class DiscoverTest(unittest.TestCase):
         found = omabox.discover("https://blog.example/")
         self.assertEqual(found["url"], "https://blog.example/rss")
         self.assertEqual(found["count"], 1)
+
+    def test_a_public_page_cannot_link_its_feed_off_the_web_or_into_the_lan(self):
+        page = b'<html><head><link rel="alternate" type="application/rss+xml" href="%s"></head></html>'
+        local = {"blog.example": "203.0.113.5", "feeds.internal.example": "192.168.1.20", "admin.internal.example": "192.168.1.1"}
+
+        def resolve(host, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (local[host], 0))]
+
+        public = mock.patch.object(omabox, "public_address", lambda address: address.startswith("203.0.113."))
+        with mock.patch.object(omabox.socket, "getaddrinfo", resolve), public:
+            for link in (b"file:///etc/passwd", b"http://admin.internal.example/admin", omabox.RSSHUB_BASE.encode() + b"/twitter/user/a"):
+                self.pages["https://blog.example/"] = page % link
+                with self.assertRaises(ValueError):
+                    omabox.discover("https://blog.example/")
+            self.assertEqual(self.requested, ["https://blog.example/"] * 3)
+            self.pages["https://blog.example/"] = page % b"/rss"
+            self.pages["https://blog.example/rss"] = RSS_FEED
+            omabox.discover("https://blog.example/")
+            self.assertEqual(self.openers["https://blog.example/rss"], omabox.PUBLIC_OPENER.open)
+            # a page on the local network may link a feed there: self-hosted readers keep working
+            self.pages["http://feeds.internal.example/"] = page % b"http://feeds.internal.example:8080/feed"
+            self.pages["http://feeds.internal.example:8080/feed"] = RSS_FEED
+            self.assertEqual(omabox.discover("http://feeds.internal.example/")["url"], "http://feeds.internal.example:8080/feed")
 
     def test_rsshub_x_route_starts_rsshub(self):
         started = []
@@ -2194,6 +2220,65 @@ class NetworkWaitTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in omabox.due_sources(sources, state, args)], ["dns", "limited"])
 
 
+class FeedRedirectTest(unittest.TestCase):
+    """127.0.0.2 stands in for a public feed host, 127.0.0.1 for the LAN."""
+
+    def setUp(self):
+        real = omabox.public_address
+        patcher = mock.patch.object(omabox, "public_address", lambda address: address == "127.0.0.2" or (
+            real(address) if not address.startswith("127.") else False))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        proxies = mock.patch.dict(omabox.os.environ, {"no_proxy": "*"})
+        proxies.start()
+        self.addCleanup(proxies.stop)
+        self.lan, self.lan_seen = recording_server(self, body=RSS_FEED)
+
+    def feed_host(self, location):
+        seen = []
+
+        class Feed(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.2", 0), Feed)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.2:{server.server_port}"
+
+    def test_a_public_feed_cannot_redirect_into_the_lan(self):
+        base = self.feed_host(f"http://127.0.0.1:{self.lan}/reboot")
+        for get in (omabox.download_feed, omabox.download):
+            with self.assertRaises((ValueError, OSError)):
+                get(base + "/feed.xml")
+        self.assertEqual(self.lan_seen, [])
+
+    def test_a_feed_on_the_lan_keeps_working_and_may_redirect_there(self):
+        lan = f"http://127.0.0.1:{self.lan}"
+        self.assertEqual(omabox.download_feed(lan + "/feed.xml")[0], RSS_FEED)
+        other, _ = recording_server(self, status=302, headers={"Location": lan + "/moved.xml"})
+        self.assertEqual(omabox.download(f"http://127.0.0.1:{other}/feed.xml")[1], RSS_FEED)
+        self.assertEqual(self.lan_seen, ["/feed.xml", "/moved.xml"])
+
+    def test_only_web_addresses(self):
+        path = Path(tempfile.mkdtemp()) / "feed.xml"
+        path.write_bytes(RSS_FEED)
+        for get in (omabox.download_feed, omabox.download):
+            with self.assertRaises(ValueError):
+                get(path.as_uri())
+        for target in (path.as_uri(), "ftp://127.0.0.1/feed.xml"):
+            lan_to_file, _ = recording_server(self, status=302, headers={"Location": target})
+            with self.assertRaises((ValueError, OSError)):
+                omabox.download_feed(f"http://127.0.0.1:{lan_to_file}/feed.xml")
+
+
 class ConditionalGetTest(unittest.TestCase):
     CACHED = {"etag": '"v1"', "modified": "Sat, 26 Sep 2026 06:00:00 GMT", "media": omabox.MEDIA_VERSION}
 
@@ -2361,8 +2446,7 @@ class RedditPaceTest(unittest.TestCase):
 
     def test_subreddits_in_one_run_wait_for_reddits_next_minute(self):
         opener, seen = self.opener((200, self.LIMIT), (200, {**self.LIMIT, "x-ratelimit-reset": "59"}), (200, {}))
-        with mock.patch("urllib.request.urlopen", opener):
-            omabox.download("https://www.reddit.com/r/a/.rss")
+        omabox.download("https://www.reddit.com/r/a/.rss", opener=opener)
         self.assertEqual(omabox.download_feed("https://old.reddit.com/r/b/.rss", None, opener)[0], RSS_FEED)
         omabox.download_feed("https://www.reddit.com/r/c/.rss", None, opener)
         self.assertEqual(seen, [1000.0, 1031.0, 1091.0])

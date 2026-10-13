@@ -176,8 +176,8 @@ replies only when you open a post.
 
 Omabox has no telemetry and no account. It talks only to the feeds you add, to the sites their posts link to
 (for pictures, link previews and full articles), and, for X, to a local RSSHub container. Pictures, previews
-and articles are never fetched from addresses on your local network, so a feed cannot use Omabox to reach your
-router or other machines.
+and articles are never fetched from addresses on your local network, and a feed on the internet cannot redirect
+or link Omabox there either, so a feed cannot use Omabox to reach your router or other machines.
 
 Opening a post can also make requests of its own, and each one shows that service your IP address and the post
 you are reading:
