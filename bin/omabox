@@ -6,6 +6,7 @@ import codecs
 import concurrent.futures
 import contextlib
 import fcntl
+import grp
 import hashlib
 import html
 import html.entities
@@ -14,6 +15,7 @@ import http.server
 import ipaddress
 import json
 import os
+import pwd
 import re
 import secrets
 import shlex
@@ -2884,6 +2886,60 @@ def cmd_x_token(args):
         print(json.dumps({"saved": saved}) if args.json else ("saved" if saved else "not saved"))
 
 
+# Rootful docker runs container ids as the host's own, and 65534 is the host's nobody: any process of that account
+# could read the token from the RSSHub process's environment. There it gets an id from systemd's unused range
+# 0x70000000-0x7FFDFFFF that no account, group or subordinate id range holds.
+UNUSED_ID_RANGE = (0x70000000, 0x7FFE0000)
+SUBORDINATE_ID_FILES = (Path("/etc/subuid"), Path("/etc/subgid"))
+
+
+def subordinate_ranges(files=SUBORDINATE_ID_FILES):
+    ranges = []
+    for path in files:
+        with contextlib.suppress(OSError):
+            for line in path.read_text().splitlines():
+                parts = line.strip().split(":")
+                if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                    ranges.append((int(parts[1]), int(parts[1]) + int(parts[2])))
+    return ranges
+
+
+def id_taken(number, ranges):
+    for lookup in (pwd.getpwuid, grp.getgrgid):
+        try:
+            lookup(number)
+            return True
+        except KeyError:
+            pass
+    return any(low <= number < high for low, high in ranges)
+
+
+def unused_id(pick=secrets.randbelow, ranges=None):
+    ranges = subordinate_ranges() if ranges is None else ranges
+    for _ in range(100):
+        number = UNUSED_ID_RANGE[0] + pick(UNUSED_ID_RANGE[1] - UNUSED_ID_RANGE[0])
+        if not id_taken(number, ranges):
+            return number
+    raise RuntimeError("found no unused user id to run RSSHub under docker")
+
+
+def docker_maps_ids(run, engine):
+    """Whether docker runs rootless or with userns-remap: container ids then land in a subordinate range, as under
+    rootless podman."""
+    try:
+        info = run([engine, "info", "--format", "{{json .SecurityOptions}}"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return info.returncode == 0 and bool(re.search(r"name=(rootless|userns)\b", info.stdout or ""))
+
+
+def container_user(run, engine):
+    if Path(engine).name == "podman" or docker_maps_ids(run, engine):
+        return "65534:65534"
+    number = unused_id()
+    return f"{number}:{number}"
+
+
 @contextlib.contextmanager
 def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub):
     engine = engine or container_engine()
@@ -2909,13 +2965,14 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
         # Locked down: no writes, no capabilities, no root, capped memory and processes. jsdelivr is blocked so the
         # X query ids come from the pinned image, not from a third-party file fetched at start.
         lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
+        user = container_user(run, engine)
         # a port taken between free_port() and the start makes the engine fail to publish it; another port is tried
         for _ in range(3):
             port = free_port()
             started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
                            "-p", f"127.0.0.1:{port}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
                            "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m",
-                           "--user", "65534:65534", "--add-host", "cdn.jsdelivr.net:127.0.0.1",
+                           "--user", user, "--add-host", "cdn.jsdelivr.net:127.0.0.1",
                            "--env-file", str(env_file), RSSHUB_IMAGE],
                           capture_output=True, text=True, timeout=300)
             if started.returncode == 0 or not re.search(r"address already in use|port is already allocated",

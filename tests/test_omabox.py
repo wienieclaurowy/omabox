@@ -2071,6 +2071,41 @@ class RsshubTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     omabox.check_rsshub(lambda query: always)
 
+    def test_rootful_docker_runs_rsshub_as_an_id_no_host_account_holds(self):
+        def docker(options):
+            def run(argv, **kwargs):
+                if argv[1] == "info":
+                    return subprocess.CompletedProcess(argv, 0, options, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return run
+
+        self.assertEqual(omabox.container_user(docker(""), "podman"), "65534:65534")
+        for remapped in ('["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]', '["name=userns"]'):
+            self.assertEqual(omabox.container_user(docker(remapped), "docker"), "65534:65534")
+        user = omabox.container_user(docker('["name=seccomp,profile=builtin","name=cgroupns"]'), "docker")
+        uid, gid = map(int, user.split(":"))
+        self.assertEqual(uid, gid)
+        self.assertTrue(omabox.UNUSED_ID_RANGE[0] <= uid < omabox.UNUSED_ID_RANGE[1])
+        for lookup in (omabox.pwd.getpwuid, omabox.grp.getgrgid):
+            with self.assertRaises(KeyError):
+                lookup(uid)
+
+        def unanswered(argv, **kwargs):
+            raise OSError("no docker daemon")
+
+        self.assertNotEqual(omabox.container_user(unanswered, "docker"), "65534:65534")
+
+    def test_unused_id_skips_accounts_groups_and_subordinate_ranges(self):
+        listing = Path(tempfile.mkdtemp()) / "subuid"
+        listing.write_text("someone:1879048192:65536\nbroken line\n")
+        ranges = omabox.subordinate_ranges([listing, listing.with_name("missing")])
+        self.assertEqual(ranges, [(0x70000000, 0x70010000)])
+        picks = iter([5, 65536 + 7, 65536 + 9])
+        with mock.patch.object(omabox.pwd, "getpwuid", lambda n: n == 0x70010007 and object() or (_ for _ in ()).throw(KeyError(n))):
+            self.assertEqual(omabox.unused_id(lambda limit: next(picks), ranges), 0x70010009)
+        with self.assertRaises(RuntimeError):
+            omabox.unused_id(lambda limit: 0, ranges)
+
     def test_a_taken_port_is_retried_on_another(self):
         ports = iter([40001, 40002])
         tries = []
