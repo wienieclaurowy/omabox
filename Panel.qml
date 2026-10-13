@@ -488,7 +488,10 @@ Panel {
     if (media.kind === "video" && urls.length > 0) {
       root.viewingMedia = true
       root.openingVideo = item.id + ":" + media.index
-      videoPlayer.command = [root.omaboxBin, "play", "--start", String(media.index)].concat(urls)
+      // on stdin like runCli: which videos the user watches stays out of argv
+      videoPlayer.command = [root.omaboxBin, "--args-on-stdin"]
+      videoPlayer.stdinArgs = JSON.stringify(["play", "--start", String(media.index)].concat(urls)) + "\n"
+      videoPlayer.stdinEnabled = true
       videoPlayer.running = true
     } else if (media.kind === "picture" && paths.length > 0) {
       root.viewingMedia = true
@@ -1263,9 +1266,13 @@ Panel {
     id: videoPlayer
     property bool shown: false
     property bool noPlayer: false
+    property string stdinArgs: ""
     onStarted: {
       shown = false
       noPlayer = false
+      write(stdinArgs)
+      stdinArgs = ""
+      stdinEnabled = false
     }
     stdout: SplitParser {
       onRead: function(data) {

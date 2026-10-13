@@ -3086,7 +3086,22 @@ def viewer_argv(paths, start, desktop_file=default_desktop_file):
     return ["xdg-open", paths[start]]
 
 
-def player_argv(urls, start, desktop_file=default_desktop_file):
+def mpv_files(urls, ipc):
+    """mpv's arguments for its files: on the IPC socket at file descriptor ipc (mpv_playlist) when given, which keeps
+    the addresses out of its argv, readable by every local user; else as arguments."""
+    return ["--idle=once", f"--input-ipc-client=fd://{ipc}"] if ipc is not None else ["--", *urls]
+
+
+def mpv_playlist(sock, urls):
+    """Loads urls into the idle mpv behind sock. Only the last loadfile starts playback, once every file is in, and
+    mpv then starts at --playlist-start (checked with mpv 0.41; playlist-play-index after plain appends played from
+    the first file). A playlist file would not do: --access-references=no refuses to open one."""
+    commands = [["loadfile", url, "append-play" if index == len(urls) - 1 else "append"] for index, url in enumerate(urls)]
+    with contextlib.suppress(OSError):
+        sock.sendall("".join(json.dumps({"command": command}) + "\n" for command in commands).encode())
+
+
+def player_argv(urls, start, desktop_file=default_desktop_file, ipc=None):
     """The default video player's command, then mpv; None without either. mpv gets its own flags so the
     playlist keeps the post's order."""
     argv = default_app_argv("video/mp4", urls, start, desktop_file)
@@ -3094,14 +3109,14 @@ def player_argv(urls, start, desktop_file=default_desktop_file):
         return argv
     if shutil.which("mpv"):
         # no references: a file naming other files or addresses (a playlist, linked segments) plays nothing
-        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--access-references=no", "--", *urls]
+        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--access-references=no", *mpv_files(urls, ipc)]
     return None
 
 
-def direct_player_argv(urls, start):
+def direct_player_argv(urls, start, ipc=None):
     """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them."""
     if shutil.which("mpv") and (shutil.which("yt-dlp") or not any(youtube_video(url) for url in urls)):
-        return ["mpv", f"--playlist-start={start}", "--", *urls]
+        return ["mpv", f"--playlist-start={start}", *mpv_files(urls, ipc)]
     return None
 
 
@@ -4739,7 +4754,10 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     start = min(max(args.start, 0), len(urls) - 1)
     # watch pages and playlists are no single media file for the relay to pass on; mpv fetches them itself
     direct = all(direct_video(url) for url in urls)
-    argv = direct_players(urls, start) if direct else players(relay(urls), start)
+    files = urls if direct else relay(urls)
+    ours, theirs = socket.socketpair()
+    argv = (direct_players if direct else players)(files, start, ipc=theirs.fileno())
+    ipc = argv is not None and f"--input-ipc-client=fd://{theirs.fileno()}" in argv
     if argv is None:
         print("no player", flush=True)
         sys.exit("no video player: these videos need mpv (and yt-dlp for YouTube)" if direct else "no video player: install mpv")
@@ -4749,9 +4767,15 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
         key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     before = windows()
     try:
-        player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                     pass_fds=(theirs.fileno(),) if ipc else ())
     except OSError as error:
         sys.exit(f"cannot start {argv[0]}: {error}")
+    theirs.close()
+    if ipc:
+        mpv_playlist(ours, files)
+    else:
+        ours.close()
     deadline = time.monotonic() + wait_seconds
     window = None
     while before is not None:
@@ -4769,6 +4793,7 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     if window:
         focus(window)
     player.wait()
+    ours.close()
     while window and window in (windows() or set()):
         time.sleep(poll_every)
 

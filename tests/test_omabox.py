@@ -3048,7 +3048,7 @@ class ViewerTest(unittest.TestCase):
         def relay(urls):
             return [f"http://127.0.0.1:9/t/{index}.mp4" for index in range(len(urls))]
 
-        def mpv_only(urls, start):
+        def mpv_only(urls, start, ipc=None):
             return ["mpv", f"--playlist-start={start}", "--"] + urls
 
         out = io.StringIO()
@@ -3065,6 +3065,60 @@ class ViewerTest(unittest.TestCase):
                                      "http://127.0.0.1:9/t/1.mp4"], "focus 0xplayer", "waited"])
         self.assertNotIn("http_proxy", self.env)
         self.assertEqual(out, "opened\n")
+
+    def test_mpv_gets_its_files_over_a_socket_not_in_argv(self):
+        received = {}
+
+        def run(argv, env=None, pass_fds=(), **kwargs):
+            received["argv"], received["fd"] = argv, os.dup(pass_fds[0])
+
+            class Player:
+                def poll(self):
+                    return None
+
+                def wait(self):
+                    pass
+
+            return Player()
+
+        with self.installed("mpv"), mock.patch.object(omabox, "default_desktop_file", lambda mime: None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            omabox.cmd_play(argparse.Namespace(urls=self.URLS, start=1), run, lambda: None, poll_every=0,
+                            relay=lambda urls: [f"http://127.0.0.1:9/t0k3n/{i}.mp4" for i in range(len(urls))],
+                            focus=lambda address: None)
+        argv = received["argv"]
+        self.assertFalse(any("127.0.0.1" in arg or "example" in arg for arg in argv), argv)
+        self.assertEqual(argv[:4], ["mpv", "--playlist-start=1", "--ytdl=no", "--access-references=no"])
+        self.assertIn("--idle=once", argv)
+        self.assertRegex(argv[-1], r"^--input-ipc-client=fd://\d+$")
+        with socket.socket(fileno=received["fd"]) as sock:
+            lines = sock.recv(65536).decode().splitlines()
+        self.assertEqual([json.loads(line)["command"] for line in lines],
+                         [["loadfile", "http://127.0.0.1:9/t0k3n/0.mp4", "append"],
+                          ["loadfile", "http://127.0.0.1:9/t0k3n/1.mp4", "append-play"]])
+        with self.installed("mpv", "yt-dlp"):
+            direct = omabox.direct_player_argv(["https://www.youtube.com/watch?v=Zq3vKe8TbWo"], 0, ipc=7)
+        self.assertEqual(direct, ["mpv", "--playlist-start=0", "--idle=once", "--input-ipc-client=fd://7"])
+
+    @unittest.skipUnless(omabox.shutil.which("mpv") and omabox.shutil.which("ffmpeg"), "needs mpv and ffmpeg")
+    def test_mpv_starts_at_the_clicked_video_with_the_others_around_it(self):
+        root = Path(tempfile.mkdtemp())
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=5",
+                        "-pix_fmt", "yuv420p", str(root / "clip.mp4")], check=True, timeout=60)
+        (root / "mpv").mkdir()
+        port, _ = recording_server(self, body=lambda path: (root / "clip.mp4").read_bytes(), headers={"Content-Type": "video/mp4"})
+        plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for start in (0, 1, 2):
+            log = root / f"mpv-{start}.log"
+            (root / "mpv" / "mpv.conf").write_text(f"vo=null\nao=null\nframes=2\nlog-file={log}\n")
+            with mock.patch.dict(omabox.os.environ, {"MPV_HOME": str(root / "mpv")}), \
+                    mock.patch.object(omabox, "default_desktop_file", lambda mime: None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                omabox.cmd_play(argparse.Namespace(urls=self.URLS + ["https://video.twimg.com/c.mp4"], start=start),
+                                windows=lambda: None, focus=lambda address: None,
+                                relay=lambda urls: omabox.start_relay([f"http://127.0.0.1:{port}/{i}.mp4" for i in range(3)], plain))
+            played = re.findall(r"Playing: http://127\.0\.0\.1:\d+/[\w-]+/(\d)\.mp4", log.read_text())
+            self.assertEqual(played, [str(index) for index in range(start, 3)], start)
 
     def test_play_clamps_start(self):
         launched, _ = self.play(self.URLS, start=9)
@@ -3087,7 +3141,7 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual(launched[0], ["mpv", "--playlist-start=1", "--"] + urls)
         self.assertEqual(self.env["http_proxy"], "http://192.0.2.1:3128")
         with self.assertRaises(SystemExit) as caught:
-            self.play(urls, direct_players=lambda urls, start: None)
+            self.play(urls, direct_players=lambda urls, start, ipc=None: None)
         self.assertIn("need mpv (and yt-dlp for YouTube)", str(caught.exception.code))
         reddit = ["https://v.redd.it/ab12cd/DASHPlaylist.mpd"]
         with self.installed("mpv"):
@@ -3103,7 +3157,7 @@ class ViewerTest(unittest.TestCase):
 
     def test_play_without_a_player_says_so(self):
         with self.assertRaises(SystemExit) as caught:
-            self.play(self.URLS, players=lambda urls, start: None)
+            self.play(self.URLS, players=lambda urls, start, ipc=None: None)
         self.assertIn("install mpv", str(caught.exception.code))
 
     def desktop(self, exec_line):
