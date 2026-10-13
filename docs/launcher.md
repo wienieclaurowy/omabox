@@ -7,6 +7,10 @@ and read-later posts have a bookmark. The post you pick opens in the Omabox
 reader. Filter, search and snooze are cleared so the post is visible. Press
 Escape to close the menu without opening anything.
 
+Like every Omarchy menu, the rows reach the menu as command arguments, so other
+accounts on this computer can see them briefly. If you share the computer, use
+the search in the panel (`/`) instead.
+
 `omabox search [QUERY] [--json]` is the same search, printed to the terminal.
 A post matches when every word of the query appears in its title, source or
 text. Case is ignored.
