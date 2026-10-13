@@ -4750,7 +4750,7 @@ def main(argv=None):
     doctor = sub.add_parser("doctor", help="check delivery, sources, cache and tools")
     doctor.set_defaults(func=cmd_doctor)
     args = parser.parse_args(argv)
-    # A logout or `systemctl stop` must still run the finally blocks that stop the RSSHub container.
+    # SIGTERM (logout, a stopped service) and SIGHUP must still run the finally blocks that stop the RSSHub container.
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, lambda number, frame: sys.exit(128 + number))
     try:
