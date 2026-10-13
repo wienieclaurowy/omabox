@@ -304,6 +304,8 @@ class PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
 
 
 PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandler, PublicHTTPSHandler)
+# Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route and the key
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 DOWNLOAD_SECONDS = 30
@@ -2122,15 +2124,17 @@ def paced_open(url, send):
 
 def download(url, headers=None):
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with paced_open(url, lambda: urllib.request.urlopen(request, timeout=30)) as response:
+    send = LOOPBACK_OPENER.open if needs_rsshub(url) else urllib.request.urlopen
+    with paced_open(url, lambda: send(request, timeout=30)) as response:
         # an RSSHub answer keeps the stored address: the live one carries the per-run key
         final_url = url if needs_rsshub(url) else response.geturl()
         return final_url, feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
 
 
-def download_feed(url, cached=None, opener=urllib.request.urlopen):
+def download_feed(url, cached=None, opener=None):
     """Conditional GET: (body, validators), body None when the server answers 304 Not Modified."""
     cached = cached or {}
+    opener = opener or (LOOPBACK_OPENER.open if needs_rsshub(url) else urllib.request.urlopen)
     headers = {"User-Agent": USER_AGENT}
     # Validators stand for items built by one MEDIA_VERSION; after a bump the body is needed to rebuild them.
     if cached.get("media") == MEDIA_VERSION:
@@ -2622,7 +2626,7 @@ def rsshub_keyed(url):
 
 def rsshub_up(timeout=2):
     try:
-        with urllib.request.urlopen(rsshub_live_base() + "/", timeout=timeout):
+        with LOOPBACK_OPENER.open(rsshub_live_base() + "/", timeout=timeout):
             return True
     except Exception:
         return False
@@ -2639,7 +2643,7 @@ def wait_for_rsshub(seconds=90):
 
 def rsshub_status(path, timeout=10):
     try:
-        with urllib.request.urlopen(rsshub_live_base() + path, timeout=timeout) as response:
+        with LOOPBACK_OPENER.open(rsshub_live_base() + path, timeout=timeout) as response:
             return response.status
     except urllib.error.HTTPError as error:
         error.close()

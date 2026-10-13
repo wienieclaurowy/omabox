@@ -162,6 +162,29 @@ HN_FEED = b"""<rss version="2.0"><channel><title>Hacker News: Front Page</title>
 </channel></rss>"""
 
 
+def recording_server(test, status=200, body=b"", headers=None):
+    """A loopback HTTP server that answers every GET alike; (port, paths it was asked for)."""
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(status(self.path) if callable(status) else status)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body(self.path) if callable(body) else body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    test.addCleanup(server.server_close)
+    test.addCleanup(server.shutdown)
+    return server.server_port, seen
+
+
 class SanitizeTest(unittest.TestCase):
     def test_drops_images_scripts_and_unsafe_links(self):
         body, text = omabox.sanitize('<script>x()</script><p onclick="y">Hi <img src="https://t/p.gif"><a href="javascript:z">link</a></p>')
@@ -1953,6 +1976,20 @@ class RsshubTest(unittest.TestCase):
             self.assertEqual(omabox.rsshub_keyed(f"{omabox.RSSHUB_BASE}/twitter/user/a"),
                              "http://127.0.0.1:40001/twitter/user/a?key=k3y")
             self.assertEqual(omabox.rsshub_keyed("https://blog.example/feed"), "https://blog.example/feed")
+
+    def test_rsshub_requests_never_go_through_a_proxy(self):
+        rsshub, asked = recording_server(self, body=b"{}")
+        proxy, proxied = recording_server(self, status=502)
+        route = f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale?format=json"
+        with mock.patch.dict(omabox.os.environ, {"http_proxy": f"http://127.0.0.1:{proxy}", "no_proxy": ""}), \
+                mock.patch.object(urllib.request, "_opener", None), \
+                mock.patch.object(omabox, "RSSHUB_KEY", "k3y"), mock.patch.object(omabox, "RSSHUB_LIVE_PORT", rsshub):
+            omabox.download(route)
+            omabox.download_feed(route)
+            self.assertTrue(omabox.rsshub_up())
+            self.assertEqual(omabox.rsshub_status("/x"), 200)
+        self.assertEqual(proxied, [])
+        self.assertEqual(len(asked), 4)
 
     def test_token_file_readable_by_others_is_tightened(self):
         token_path = Path(tempfile.mkdtemp()) / "x-token"
