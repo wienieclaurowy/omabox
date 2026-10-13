@@ -3777,7 +3777,7 @@ def parse_bluesky_replies(data, limit=MAX_REPLY_THREADS):
             body += f'<p><a href="{html.escape(card["url"])}">{html.escape(card["title"])}</a></p>'
         return {"name": bluesky_name(who), "handle": handle, "id": str(post.get("uri") or "").rsplit("/", 1)[-1],
                 "avatar": str(who.get("avatar") or "").replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/"),
-                "link": bluesky_page(post.get("uri"), handle), "mentions": "",
+                "link": bluesky_page(post.get("uri"), handle), "mentions": "", "likes": post.get("likeCount") or 0,
                 "published": iso_utc(record.get("createdAt") or post.get("indexedAt")), "html": body}
 
     def shown(nodes):
@@ -3832,7 +3832,7 @@ def parse_mastodon_replies(data, status_id, limit=MAX_REPLY_THREADS):
         body = MASTODON_MENTIONS_RE.sub("<p>", str(status.get("content") or ""))
         thread.append({"name": str(account.get("display_name") or "").strip() or handle, "handle": handle, "id": sid,
                        "avatar": str(account.get("avatar_static") or ""), "link": str(status.get("url") or ""),
-                       "mentions": "", "published": iso_utc(status.get("created_at")),
+                       "mentions": "", "published": iso_utc(status.get("created_at")), "likes": status.get("favourites_count") or 0,
                        "html": (f"<p><b>{html.escape(warning)}</b></p>" if warning else "") + body + mastodon_media(status)})
     return threads[:limit]
 
@@ -3951,10 +3951,18 @@ def replying_to(handles, mentions_base=""):
     return f'<p class="replyto">Replying to {", ".join(names[:-1]) + " and " if len(names) > 1 else ""}{names[-1]}</p>'
 
 
-REPLIES_LINES = {"X": ("Top replies on X, most relevant first", "No replies on X yet"),
+def rank_threads(threads, author):
+    """Threads the post's author answered in first, then by the likes of their first reply. The counts only order
+    the threads; Omabox shows none. Sites that send no counts (X, Reddit) keep their own order otherwise."""
+    author = author.casefold()
+    return sorted(threads, key=lambda thread: (not any(reply["handle"].casefold() == author for reply in thread),
+                                               -int(thread[0].get("likes") or 0)))
+
+
+REPLIES_LINES = {"X": ("Top replies on X, the author's threads first", "No replies on X yet"),
                  "Reddit": ("Top comments on Reddit, best first", "No comments on Reddit yet"),
-                 "Bluesky": ("Replies on Bluesky", "No replies on Bluesky yet"),
-                 "Mastodon": ("Replies on Mastodon, oldest first", "No replies on Mastodon yet")}
+                 "Bluesky": ("Replies on Bluesky, the author's threads and most liked first", "No replies on Bluesky yet"),
+                 "Mastodon": ("Replies on Mastodon, the author's threads and most liked first", "No replies on Mastodon yet")}
 
 
 def replies_markup(threads, author, fetched, images=None, avatars=None, site="X"):
@@ -3993,7 +4001,7 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     try:
         with session():
             _, data = fetch(url)
-        threads = thread_replies(parse_replies(data, ref[1]), ref[0])
+        threads = rank_threads(thread_replies(parse_replies(data, ref[1]), ref[0]), ref[0])
         face = post_avatar(data, ref[1]) if item.get("repost") else ""
     except RuntimeError as error:
         raise ValueError(f"RSSHub: {error}") from None
@@ -4042,6 +4050,7 @@ def load_fediverse_replies(item, bluesky, mastodon, fetch=download_public, image
 
 
 def store_replies(item, threads, author, site, image_fetch=download_limited):
+    threads = rank_threads(threads, author)
     shown = [reply for thread in threads for reply in thread]
     avatars = fetch_avatars([reply["avatar"] for reply in shown if reply["avatar"]], image_fetch)
     stamp = now_iso()

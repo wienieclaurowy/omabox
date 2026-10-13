@@ -3272,6 +3272,15 @@ class RepliesTest(unittest.TestCase):
         self.assertEqual(markup.count('class="opcomment"'), 1)
         self.assertIn("Replies on Bluesky", markup)
 
+    def test_author_threads_then_most_liked_come_first(self):
+        def thread(handle, likes, *answers):
+            return [{"handle": handle, "likes": likes}] + [{"handle": h} for h in answers]
+
+        threads = [thread("a", 1), thread("b", 9), thread("c", 0, "Lantern"), thread("d", 5), thread("e", 2, "x")]
+        self.assertEqual([t[0]["handle"] for t in omabox.rank_threads(threads, "lantern")], ["c", "b", "d", "e", "a"])
+        no_counts = [[{"handle": h}] for h in "pqr"]
+        self.assertEqual(omabox.rank_threads(no_counts, "lantern"), no_counts)
+
     def test_mastodon_replies_thread_by_parent_and_lose_leading_mentions(self):
         self.assertEqual(omabox.mastodon_post_ref("https://social.example/@lantern/10"), ("social.example", "lantern", "10"))
         self.assertIsNone(omabox.mastodon_post_ref("https://social.example/notice/10"))
