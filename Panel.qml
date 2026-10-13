@@ -1532,11 +1532,9 @@ Panel {
             maximumLineCount: 2
             elide: Text.ElideRight
             text: root.view === "feed"
-              ? (root.errorSources.length > 0
-                ? Model.deliveredLabel(root.feedState, root.now, "", hostWidget ? hostWidget.tickProblem : "")
-                  + "\nfailed: " + root.errorSources.join(", ")
-                : Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
-                  .split("  ·  ").join("\n"))
+              ? [Model.deliveryNotice(root.feedState, root.now, hostWidget ? hostWidget.tickProblem : "").split("  ·  ").join("\n"),
+                 root.errorSources.length > 0 ? "failed: " + root.errorSources.join(", ") : ""]
+                .filter(function(part) { return part !== "" }).join("\n")
               : root.view === "sources" && root.sourcesLoaded
                 ? root.sources.length + (root.sources.length === 1 ? " source" : " sources")
               : ""
@@ -2118,8 +2116,7 @@ Panel {
 
         Text {
           id: statusLine
-          // Messages ("Copied …", CLI answers) take this line for a while instead of a row above the list, which
-          // pushed the list down and back. A space keeps the line's height while there is nothing to say yet.
+          visible: root.confirming || root.catchupOpen
           width: parent.width
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
@@ -2127,18 +2124,8 @@ Panel {
             : root.mode === "confirm-clear" ? root.clearQuestion
             : root.catchupOpen ? ["MARK READ", Model.filterLabel(root.filter), root.query !== "" ? "/ " + root.query : ""]
               .filter(function(part) { return part !== "" }).join("  ·  ")
-            : root.busy ? "Looking…"
-            : root.message !== "" ? root.message
-            : root.fetching ? "Fetching new posts…"
-            : root.view === "feed" && !headerStatus.failed && root.recoveredFile !== ""
-              ? "Omabox could not read its saved posts and started over. The old file is " + root.stateDirLabel + "/"
-                + root.recoveredFile + "."
-            : " "
-          color: root.confirming || root.catchupOpen ? root.fg
-            : root.busy ? root.faint
-            : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
-            : root.fetching ? root.faint
-            : root.view === "feed" && root.recoveredFile !== "" ? root.dim : root.faint
+            : ""
+          color: root.fg
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1
@@ -2198,6 +2185,42 @@ Panel {
               }
             }
           }
+        }
+      }
+
+      // Messages ("Copied …", CLI answers, fetching) cover the bottom edge for a while instead of taking a line, so
+      // the list never moves and the panel has no empty band below it.
+      Rectangle {
+        id: messageStrip
+        readonly property string text: statusLine.visible ? ""
+          : root.busy ? "Looking…"
+          : root.message !== "" ? root.message
+          : root.fetching ? "Fetching new posts…"
+          : root.view === "feed" && !headerStatus.failed && root.recoveredFile !== ""
+            ? "Omabox could not read its saved posts and started over. The old file is " + root.stateDirLabel + "/"
+              + root.recoveredFile + "."
+          : ""
+        visible: text !== "" && !root.overlayShown
+        x: body.x
+        width: body.width
+        height: messageText.implicitHeight + Style.space(8)
+        y: body.y + (hintsFlow.visible ? hintsFlow.y - body.spacing : body.height) - height
+        color: Qt.rgba(root.cardColor.r, root.cardColor.g, root.cardColor.b, 1)
+
+        Text {
+          id: messageText
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          text: messageStrip.text
+          color: root.busy || (root.message === "" && root.fetching) ? root.faint
+            : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
+            : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.letterSpacing: 1
         }
       }
 

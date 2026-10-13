@@ -243,12 +243,18 @@ function noteAsItem(row) {
   }
 }
 
-function deliveredLabel(state, now, at, problem) {
+// Empty while deliveries run normally: the panel shows only what needs attention.
+function deliveryNotice(state, now, problem) {
   if (problem) return "Delivery failed: " + problem
   if (state.paused_until && String(state.paused_until) > now.toISOString())
     return "Deliveries paused until " + Qt.formatDateTime(new Date(state.paused_until), "ddd HH:mm") + "  ·  omabox pause off"
   if (!state.delivered) return "Nothing delivered yet. The first delivery starts within a minute."
-  return "Delivered " + relativeTime(state.delivered, now) + (at ? "  ·  daily at " + at : "")
+  return ""
+}
+
+function deliveredLabel(state, now, at, problem) {
+  return deliveryNotice(state, now, problem)
+    || "Delivered " + relativeTime(state.delivered, now) + (at ? "  ·  daily at " + at : "")
 }
 
 // appIcon is often a reverse-DNS desktop id ("com.mitchellh.ghostty") when the sender leaves app empty.
