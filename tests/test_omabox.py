@@ -3023,6 +3023,40 @@ REDDIT_COMMENTS = ('<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://ww
                    + "</feed>").encode()
 
 
+def bluesky_reply(rkey, handle, text, replies=(), kind="app.bsky.feed.defs#threadViewPost"):
+    return {"$type": kind, "post": {"uri": f"at://did:plc:{handle}/app.bsky.feed.post/{rkey}",
+                                    "author": {"handle": f"{handle}.bsky.example", "displayName": handle.title(),
+                                               "avatar": f"https://cdn.bsky.example/img/avatar/plain/{handle}@jpeg"},
+                                    "record": {"text": text, "createdAt": "2026-09-27T09:00:00.000Z"}},
+            "replies": list(replies)}
+
+
+BLUESKY_THREAD = json.dumps({"thread": {"$type": "app.bsky.feed.defs#threadViewPost",
+                                        "post": {"author": {"handle": "lantern.bsky.example"}}, "replies": [
+    bluesky_reply("r1", "wick", "Lovely glow", [bluesky_reply("r2", "lantern", "Thanks!", [
+        bluesky_reply("r3", "wick", "Any time", [bluesky_reply("r4", "ember", "too deep")])])]),
+    {"$type": "app.bsky.feed.defs#blockedPost", "uri": "at://did:plc:x/app.bsky.feed.post/r5"},
+    bluesky_reply("r6", "ember", "Which oil?"),
+]}})
+
+
+def mastodon_status(sid, parent, acct, content, **extra):
+    return {"id": sid, "in_reply_to_id": parent, "url": f"https://social.example/@{acct}/{sid}",
+            "created_at": "2026-09-27T09:00:00.000Z", "content": content, "spoiler_text": "", "media_attachments": [],
+            "account": {"acct": acct, "username": acct, "display_name": acct.title(),
+                        "avatar_static": f"https://social.example/avatars/{acct}.png"}, **extra}
+
+
+MENTION = '<span class="h-card" translate="no"><a href="https://social.example/@lantern" class="u-url mention">@<span>lantern</span></a></span>'
+MASTODON_CONTEXT = json.dumps({"ancestors": [], "descendants": [
+    mastodon_status("11", "10", "wick", f"<p>{MENTION} Lovely glow</p>"),
+    mastodon_status("12", "11", "lantern", f"<p>{MENTION} Thanks!</p>",
+                    media_attachments=[{"type": "image", "url": "https://social.example/m/1.png", "description": "a lamp"}]),
+    mastodon_status("13", "10", "ember@other.example", "<p>Which oil?</p>", spoiler_text="Oil talk"),
+    mastodon_status("14", "99", "stray", "<p>not in this thread</p>"),
+]})
+
+
 REPLIES_FEED = json.dumps({"version": "https://jsonfeed.org/version/1.1", "items": [
     reply_entry("rowanvale", 100, "Rowan", "Thrilled to announce", avatar="https://pbs.twimg.com/profile_images/9/rowanvale_normal.jpg",
                 published="2026-09-26T16:13:00.000Z"),
@@ -3166,7 +3200,7 @@ class RepliesTest(unittest.TestCase):
         self.assertEqual(omabox.fetch_avatars(["https://pbs.twimg.com/a_bigger.jpg"], broken), {})
 
     def test_failures_are_one_line_errors(self):
-        for iid, text in (("blog", "only X and Reddit posts"), ("nope", "no post nope")):
+        for iid, text in (("blog", "only X, Reddit, Bluesky and Mastodon posts"), ("nope", "no post nope")):
             with self.assertRaisesRegex(ValueError, text):
                 omabox.load_replies(iid, fetch=self.fetch, session=self.session)
         self.assertEqual(self.urls, [])
@@ -3207,7 +3241,59 @@ class RepliesTest(unittest.TestCase):
         self.assertNotIn("rules", markup)
         self.assertIn("No comments on Reddit yet", omabox.replies_markup([], author, "2026-09-27T08:00:00Z", site="Reddit"))
 
-    def test_reddit_fetch_reads_the_json_page(self):
+    def test_bluesky_replies_nest_to_three_levels(self):
+        self.assertEqual(omabox.bluesky_post_ref("https://bsky.app/profile/lantern.bsky.example/post/3abc"),
+                         ("lantern.bsky.example", "3abc"))
+        self.assertIsNone(omabox.bluesky_post_ref("https://bsky.app/profile/lantern.bsky.example"))
+        author, threads = omabox.parse_bluesky_replies(BLUESKY_THREAD)
+        self.assertEqual(author, "lantern.bsky.example")
+        self.assertEqual([[r["id"] for r in thread] for thread in threads], [["r1", "r2", "r3"], ["r6"]])
+        first = threads[0][0]
+        self.assertEqual(first["link"], "https://bsky.app/profile/wick.bsky.example/post/r1")
+        self.assertEqual(first["avatar"], "https://cdn.bsky.example/img/avatar_thumbnail/plain/wick@jpeg")
+        markup = omabox.replies_markup(threads, author, "2026-09-27T10:00:00Z", site="Bluesky")
+        self.assertIn("@wick.bsky.example · ", markup)
+        self.assertEqual(markup.count('class="opcomment"'), 1)
+        self.assertIn("Replies on Bluesky", markup)
+
+    def test_mastodon_replies_thread_by_parent_and_lose_leading_mentions(self):
+        self.assertEqual(omabox.mastodon_post_ref("https://social.example/@lantern/10"), ("social.example", "lantern", "10"))
+        self.assertIsNone(omabox.mastodon_post_ref("https://social.example/notice/10"))
+        threads = omabox.parse_mastodon_replies(MASTODON_CONTEXT, "10")
+        self.assertEqual([[r["id"] for r in thread] for thread in threads], [["11", "12"], ["13"]])
+        self.assertEqual(threads[0][0]["html"], "<p>Lovely glow</p>")
+        self.assertEqual(threads[0][1]["html"], '<p>Thanks!</p><img src="https://social.example/m/1.png" alt="a lamp">')
+        self.assertEqual(threads[1][0]["html"], "<p><b>Oil talk</b></p><p>Which oil?</p>")
+        markup = omabox.replies_markup(threads, "lantern", "2026-09-27T10:00:00Z", site="Mastodon")
+        self.assertIn("@ember@other.example · ", markup)
+        self.assertEqual(markup.count('class="opcomment"'), 1)
+
+    def test_fediverse_fetches_go_to_the_public_apis(self):
+        state = omabox.load_state()
+        state["items"] += [
+            {"id": "sky", "source": "Lantern", "title": "", "html": "", "published": "2026-09-27T08:00:00Z", "read": False,
+             "link": "https://bsky.app/profile/lantern.bsky.example/post/3abc", "short": True},
+            {"id": "toot", "source": "Lantern", "title": "", "html": "", "published": "2026-09-27T08:00:00Z", "read": False,
+             "link": "https://social.example/@lantern/10", "short": True}]
+        omabox.save_state(state)
+        answers = {"getPostThread": BLUESKY_THREAD, "/context": MASTODON_CONTEXT}
+
+        def fetch(url, limit):
+            self.urls.append(url)
+            return url, "application/json", next(body for key, body in answers.items() if key in url).encode()
+
+        item = omabox.load_state()["items"][-2]
+        sky = omabox.load_fediverse_replies(item, omabox.bluesky_post_ref(item["link"]), None, fetch, self.picture)
+        item = omabox.load_state()["items"][-1]
+        toot = omabox.load_fediverse_replies(item, None, omabox.mastodon_post_ref(item["link"]), fetch, self.picture)
+        self.assertEqual(self.urls, [
+            "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=at://lantern.bsky.example/app.bsky.feed.post/3abc"
+            "&depth=3&parentHeight=0", "https://social.example/api/v1/statuses/10/context"])
+        self.assertEqual((sky["replies_count"], toot["replies_count"]), (4, 3))
+        self.assertEqual(len(re.findall(r"omabox-avatar:", toot["replies_html"])), 3)
+        self.assertEqual(omabox.load_replies("toot"), (toot, True))
+
+    def test_reddit_fetch_reads_the_comments_feed(self):
         def fetch(url):
             self.urls.append(url)
             return url, REDDIT_COMMENTS
@@ -3222,7 +3308,7 @@ class RepliesTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             omabox.main(["replies", "blog", "--json"])
-        self.assertEqual(json.loads(out.getvalue()), {"error": "only X and Reddit posts have comments to show"})
+        self.assertEqual(json.loads(out.getvalue()), {"error": "only X, Reddit, Bluesky and Mastodon posts have comments to show"})
 
 
 class FetchLockTest(unittest.TestCase):

@@ -40,8 +40,8 @@ If you want every post as soon as it appears, a regular feed reader will suit yo
   channels, Bluesky, Mastodon, Reddit, Hacker News and, optionally, X profiles. Paste a page address and
   Omabox finds the feed.
 - **A reader.** Posts open in the panel with pictures, link previews and videos (played in your video
-  player). Feeds that only send a summary can fetch the whole article. X and Reddit posts show their comments
-  under them.
+  player). Feeds that only send a summary can fetch the whole article. X, Reddit, Bluesky and Mastodon posts
+  show their comments under them.
 - **Calm tools.** Snooze a post until later or tomorrow, keep a read-later list, mute words or patterns per
   source, search everything, and mark old posts read in one step.
 - **Notification history.** Omarchy keeps its last 10 notifications; Omabox keeps every one for 7 days, with

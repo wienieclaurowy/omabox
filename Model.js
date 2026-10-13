@@ -466,11 +466,14 @@ function articleView(item, feedVersion) {
   return copy
 }
 
-// `omabox replies` reads the post from the link, so only X status and Reddit comment-page links qualify.
+// `omabox replies` reads the post from the link: X status, Reddit comment-page, Bluesky post and Mastodon status
+// links qualify (bin/omabox X_POST_RE, REDDIT_POST_RE, BLUESKY_POST_RE, MASTODON_POST_RE).
 function repliesAvailable(item) {
   var link = String(item && item.link || "")
   return !!item && !item.note && (/^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/\w{1,15}\/status\/\d+/i.test(link)
-    || /^https?:\/\/((www|old|new|np)\.)?reddit\.com\/r\/\w+\/comments\/\w+/i.test(link))
+    || /^https?:\/\/((www|old|new|np)\.)?reddit\.com\/r\/\w+\/comments\/\w+/i.test(link)
+    || /^https:\/\/bsky\.app\/profile\/[\w.:-]+\/post\/\w+\/?$/i.test(link)
+    || /^https:\/\/[\w.-]+\/@\w+(@[\w.-]+)?\/\d+\/?$/i.test(link))
 }
 
 // The post with its stored replies section (bin/omabox replies_markup) under it; while a fetch runs, a note

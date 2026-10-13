@@ -2451,6 +2451,23 @@ def reddit_post_ref(link):
     return (match.group(1), match.group(2)) if match else None
 
 
+BLUESKY_POST_RE = re.compile(r"^https://bsky\.app/profile/([\w.:-]+)/post/(\w+)/?$", re.I)
+# Mastodon's own status pages; other fediverse servers (Pleroma's /notice/, Misskey's /notes/) have no such API
+MASTODON_POST_RE = re.compile(r"^https://([\w.-]+)/@(\w+)(?:@[\w.-]+)?/(\d+)/?$", re.I)
+
+
+def bluesky_post_ref(link):
+    """https://bsky.app/profile/example.bsky.social/post/3abc -> ("example.bsky.social", "3abc"), else None."""
+    match = BLUESKY_POST_RE.match(link or "")
+    return (match.group(1), match.group(2)) if match else None
+
+
+def mastodon_post_ref(link):
+    """https://mastodon.example/@name/123 -> ("mastodon.example", "name", "123"), else None."""
+    match = MASTODON_POST_RE.match(link or "")
+    return match.groups() if match else None
+
+
 X_USER_ROUTE_RE = re.compile(r"^(https?://[^/]+/twitter/user/[^/?#]+)(?:/([^/?#]*))?/?$")
 # RSSHub's named routeParams (twitter/utils parseRouteParams); anything else is read as includeRts=...&includeReplies=...
 X_ROUTE_ALIASES = {"exclude_rts": "includeRts=false", "exclude_rts_replies": "includeRts=false",
@@ -3722,6 +3739,86 @@ def parse_reddit_comments(data, limit=MAX_REPLY_THREADS):
     return (post.group(1) if post else ""), threads[:limit]
 
 
+# Answers deeper than this under a top-level reply are left out; the thread links to the rest.
+REPLY_DEPTH = 3
+
+
+def parse_bluesky_replies(data, limit=MAX_REPLY_THREADS):
+    """(post author's handle, threads) from Bluesky's public getPostThread, in Bluesky's order: each top-level reply,
+    then the answers under it to REPLY_DEPTH levels, flattened in reading order. Deleted and blocked replies go."""
+    thread = json.loads(data).get("thread") or {}
+    author = str(((thread.get("post") or {}).get("author") or {}).get("handle") or "")
+
+    def reply(node):
+        post = node.get("post") or {}
+        record, who = post.get("record") or {}, post.get("author") or {}
+        handle = str(who.get("handle") or "")
+        media, card, _ = bluesky_embed(post.get("embed"))
+        body = bluesky_text(record.get("text"), record.get("facets")) + media
+        if card:
+            body += f'<p><a href="{html.escape(card["url"])}">{html.escape(card["title"])}</a></p>'
+        return {"name": bluesky_name(who), "handle": handle, "id": str(post.get("uri") or "").rsplit("/", 1)[-1],
+                "avatar": str(who.get("avatar") or "").replace("/img/avatar/plain/", "/img/avatar_thumbnail/plain/"),
+                "link": bluesky_page(post.get("uri"), handle), "mentions": "",
+                "published": iso_utc(record.get("createdAt") or post.get("indexedAt")), "html": body}
+
+    def shown(nodes):
+        return [node for node in nodes or [] if node.get("$type") == "app.bsky.feed.defs#threadViewPost"]
+
+    def descend(node, depth, out):
+        for child in shown(node.get("replies")):
+            out.append(reply(child))
+            if depth < REPLY_DEPTH:
+                descend(child, depth + 1, out)
+        return out
+
+    return author, [descend(top, 2, [reply(top)]) for top in shown(thread.get("replies"))][:limit]
+
+
+MASTODON_MENTIONS_RE = re.compile(r'^<p>(?:\s*<span class="h-card"[^>]*>\s*<a [^>]*>@<span>[^<]*</span></a>\s*</span>)+\s*')
+
+
+def mastodon_media(status):
+    out = []
+    for media in status.get("media_attachments") or []:
+        url, kind = str(media.get("url") or ""), media.get("type")
+        if not url.startswith("https://"):
+            continue
+        if kind == "image":
+            out.append(f'<img src="{html.escape(url)}" alt="{html.escape(str(media.get("description") or ""))}">')
+        elif kind in ("video", "gifv"):
+            out.append(f'<video src="{html.escape(url)}" poster="{html.escape(str(media.get("preview_url") or ""))}"></video>')
+    return "".join(out)
+
+
+def parse_mastodon_replies(data, status_id, limit=MAX_REPLY_THREADS):
+    """Threads from a Mastodon status's context: descendants come in thread order, each naming the status it
+    answers. Each direct reply opens a thread holding the answers under it to REPLY_DEPTH levels. The @names
+    Mastodon puts before a reply's text go, as X's do."""
+    threads, thread_of, depth_of = [], {}, {}
+    for status in json.loads(data).get("descendants") or []:
+        sid, parent = str(status.get("id") or ""), str(status.get("in_reply_to_id") or "")
+        if parent == status_id:
+            thread, depth = [], 1
+            threads.append(thread)
+        elif parent in thread_of:
+            thread, depth = thread_of[parent], depth_of[parent] + 1
+        else:
+            continue
+        thread_of[sid], depth_of[sid] = thread, depth
+        if depth > REPLY_DEPTH:
+            continue
+        account = status.get("account") or {}
+        handle = str(account.get("acct") or account.get("username") or "")
+        warning = str(status.get("spoiler_text") or "").strip()
+        body = MASTODON_MENTIONS_RE.sub("<p>", str(status.get("content") or ""))
+        thread.append({"name": str(account.get("display_name") or "").strip() or handle, "handle": handle, "id": sid,
+                       "avatar": str(account.get("avatar_static") or ""), "link": str(status.get("url") or ""),
+                       "mentions": "", "published": iso_utc(status.get("created_at")),
+                       "html": (f"<p><b>{html.escape(warning)}</b></p>" if warning else "") + body + mastodon_media(status)})
+    return threads[:limit]
+
+
 def thread_replies(replies, author, limit=MAX_REPLY_THREADS):
     """Threads (a reply to the post, then the replies under it, one level deep) in X's order: the first limit of
     them and any later one the post's author answered in. A reply joins the thread holding the post it answers;
@@ -3797,7 +3894,7 @@ def comment_markup(reply, author, images, avatars, depth, children=""):
     # Reddit comments carry their own link, an empty label (name and handle are one) and no @mentions
     link = html.escape(reply.get("link") or f"https://x.com/{reply['handle']}/status/{reply['id']}", quote=True)
     label = reply.get("label", f"@{reply['handle']}")
-    when = local_stamp(reply["published"]) if reply["published"] else "on Reddit" if reply.get("link") else "on X"
+    when = local_stamp(reply["published"]) if reply["published"] else "open" if reply.get("link") else "on X"
     name = html.escape(reply["name"])
     face = f'<img src="omabox-avatar:{avatars[reply["avatar"]]}">' if reply["avatar"] in avatars else ""
     who = f'<span class="opname">{name}</span> <span class="badge">AUTHOR</span>' if op else f"<b>{name}</b>"
@@ -3837,7 +3934,9 @@ def replying_to(handles, mentions_base=""):
 
 
 REPLIES_LINES = {"X": ("Top replies on X, most relevant first", "No replies on X yet"),
-                 "Reddit": ("Top comments on Reddit, best first", "No comments on Reddit yet")}
+                 "Reddit": ("Top comments on Reddit, best first", "No comments on Reddit yet"),
+                 "Bluesky": ("Replies on Bluesky", "No replies on Bluesky yet"),
+                 "Mastodon": ("Replies on Mastodon, oldest first", "No replies on Mastodon yet")}
 
 
 def replies_markup(threads, author, fetched, images=None, avatars=None, site="X"):
@@ -3865,9 +3964,12 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     reddit = reddit_post_ref(item.get("link"))
     if reddit:
         return load_reddit_comments(item, reddit, fetch, image_fetch), False
+    bluesky, mastodon = bluesky_post_ref(item.get("link")), mastodon_post_ref(item.get("link"))
+    if bluesky or mastodon:
+        return load_fediverse_replies(item, bluesky, mastodon, image_fetch=image_fetch), False
     ref = x_post_ref(item.get("link"))
     if not ref:
-        raise ValueError("only X and Reddit posts have comments to show")
+        raise ValueError("only X, Reddit, Bluesky and Mastodon posts have comments to show")
     # JSON, not RSS: only JSON Feed keeps each reply's avatar and the post it answers
     url = f"{RSSHUB_BASE}/twitter/tweet/{ref[0]}/status/{ref[1]}?format=json&sorted=false"
     try:
@@ -3899,9 +4001,34 @@ def load_reddit_comments(item, ref, fetch=download, image_fetch=download_limited
         author, threads = parse_reddit_comments(data)
     except Exception as error:
         raise ValueError(fetch_error(error, url)) from None
+    return store_replies(item, threads, author, "Reddit", image_fetch)
+
+
+def load_fediverse_replies(item, bluesky, mastodon, fetch=download_public, image_fetch=download_limited):
+    """Replies from Bluesky's public getPostThread or the Mastodon server's public status context; neither needs an
+    account. The Mastodon host comes from the feed, so download_public keeps it off the local network."""
+    if bluesky:
+        url = f"{BLUESKY_API}app.bsky.feed.getPostThread?uri=at://{bluesky[0]}/app.bsky.feed.post/{bluesky[1]}" \
+              f"&depth={REPLY_DEPTH}&parentHeight=0"
+    else:
+        url = f"https://{mastodon[0]}/api/v1/statuses/{mastodon[2]}/context"
+    try:
+        _, _, data = fetch(url, MAX_FEED_BYTES)
+        if bluesky:
+            author, threads = parse_bluesky_replies(data)
+        else:
+            author, threads = mastodon[1], parse_mastodon_replies(data, mastodon[2])
+    except Exception as error:
+        raise ValueError(fetch_error(error, url)) from None
+    return store_replies(item, threads, author, "Bluesky" if bluesky else "Mastodon", image_fetch)
+
+
+def store_replies(item, threads, author, site, image_fetch=download_limited):
+    shown = [reply for thread in threads for reply in thread]
+    avatars = fetch_avatars([reply["avatar"] for reply in shown if reply["avatar"]], image_fetch)
     stamp = now_iso()
-    fields = {"replies_html": replies_markup(threads, author, stamp, ImageFetcher(item["link"], image_fetch), site="Reddit"),
-              "replies_count": sum(len(thread) for thread in threads), "replies_fetched": stamp}
+    fields = {"replies_html": replies_markup(threads, author, stamp, ImageFetcher(item["link"], image_fetch), avatars, site),
+              "replies_count": len(shown), "replies_fetched": stamp}
     update_items([item["id"]], lambda stored: stored.update(fields))
     return fields
 
