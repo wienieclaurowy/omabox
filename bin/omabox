@@ -3196,13 +3196,14 @@ def delivery_message(added_by_source):
 
 
 def send_notification(summary, body, view, glyph, run=subprocess.run):
-    """Normal urgency: Omarchy's do-not-disturb silences it into history like any other. Clicking opens view."""
+    """Normal urgency: Omarchy's do-not-disturb silences it into history like any other. Clicking opens view.
+    body is plain text: notification servers read bodies as markup, and it names sources after feed titles."""
     open_view = json.dumps(["omarchy-shell", "omabox", "toggleView", view])
     try:
         run(["notify-send", "-a", "Omabox", "-u", "normal",
              "-h", f"string:omarchy-exec-argv:{open_view}",
              "-h", f"string:omarchy-glyph:{glyph}",
-             f"Omabox: {summary}", body], timeout=10, check=False)
+             f"Omabox: {summary}", html.escape(body, quote=False)], timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         pass
 
