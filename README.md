@@ -225,9 +225,10 @@ ln -sfn "$PWD" ~/.config/omarchy/plugins/io.github.wienieclaurowy.omabox
 omarchy restart shell
 ```
 
-The screenshots come from `python3 tools/screenshots/shots.py OUT-DIR feed:tokyo-night ...`, which shows the
-real panel with invented data in a second, sandboxed Quickshell for a few seconds, without touching your own
-shell, theme or Omabox data.
+The screenshots come from `SHOTS_HEIGHT=640 python3 tools/screenshots/shots.py OUT-DIR feed:tokyo-night ...`,
+which shows the real panel with invented data in a second, sandboxed Quickshell for a few seconds, without
+touching your own shell, theme or Omabox data. The low screen height makes every view fill the same height, so
+shots that sit side by side match.
 
 ## About this project
 
