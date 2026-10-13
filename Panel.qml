@@ -39,6 +39,8 @@ Panel {
   readonly property string omaboxBin: Model.localPath(Qt.resolvedUrl("bin/omabox"))
   readonly property string imageDir: (Quickshell.env("XDG_CACHE_HOME") || (home + "/.cache")) + "/omabox/images"
   readonly property string historyDir: home + "/.local/state/omarchy/notifications/history"
+  // Omarchy keeps a notification here while its popup shows and moves the file, same name, into historyDir after.
+  readonly property string popupDir: home + "/.local/state/omarchy/notifications"
   readonly property string notificationSettingsPath: home + "/.local/state/omarchy/notifications.json"
 
   // feed | notifications | sources
@@ -214,6 +216,8 @@ Panel {
     var requestedPost = hostWidget ? hostWidget.takeRequestedPost() : ""
     showView(requested || "feed")
     loadDelivery()
+    // Every open, whatever the view: switching to Notifications must not show the previous list first.
+    refreshNotifications()
     // The notification list loads asynchronously; its reader opens once the list arrives.
     if (requestedPost) openPostById(requestedPost)
     else if (requestedRead >= 0 && root.view === "notifications") root.pendingRead = requestedRead
@@ -1367,10 +1371,10 @@ Panel {
 
   Process {
     id: historyProc
-    // Archive first so Omarchy's 10-entry history and Omabox's 7-day copy agree; both dirs are listed, parseHistory dedups.
+    // Archive first so Omarchy's 10-entry history and Omabox's 7-day copy agree; all dirs are listed, parseHistory dedups.
     // Bash builtins only: a process per file (tr) took over half a second for a week of notifications.
-    command: ["bash", "-c", "\"$1\" archive-notifications >/dev/null 2>&1; for d in \"$2\" \"$3\"; do for f in \"$d\"/*.json; do [[ -e $f ]] || continue; text=; IFS= read -r -d '' text < \"$f\"; printf '%s\\t%s\\n' \"${f##*/}\" \"${text//$'\\n'/}\"; done; done",
-      "--", root.omaboxBin, root.historyDir, root.archiveDir]
+    command: ["bash", "-c", "\"$1\" archive-notifications >/dev/null 2>&1; for d in \"$2\" \"$3\" \"$4\"; do for f in \"$d\"/*.json; do [[ -e $f ]] || continue; text=; IFS= read -r -d '' text < \"$f\"; printf '%s\\t%s\\n' \"${f##*/}\" \"${text//$'\\n'/}\"; done; done",
+      "--", root.omaboxBin, root.historyDir, root.archiveDir, root.popupDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
