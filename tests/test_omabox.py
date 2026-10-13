@@ -280,8 +280,24 @@ class ParseTest(unittest.TestCase):
         (entry,) = omabox.parse_feed(YOUTUBE_FEED)
         self.assertEqual(entry["link"], "https://www.youtube.com/watch?v=Zq3vKe8TbWo")
         self.assertTrue(entry["html"].startswith('<video src="https://www.youtube.com/watch?v=Zq3vKe8TbWo" '
-                                                 'poster="https://i2.ytimg.com/vi/Zq3vKe8TbWo/hqdefault.jpg"></video>'))
+                                                 'poster="https://i.ytimg.com/vi/Zq3vKe8TbWo/hq720.jpg" '
+                                                 'fallback="https://i2.ytimg.com/vi/Zq3vKe8TbWo/hqdefault.jpg"></video>'))
         self.assertIn("<p>Think of a hand tool &lt;any&gt; at all.<br>We made one.</p><p>Discuss", entry["html"])
+
+    def test_youtube_poster_falls_back_to_the_feeds_thumbnail(self):
+        asked = []
+
+        def fetch(url, limit):
+            asked.append(url)
+            if "hq720" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return jpeg(480, 360)
+
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        omabox.merge(state, "Quarry", list(omabox.parse_feed(YOUTUBE_FEED)), "2026-09-27T08:00:00Z",
+                     lambda entry: omabox.ImageFetcher(entry["link"], fetch, Path(tempfile.mkdtemp())))
+        self.assertEqual(asked, ["https://i.ytimg.com/vi/Zq3vKe8TbWo/hq720.jpg", "https://i2.ytimg.com/vi/Zq3vKe8TbWo/hqdefault.jpg"])
+        self.assertIn('<img src="omabox-poster:', state["items"][0]["html"])
 
     def test_youtube_thumbnail_goes_through_the_image_cache(self):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")

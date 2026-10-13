@@ -399,20 +399,25 @@ class ImageFetcher:
 
     def video(self, attrs):
         """A <video> as its poster wrapped in a link to the file: the reader draws a play badge on omabox-poster:
-        pictures and plays the link in the video player (omabox play, https only). A plain link when there is no poster to show."""
+        pictures and plays the link in the video player (omabox play, https only). fallback: a second poster tried
+        when the first fails. A plain link when there is no poster to show."""
         src = self.absolute(attrs.get("src"))
         if not src:
             return ""
         href = html.escape(src, quote=True)
         placeholder = f'<p><a href="{href}">▶ video</a></p>'
-        poster = self.absolute(attrs.get("poster"))
-        if not poster or not src.startswith("https://") or self.count >= MAX_IMAGES_PER_ITEM:
+        posters = [url for url in (self.absolute(attrs.get("poster")), self.absolute(attrs.get("fallback"))) if url]
+        if not posters or not src.startswith("https://") or self.count >= MAX_IMAGES_PER_ITEM:
             return placeholder
         self.count += 1
-        try:
-            picture = cache_image(poster, self.fetch, self.directory, MAX_IMAGE_BYTES)
-        except Exception:
-            return placeholder
+        picture = None
+        for poster in posters:
+            try:
+                picture = cache_image(poster, self.fetch, self.directory, MAX_IMAGE_BYTES)
+            except Exception:
+                continue
+            if picture:
+                break
         if picture is None:
             return placeholder
         name, w, h = picture
@@ -1041,8 +1046,11 @@ def media_group_html(entry, link=""):
         return ""
     thumbnail = group.find(MEDIA + "thumbnail")
     url = html.escape(thumbnail.get("url", "") if thumbnail is not None else "", quote=True)
-    if url and youtube_video(link):
-        picture = f'<video src="{html.escape(link, quote=True)}" poster="{url}"></video>'
+    video = YOUTUBE_VIDEO_RE.match(link or "")
+    if url and video:
+        # the feed's hqdefault is 4:3 with black bars; hq720 is 16:9 but missing on some old videos
+        wide = f"https://i.ytimg.com/vi/{video.group(1)}/hq720.jpg"
+        picture = f'<video src="{html.escape(link, quote=True)}" poster="{wide}" fallback="{url}"></video>'
     else:
         picture = f'<img src="{url}">' if url else ""
     return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
@@ -2249,7 +2257,7 @@ def site_name(feed_url):
     return None
 
 
-YOUTUBE_VIDEO_RE = re.compile(r"^https://(?:www\.|m\.)?youtube\.com/(?:watch\?v=|shorts/)[\w-]{11}(?:[&?#]|$)", re.I)
+YOUTUBE_VIDEO_RE = re.compile(r"^https://(?:www\.|m\.)?youtube\.com/(?:watch\?v=|shorts/)([\w-]{11})(?:[&?#]|$)", re.I)
 
 
 def youtube_video(url):
