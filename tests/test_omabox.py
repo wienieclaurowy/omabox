@@ -1828,7 +1828,7 @@ class RsshubTest(unittest.TestCase):
         self.assertTrue(omabox.needs_rsshub(f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale"))
         self.assertFalse(omabox.needs_rsshub("https://world.hey.com/rowanvale/feed.atom"))
 
-    def run_session(self, token="secret-token", up=False, start_code=0):
+    def run_session(self, token="secret-token", start_code=0, check=lambda: None):
         calls, seen_env = [], {}
         token_path = Path(tempfile.mkdtemp()) / "x-token"
         if token is not None:
@@ -1848,8 +1848,9 @@ class RsshubTest(unittest.TestCase):
                 return Result(start_code)
             return Result(0)
 
-        with omabox.rsshub_session(True, run=run, wait=lambda: None, up=lambda: up, token_path=token_path, engine="podman"):
+        with omabox.rsshub_session(True, run=run, wait=lambda: None, check=check, token_path=token_path, engine="podman"):
             seen_env["marker"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
+            seen_env["live"] = (omabox.RSSHUB_LIVE_PORT, omabox.RSSHUB_KEY)
         seen_env["marker_after"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
         return calls, seen_env
 
@@ -1862,9 +1863,73 @@ class RsshubTest(unittest.TestCase):
         self.assertEqual(calls[-1][:2], ["podman", "stop"])
         self.assertEqual((env["marker"], env["marker_after"]), (True, False))
 
-    def test_session_reuses_running_rsshub(self):
-        calls, _ = self.run_session(up=True)
-        self.assertEqual(calls, [["podman", "rm", "-f", omabox.RSSHUB_CONTAINER]])
+    def test_session_never_uses_a_listener_it_did_not_start(self):
+        seen = []
+
+        class Squatter(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"items": []}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Squatter)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        port = server.server_port
+        route = f"http://127.0.0.1:{port}/twitter/user/rowanvale?format=json"
+        with mock.patch.object(omabox, "RSSHUB_PORT", port):
+            with self.assertRaises(RuntimeError):
+                omabox.download(route)
+            calls, env = self.run_session()
+            self.assertTrue(any(argv[:2] == ["podman", "run"] for argv in calls))
+            self.assertNotEqual(env["live"][0], port)
+            # the container answers like a squatter: refused before any route is asked
+            with mock.patch.object(omabox, "free_port", lambda: port):
+                with self.assertRaises(RuntimeError) as caught:
+                    self.run_session(check=omabox.check_rsshub)
+        self.assertIn("not Omabox's RSSHub container", str(caught.exception))
+        self.assertTrue(seen and all(path.startswith("/omabox-check-") for path in seen), seen)
+
+    def test_ownership_check_needs_a_refused_wrong_key_and_an_accepted_code(self):
+        answers = {}
+
+        def status(query):
+            answers[query] = 403 if "key=" in query else 404
+            return answers[query]
+
+        with mock.patch.object(omabox, "RSSHUB_KEY", "k3y"):
+            omabox.check_rsshub(status)
+            (code_query,) = [query for query in answers if "code=" in query]
+            path = code_query.split("?")[0]
+            self.assertIn(omabox.hashlib.md5((path + "k3y").encode()).hexdigest(), code_query)
+            self.assertFalse(any("k3y" in query for query in answers))
+            for always in (200, 403, 404):
+                with self.assertRaises(RuntimeError):
+                    omabox.check_rsshub(lambda query: always)
+
+    def test_a_taken_port_is_retried_on_another(self):
+        ports = iter([40001, 40002])
+        tries = []
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["podman", "run"]:
+                tries.append(argv[argv.index("-p") + 1])
+                busy = len(tries) == 1
+                return subprocess.CompletedProcess(argv, 126 if busy else 0, "",
+                                                   "Listen failed: Address already in use" if busy else "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        token_path = Path(tempfile.mkdtemp()) / "x-token"
+        token_path.write_text("secret-token\n")
+        with mock.patch.object(omabox, "free_port", lambda: next(ports)):
+            with omabox.rsshub_session(True, run=run, wait=lambda: None, check=lambda: None, token_path=token_path,
+                                       engine="podman"):
+                self.assertEqual(omabox.RSSHUB_LIVE_PORT, 40002)
+        self.assertEqual(tries, ["127.0.0.1:40001:1200", "127.0.0.1:40002:1200"])
 
     def test_container_is_locked_down_and_keyed(self):
         calls, env = self.run_session()
@@ -1872,20 +1937,21 @@ class RsshubTest(unittest.TestCase):
         for flag in ("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=512m"):
             self.assertIn(flag, start)
         self.assertEqual(start[start.index("--user") + 1], "65534:65534")
-        self.assertEqual(start[start.index("-p") + 1], f"127.0.0.1:{omabox.RSSHUB_PORT}:1200")
+        self.assertEqual(start[start.index("-p") + 1], f"127.0.0.1:{env['live'][0]}:1200")
         self.assertIn("@sha256:", start[-1])
         self.assertEqual(start[start.index("--timeout") + 1], str(omabox.RSSHUB_MAX_SECONDS))
         self.assertRegex(env["text"], r"(?m)^ACCESS_KEY=[\w-]{20,}$")
         self.assertIn("DEBUG_INFO=false", env["text"])
         self.assertEqual(omabox.RSSHUB_KEY, "")
 
-    def test_requests_carry_the_key_only_while_the_container_runs(self):
+    def test_requests_go_to_the_running_container_with_its_key(self):
         route = f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale?format=json"
-        self.assertEqual(omabox.rsshub_keyed(route), route)
-        with mock.patch.object(omabox, "RSSHUB_KEY", "k3y"):
-            self.assertEqual(omabox.rsshub_keyed(route), route + "&key=k3y")
+        with self.assertRaises(RuntimeError):
+            omabox.rsshub_keyed(route)
+        with mock.patch.object(omabox, "RSSHUB_KEY", "k3y"), mock.patch.object(omabox, "RSSHUB_LIVE_PORT", 40001):
+            self.assertEqual(omabox.rsshub_keyed(route), "http://127.0.0.1:40001/twitter/user/rowanvale?format=json&key=k3y")
             self.assertEqual(omabox.rsshub_keyed(f"{omabox.RSSHUB_BASE}/twitter/user/a"),
-                             f"{omabox.RSSHUB_BASE}/twitter/user/a?key=k3y")
+                             "http://127.0.0.1:40001/twitter/user/a?key=k3y")
             self.assertEqual(omabox.rsshub_keyed("https://blog.example/feed"), "https://blog.example/feed")
 
     def test_token_file_readable_by_others_is_tightened(self):
@@ -1893,7 +1959,7 @@ class RsshubTest(unittest.TestCase):
         token_path.write_text("secret-token\n")
         token_path.chmod(0o644)
         with omabox.rsshub_session(True, run=lambda argv, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
-                                   wait=lambda: None, up=lambda: False, token_path=token_path, engine="podman"):
+                                   wait=lambda: None, check=lambda: None, token_path=token_path, engine="podman"):
             pass
         self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
 
@@ -1911,7 +1977,7 @@ class RsshubTest(unittest.TestCase):
         omabox.container_engine = lambda: None
         try:
             with self.assertRaises(RuntimeError) as caught:
-                with omabox.rsshub_session(True, run=lambda *a, **k: None, wait=lambda: None, up=lambda: False):
+                with omabox.rsshub_session(True, run=lambda *a, **k: None, wait=lambda: None, check=lambda: None):
                     pass
         finally:
             omabox.container_engine = real

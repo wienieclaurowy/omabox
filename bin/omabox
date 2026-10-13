@@ -2123,7 +2123,9 @@ def paced_open(url, send):
 def download(url, headers=None):
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
     with paced_open(url, lambda: urllib.request.urlopen(request, timeout=30)) as response:
-        return response.geturl(), feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
+        # an RSSHub answer keeps the stored address: the live one carries the per-run key
+        final_url = url if needs_rsshub(url) else response.geturl()
+        return final_url, feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
 
 
 def download_feed(url, cached=None, opener=urllib.request.urlopen):
@@ -2596,19 +2598,31 @@ def x_feed_url(url):
 
 
 # Set while Omabox's own container runs: every request to it carries this per-run ACCESS_KEY, so no other program
-# or web page on the machine can use the logged-in session behind the port.
+# or web page on the machine can use the logged-in session behind the port. RSSHUB_BASE in stored source URLs only
+# names RSSHub; requests go to the port the container got for this run (RSSHUB_LIVE_PORT).
 RSSHUB_KEY = ""
+RSSHUB_LIVE_PORT = 0
+
+
+def rsshub_live_base():
+    return f"http://127.0.0.1:{RSSHUB_LIVE_PORT}"
 
 
 def rsshub_keyed(url):
-    if not RSSHUB_KEY or not needs_rsshub(url):
+    """The address a request for url goes to: an RSSHub route goes to Omabox's own container, with its key. Never
+    to a listener Omabox did not start: without the container running, an RSSHub route is refused."""
+    if not needs_rsshub(url):
         return url
+    if not RSSHUB_KEY or not RSSHUB_LIVE_PORT:
+        raise RuntimeError("Omabox's RSSHub container is not running")
+    parts = urllib.parse.urlsplit(url)
+    url = urllib.parse.urlunsplit(("http", f"127.0.0.1:{RSSHUB_LIVE_PORT}", parts.path, parts.query, ""))
     return url + ("&" if "?" in url else "?") + "key=" + RSSHUB_KEY
 
 
 def rsshub_up(timeout=2):
     try:
-        with urllib.request.urlopen(RSSHUB_BASE + "/", timeout=timeout):
+        with urllib.request.urlopen(rsshub_live_base() + "/", timeout=timeout):
             return True
     except Exception:
         return False
@@ -2620,7 +2634,37 @@ def wait_for_rsshub(seconds=90):
         if rsshub_up():
             return
         time.sleep(1)
-    raise RuntimeError(f"RSSHub did not answer on {RSSHUB_BASE} within {seconds}s")
+    raise RuntimeError(f"RSSHub did not answer on {rsshub_live_base()} within {seconds}s")
+
+
+def rsshub_status(path, timeout=10):
+    try:
+        with urllib.request.urlopen(rsshub_live_base() + path, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code
+
+
+def check_rsshub(status=rsshub_status):
+    """Raises unless the listener on the live port is the container started with this run's key: it must refuse a
+    wrong key and accept a code made from the real one (RSSHub's md5(path + key)), so the key itself is not sent."""
+    path = f"/omabox-check-{secrets.token_hex(8)}"
+    code = hashlib.md5((path + RSSHUB_KEY).encode(), usedforsecurity=False).hexdigest()
+    asks = [("wrong", f"{path}?key={secrets.token_urlsafe(24)}"), ("right", f"{path}?code={code}")]
+    secrets.SystemRandom().shuffle(asks)
+    try:
+        answers = {kind: status(query) for kind, query in asks}
+    except OSError as error:
+        raise RuntimeError(f"RSSHub check on {rsshub_live_base()} failed: {error}") from None
+    if answers["wrong"] != 403 or answers["right"] == 403 or not 200 <= answers["right"] < 500:
+        raise RuntimeError(f"the server on {rsshub_live_base()} is not Omabox's RSSHub container")
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def container_engine(which=shutil.which):
@@ -2629,10 +2673,11 @@ def container_engine(which=shutil.which):
 
 
 @contextlib.contextmanager
-def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rsshub_up, token_path=None, engine=None):
-    """Runs the RSSHub container (rootless podman) only for the duration of a fetch. An RSSHub the user already
-    runs on the port is used and left alone. The X token goes through a 0600 env file deleted right after start,
-    never through argv, so it does not show up in ps or in error messages."""
+def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, check=check_rsshub, token_path=None,
+                   engine=None):
+    """Runs Omabox's own RSSHub container (rootless podman) only for the duration of a fetch, on a free loopback
+    port, and checks the listener there is that container before any route is asked. The X token goes through a
+    0600 env file deleted right after start, never through argv, so it does not show up in ps or in error messages."""
     if not needed:
         yield
         return
@@ -2644,10 +2689,7 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, up=rss
         # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
         if engine:
             remove_container(run, engine, runtime)
-        if up():
-            yield
-            return
-        with rsshub_container(run, wait, token_path, engine, runtime):
+        with rsshub_container(run, wait, token_path, engine, runtime, check):
             yield
 
 
@@ -2729,11 +2771,11 @@ def cmd_x_token(args):
 
 
 @contextlib.contextmanager
-def rsshub_container(run, wait, token_path, engine, runtime):
+def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub):
     engine = engine or container_engine()
     if not engine:
-        raise RuntimeError(f"X sources need podman or docker, or an RSSHub already running on {RSSHUB_BASE}")
-    global RSSHUB_KEY
+        raise RuntimeError("X sources need podman or docker")
+    global RSSHUB_KEY, RSSHUB_LIVE_PORT
     token_path = Path(token_path or X_TOKEN_PATH)
     token = token_path.read_text().strip() if token_path.exists() else ""
     if not token:
@@ -2753,22 +2795,31 @@ def rsshub_container(run, wait, token_path, engine, runtime):
         # Locked down: no writes, no capabilities, no root, capped memory and processes. jsdelivr is blocked so the
         # X query ids come from the pinned image, not from a third-party file fetched at start.
         lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
-        started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
-                       "-p", f"127.0.0.1:{RSSHUB_PORT}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
-                       "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--user", "65534:65534",
-                       "--add-host", "cdn.jsdelivr.net:127.0.0.1", "--env-file", str(env_file), RSSHUB_IMAGE],
-                      capture_output=True, text=True, timeout=300)
+        # a port taken between free_port() and the start makes the engine fail to publish it; another port is tried
+        for _ in range(3):
+            port = free_port()
+            started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
+                           "-p", f"127.0.0.1:{port}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
+                           "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m",
+                           "--user", "65534:65534", "--add-host", "cdn.jsdelivr.net:127.0.0.1",
+                           "--env-file", str(env_file), RSSHUB_IMAGE],
+                          capture_output=True, text=True, timeout=300)
+            if started.returncode == 0 or not re.search(r"address already in use|port is already allocated",
+                                                        started.stderr or "", re.I):
+                break
+            remove_container(run, engine, runtime)
     finally:
         env_file.unlink(missing_ok=True)
     if started.returncode != 0:
         raise RuntimeError(f"{engine} run failed: {(started.stderr or '').strip()[-300:]}")
     (runtime / RSSHUB_MARKER).write_text(engine + "\n")
     try:
-        RSSHUB_KEY = key
+        RSSHUB_KEY, RSSHUB_LIVE_PORT = key, port
         wait()
+        check()
         yield
     finally:
-        RSSHUB_KEY = ""
+        RSSHUB_KEY, RSSHUB_LIVE_PORT = "", 0
         remove_container(run, engine, runtime, graceful=True)
 
 
