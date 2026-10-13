@@ -4058,6 +4058,19 @@ class FullTextFetchTest(unittest.TestCase):
         self.assertNotIn("full_html", state["items"][0])
 
 
+QMLTESTRUNNER = next((path for path in ("/usr/lib/qt6/bin/qmltestrunner", omabox.shutil.which("qmltestrunner") or "")
+                      if path and Path(path).exists()), None)
+
+
+class ModelJsTest(unittest.TestCase):
+    @unittest.skipUnless(QMLTESTRUNNER, "needs qmltestrunner (qt6-declarative)")
+    def test_model_js(self):
+        result = subprocess.run([QMLTESTRUNNER, "-input", str(Path(__file__).parent / "tst_model.qml")],
+                                env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}, capture_output=True, text=True,
+                                timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class TerminalOutputTest(unittest.TestCase):
     EVIL = "a post \x1b]52;c;ZWNobyBwd25lZA==\x07 with \x9b2J words"
 

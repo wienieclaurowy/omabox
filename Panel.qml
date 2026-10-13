@@ -70,6 +70,8 @@ Panel {
   property bool busy: false
   property string message: ""
   property bool messageError: false
+  // file of the notification whose action the first o showed (Model.actionStep); the second o runs it
+  property string pendingAction: ""
   property bool viaReturn: false
   property var cliQueue: []
   // HH:MM of the daily delivery (`omabox delivery`), "" until loaded; -/+ in sources move it, deliveryApply saves.
@@ -710,13 +712,15 @@ Panel {
   }
 
   function runNotificationAction(index) {
-    var argv = index >= 0 && index < noteRows.length ? Model.notificationArgv(noteRows[index]) : null
-    if (!argv) {
-      note("This notification has no action.")
+    var row = index >= 0 && index < noteRows.length ? noteRows[index] : null
+    var step = Model.actionStep(row, root.pendingAction, root.message)
+    root.pendingAction = step.pending
+    if (!step.run) {
+      note(step.message)
       return
     }
     root.message = ""
-    Quickshell.execDetached(argv)
+    Quickshell.execDetached(step.run)
     root.close()
   }
 
@@ -1110,6 +1114,7 @@ Panel {
     var wasY = root.pendingY
     root.pendingG = false
     root.pendingY = false
+    if (t !== "o") root.pendingAction = ""
     // Ctrl+D / Ctrl+U arrive as control characters.
     if (t === "\u0004") scrollBy(Math.round(root.list.height / 2))
     else if (t === "\u0015") scrollBy(-Math.round(root.list.height / 2))

@@ -230,7 +230,7 @@ Column {
         visible: root.item !== null && !root.isPost && root.panel !== null
           && Model.notificationArgv(root.panel.noteRows[root.panel.cursor]) !== null
         iconText: "󰐊"
-        tooltipText: "Run action (o)"
+        tooltipText: "Run action (oo)"
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.runNotificationAction(root.panel.cursor)

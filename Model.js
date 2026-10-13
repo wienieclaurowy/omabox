@@ -132,6 +132,23 @@ function notificationArgv(row) {
   return parsed
 }
 
+// argv as a one-line shell command; arguments that need it are quoted JSON-style, so controls show as escapes.
+function commandLine(argv, limit) {
+  var text = argv.map(function(arg) { return /^[\w@%+=:,.\/-]+$/.test(arg) ? arg : JSON.stringify(arg) }).join(" ")
+  limit = limit || 120
+  return text.length <= limit ? text : text.slice(0, limit - 40) + " … " + text.slice(-37)
+}
+
+// A stored notification's action runs on a second o while the status line still shows what the first one said it
+// would run, for the same notification: Omarchy keeps any app's argv for days. { run: argv or null, pending, message }
+function actionStep(row, pending, message) {
+  var argv = notificationArgv(row)
+  if (!argv) return { run: null, pending: "", message: "This notification has no action." }
+  var prompt = "o again to run: " + commandLine(argv)
+  if (pending !== "" && pending === String(row.file || "") && message === prompt) return { run: argv, pending: "", message: "" }
+  return { run: null, pending: String(row.file || ""), message: prompt }
+}
+
 function unreadCount(items) {
   var n = 0
   for (var i = 0; i < items.length; i++) if (!items[i].read) n++
@@ -365,7 +382,7 @@ function catchupChoices(items, now) {
 }
 
 function hints(view, mode, reading) {
-  if (reading && view === "notifications") return "j/k scroll  ·  space/ctrl+d/u page  ·  J/K next/prev  ·  o run action  ·  yy copy  ·  +/- size  ·  h back  ·  ? hide"
+  if (reading && view === "notifications") return "j/k scroll  ·  space/ctrl+d/u page  ·  J/K next/prev  ·  oo run action  ·  yy copy  ·  +/- size  ·  h back  ·  ? hide"
   if (reading) return "j/k scroll  ·  space/ctrl+d/u page  ·  ]/[ sections  ·  J/K next/prev  ·  +/- size  ·  i media  ·  r full article  ·  C refresh comments  ·  yy copy link  ·  z snooze  ·  m later  ·  U update  ·  o browser  ·  h back  ·  ? hide"
   if (mode === "search") return "enter keep  ·  esc clear"
   if (mode === "confirm-clear") return "y clear  ·  n keep"
@@ -378,7 +395,7 @@ function hints(view, mode, reading) {
     if (mode === "x-token") return "enter save  ·  esc cancel"
     return "j/k move  ·  l rename  ·  h back  ·  n new  ·  c cadence  ·  m mute  ·  space pause  ·  x remove  ·  -/+ delivery time  ·  w weekly day  ·  t X token  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
   }
-  if (view === "notifications") return "j/k move  ·  l read  ·  / search  ·  f filter  ·  o run action  ·  yy copy  ·  x remove  ·  X clear all  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
+  if (view === "notifications") return "j/k move  ·  l read  ·  / search  ·  f filter  ·  oo run action  ·  yy copy  ·  x remove  ·  X clear all  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
   return "j/k move  ·  l read  ·  / search  ·  f filter  ·  z snooze  ·  m later  ·  yy copy link  ·  i media  ·  gg/G top/bottom  ·  o browser  ·  a mark read  ·  X clear read  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
 }
 
