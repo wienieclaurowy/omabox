@@ -621,6 +621,54 @@ class StateFileTest(unittest.TestCase):
         self.assertEqual(omabox.load_state(self.path)["items"][0]["title"], "Zażółć")
 
 
+class PrivateFilesTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        config, cache = self.root / "config" / "omabox", self.root / "cache" / "omabox"
+        for name, path in (("CONFIG_PATH", config / "sources.toml"), ("CACHE_DIR", cache), ("IMAGE_DIR", cache / "images"),
+                           ("ICON_DIR", cache / "icons"), ("DISCOVER_DIR", cache / "discover")):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(os.umask, os.umask(0o022))
+
+    def test_config_and_cache_are_private_from_creation(self):
+        created = []
+        real_open = omabox.os.open
+
+        def watch(path, flags, mode=0o777, *args, **kwargs):
+            created.append((Path(path).name, mode))
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        with mock.patch.object(omabox.os, "open", watch):
+            omabox.load_sources()
+            omabox.save_sources([{"name": "Private", "url": "https://a.example/feed?token=s3cret", "cadence": "daily"}])
+            omabox.cache_image("https://a.example/a.png", lambda url, limit: png(64, 64), omabox.IMAGE_DIR, 1 << 20)
+            omabox.fetch_favicon("https://a.example/feed", fetch=lambda url, limit: png(32, 32))
+            omabox.ensure_profile({"profiles": {}}, {"name": "Rowan"},
+                                  b'{"home_page_url": "https://x.com/rowanvale", "icon": "https://a.example/me.png"}',
+                                  fetch=lambda url, limit: png(48, 48))
+            omabox.remember_feed(["https://a.example/feed"], RSS_FEED)
+        self.assertTrue(created and all(mode == 0o600 for _, mode in created), created)
+        modes = {path.name: path.stat().st_mode & 0o777 for path in self.root.rglob("*")
+                 if path.name not in ("config", "cache")}
+        self.assertEqual(set(modes.values()), {0o600, 0o700}, modes)
+        self.assertEqual(modes["omabox"], 0o700)
+        self.assertEqual(modes["sources.toml"], 0o600)
+
+    def test_an_older_install_is_tightened_on_the_next_write(self):
+        omabox.CONFIG_PATH.parent.mkdir(parents=True, mode=0o755)
+        omabox.CONFIG_PATH.write_text('[[source]]\nname = "a"\nurl = "https://a.example/feed"\n')
+        omabox.CONFIG_PATH.chmod(0o644)
+        omabox.IMAGE_DIR.mkdir(parents=True)
+        omabox.CACHE_DIR.chmod(0o755)
+        omabox.save_sources(omabox.load_sources())
+        omabox.cache_image("https://a.example/a.png", lambda url, limit: png(64, 64), omabox.IMAGE_DIR, 1 << 20)
+        for path in (omabox.CONFIG_PATH.parent, omabox.CACHE_DIR, omabox.IMAGE_DIR):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700, path)
+        self.assertEqual(omabox.CONFIG_PATH.stat().st_mode & 0o777, 0o600)
+
+
 class DoctorTest(unittest.TestCase):
     def test_fresh_install_is_not_a_problem(self):
         root = Path(tempfile.mkdtemp())

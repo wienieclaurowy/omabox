@@ -495,9 +495,9 @@ def cache_image(src, fetch, directory, limit):
         data, info = shrink_picture(data, info) or (data, info)
         if info[1] * info[2] > MAX_PICTURE_PIXELS:
             return None
-        directory.mkdir(parents=True, exist_ok=True)
+        app_dir(directory)
         tmp = directory / f".{stem}.{os.getpid()}.{threading.get_ident()}"
-        tmp.write_bytes(data)
+        write_private(tmp, data)
         os.replace(tmp, directory / f"{stem}.{info[0]}")
     ext, width, height = info
     if width * height > MAX_PICTURE_PIXELS:
@@ -1427,6 +1427,21 @@ def open_private(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode="w"):
     return os.fdopen(descriptor, mode, encoding=None if "b" in mode else "utf-8")
 
 
+def app_dir(path):
+    """private_dir for a folder in Omabox's config or cache folder, which is made private with it: the sources
+    list and cached pictures say what the user reads."""
+    path = Path(path)
+    for root in (CONFIG_PATH.parent, CACHE_DIR):
+        if root in path.parents:
+            private_dir(root)
+    return private_dir(path)
+
+
+def write_private(path, data):
+    with open_private(path, mode="wb") as handle:
+        handle.write(data)
+
+
 def read_state(path):
     """The state stored at path, {} when there is none, None when the file holds no state object."""
     try:
@@ -1593,9 +1608,9 @@ def fetch_favicon(feed_url, feed_data=b"", fetch=download_limited, directory=Non
         ext = icon_ext(data)
         if not ext:
             continue
-        directory.mkdir(parents=True, exist_ok=True)
+        app_dir(directory)
         path = directory / f"{hashlib.sha1(feed_url.encode()).hexdigest()[:20]}.{ext}"
-        path.write_bytes(data)
+        write_private(path, data)
         return str(path)
     return ""
 
@@ -1659,9 +1674,9 @@ def ensure_profile(state, source, feed_data, fetch=download_limited, directory=N
             data = fetch(profile["avatar_url"], MAX_ICON_BYTES)
             info = image_info(data)
             if info:
-                directory.mkdir(parents=True, exist_ok=True)
+                app_dir(directory)
                 path = directory / f"avatar-{hashlib.sha1(profile['avatar_url'].encode()).hexdigest()[:20]}.{info[0]}"
-                path.write_bytes(data)
+                write_private(path, data)
                 avatar = str(path)
         except Exception:
             avatar = ""
@@ -1979,8 +1994,8 @@ DEFAULT_SOURCES = Path(__file__).resolve().parent.parent / "data" / "sources.tom
 
 def load_sources(path=None):
     if path is None and not CONFIG_PATH.exists():
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(DEFAULT_SOURCES, CONFIG_PATH)
+        private_dir(CONFIG_PATH.parent)
+        write_private(CONFIG_PATH, DEFAULT_SOURCES.read_bytes())
     path = path or CONFIG_PATH
     with open(path, "rb") as f:
         try:
@@ -2027,9 +2042,10 @@ def save_sources(sources, path=None):
         if source.get("full_text"):
             lines.append("full_text = true")
         blocks.append("\n".join(lines))
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(SOURCES_HEADER + "\n" + "\n\n".join(blocks) + "\n")
+    with open_private(tmp) as handle:
+        handle.write(SOURCES_HEADER + "\n" + "\n\n".join(blocks) + "\n")
     os.replace(tmp, path)
 
 
@@ -2503,7 +2519,7 @@ def discovered_path(url):
 def remember_feed(urls, data):
     """Keeps a feed discover downloaded for a few minutes. Adding from the panel runs discover, then add, which
     discovers and fetches: three requests in seconds, and Reddit answers the second with 429 Too Many Requests."""
-    private_dir(DISCOVER_DIR)
+    app_dir(DISCOVER_DIR)
     cutoff = time.time() - DISCOVER_SECONDS
     for old in DISCOVER_DIR.iterdir():
         with contextlib.suppress(OSError):
@@ -2848,7 +2864,7 @@ def save_x_token(text, path=None):
     if not X_TOKEN_RE.match(token):
         raise ValueError("that does not look like an auth_token value: letters and digits only, usually 40 of them")
     path = Path(path or X_TOKEN_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
     descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
