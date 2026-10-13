@@ -445,6 +445,15 @@ function articleAvailable(item, profiles) {
   return !(profiles && profiles[item.source])
 }
 
+// Nothing to read but links (Hacker News, title-only feeds), so the reader fetches the article on open. A picture or
+// video counts as content: a YouTube post with an empty description must not fetch the watch page.
+function linkOnly(item) {
+  // Media checked before links go: a video's poster img sits inside its <a href=mp4>.
+  var html = String(item && item.html || "")
+  if (/<(img|video)\b/i.test(html)) return false
+  return html.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "").replace(/<[^>]*>/g, "").replace(/&nbsp;|&#160;/g, "").replace(/[\s·|•,;:\-–—]/g, "") === ""
+}
+
 // The post as the reader shows it: the stored full article in place of the feed html, unless feedVersion.
 function articleView(item, feedVersion) {
   if (!item || !item.full_html || feedVersion) return item

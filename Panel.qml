@@ -128,6 +128,8 @@ Panel {
   // "<post id>:<video index>" while the player loads that video; the reader shows it on the video's play badge.
   property string openingVideo: ""
   property string articleLoadingId: ""
+  // Link-only posts whose article fetch failed this session (often a paywall's 403); only r retries them.
+  property var articleFailed: ({})
   // Replies fetch in their own Process, off the CLI queue (real X request, starts RSSHub: 4-60 s).
   // repliesFailed: ids whose fetch errored this session; only C retries them.
   property string repliesLoadingId: ""
@@ -506,6 +508,19 @@ Panel {
       return root.feedVersionId === post.id ? "feed" : "full"
     }
     if (root.articleLoadingId !== "") return "fetching"
+    fetchArticle(post)
+    return "fetching"
+  }
+
+  // repliesDelay's end: a link-only post that stays open gets its article without r.
+  function autoFetchArticle() {
+    var post = root.readingPost
+    if (!root.opened || !reading || view !== "feed" || !Model.articleAvailable(post, feedState.profiles)) return
+    if (post.full_html || !Model.linkOnly(post) || root.articleLoadingId !== "" || root.articleFailed[post.id]) return
+    fetchArticle(post)
+  }
+
+  function fetchArticle(post) {
     root.articleLoadingId = post.id
     note("Fetching the full article…")
     runCli(["article", post.id, "--json"], function(code, text) {
@@ -513,6 +528,10 @@ Panel {
       var result = null
       try { result = JSON.parse(text) } catch (e) {}
       if (code !== 0 || !result || result.error || !result.full_html) {
+        var failed = {}
+        for (var key in root.articleFailed) failed[key] = true
+        failed[post.id] = true
+        root.articleFailed = failed
         root.messageError = true
         root.message = "No full article: " + (result && result.error ? result.error : text || "omabox article failed")
         return
@@ -525,7 +544,6 @@ Panel {
         reader.flick.contentY = 0
       }
     })
-    return "fetching"
   }
 
   // X post in the reader: "shown" (stored copy under it), "loading", "failed" (only C retries), "waiting" (the delay
@@ -1199,11 +1217,14 @@ Panel {
     onTriggered: root.saveDelivery()
   }
 
-  // J/K through posts restarts it, so only a post that stays open fetches its replies.
+  // J/K through posts restarts it, so only a post that stays open fetches its replies or article.
   Timer {
     id: repliesDelay
     interval: 1500
-    onTriggered: root.autoFetchReplies()
+    onTriggered: {
+      root.autoFetchReplies()
+      root.autoFetchArticle()
+    }
   }
 
   Timer {
