@@ -1426,6 +1426,25 @@ class BlueskyTest(unittest.TestCase):
     def entries(self):
         return {entry["guid"].rsplit("/", 1)[1]: entry for entry in omabox.parse_bluesky(BLUESKY_API_FEED)}
 
+    def test_handles_are_text_in_the_reader_never_markup(self):
+        evil = 'x<img src="https://tracker.example/q.gif">'
+        feed = {"feed": [{"post": {"uri": "at://did:plc:a/app.bsky.feed.post/1",
+                                   "author": {"did": "did:plc:a", "handle": "lantern.example"},
+                                   "record": {"text": "hello", "createdAt": "2026-01-01T00:00:00Z"},
+                                   "embed": {"$type": "app.bsky.embed.record#view", "record": {
+                                       "$type": "app.bsky.embed.record#viewRecord", "uri": "at://did:plc:b/app.bsky.feed.post/2",
+                                       "author": {"handle": evil}, "value": {"text": "quoted"}}}},
+                          "reply": {"parent": {"author": {"did": "did:plc:c", "handle": 'y"><img src="https://tracker.example/r.gif">'}}}}]}
+        state = {"items": []}
+        omabox.merge(state, "Lantern", list(omabox.parse_bluesky(json.dumps(feed).encode())), "2026-01-01T00:00:00Z")
+        markup = state["items"][0]["html"]
+        self.assertNotIn("<img", markup)
+        self.assertIn("@x&lt;img", markup)
+        self.assertIn('href="https://bsky.app/profile/x%3Cimg%20src%3D%22https:%2F%2Ftracker.example%2Fq.gif%22%3E/post/2"', markup)
+        linked = omabox.replying_to(['y"><img src=x>'], "https://x.example/")
+        self.assertEqual(linked, '<p class="replyto">Replying to <a href="https://x.example/y%22%3E%3Cimg%20src%3Dx%3E">'
+                                 '@y&quot;&gt;&lt;img src=x&gt;</a></p>')
+
     def test_text_links_its_facets_and_counts_bytes_not_characters(self):
         html = self.entries()["3p1"]["html"]
         self.assertTrue(html.startswith(

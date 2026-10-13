@@ -1262,7 +1262,8 @@ def bluesky_page(uri, handle=""):
     if len(parts) != 3 or parts[1] not in BLUESKY_PAGES:
         return ""
     did = handle if handle and parts[1] == "app.bsky.feed.post" else parts[0]
-    return "https://bsky.app/" + BLUESKY_PAGES[parts[1]].format(did=did, rkey=parts[2])
+    did, rkey = urllib.parse.quote(did, safe=":"), urllib.parse.quote(parts[2], safe="")
+    return "https://bsky.app/" + BLUESKY_PAGES[parts[1]].format(did=did, rkey=rkey)
 
 
 def bluesky_text(text, facets):
@@ -4141,7 +4142,7 @@ def quote_markup(quote, images=None, mentions_base=""):
     images: the item's ImageFetcher. depth 0 tells Model.renderHtml the pictures sit inside the card's padding."""
     body, _ = sanitize(quote["html"], images)
     body = PICTURE_TAG_RE.sub(r'\1 depth="0">', body)
-    meta = f"@{quote['handle']}" if quote["handle"] else ""
+    meta = f"@{html.escape(quote['handle'])}" if quote["handle"] else ""
     if quote["link"]:
         when = local_stamp(quote["published"]) if quote.get("published") else "on X"
         meta += f' · <a href="{html.escape(quote["link"], quote=True)}">{when}</a>'
@@ -4156,8 +4157,8 @@ def quote_markup(quote, images=None, mentions_base=""):
 
 def replying_to(handles, mentions_base=""):
     """X's "Replying to @a, @b and @c" line over a reply's text, "" for none; past three, "and N others"."""
-    names = [f'<a href="{mentions_base}{handle}">@{handle}</a>' if mentions_base else f"@{handle}"
-             for handle in handles or []]
+    names = [f'<a href="{html.escape(mentions_base + urllib.parse.quote(handle, safe=":"), quote=True)}">'
+             f'@{html.escape(handle)}</a>' if mentions_base else f"@{html.escape(handle)}" for handle in handles or []]
     if len(names) > 3:
         names = names[:2] + [f"{len(names) - 2} others"]
     if not names:
