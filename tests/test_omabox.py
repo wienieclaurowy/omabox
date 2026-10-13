@@ -3869,6 +3869,41 @@ class FullTextFetchTest(unittest.TestCase):
         self.assertNotIn("full_html", state["items"][0])
 
 
+class TerminalOutputTest(unittest.TestCase):
+    EVIL = "a post \x1b]52;c;ZWNobyBwd25lZA==\x07 with \x9b2J words"
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp())
+        for name, path in (("STATE_PATH", root / "state" / "items.json"), ("CONFIG_PATH", root / "sources.toml"),
+                           ("IMAGE_DIR", root / "images"), ("ICON_DIR", root / "icons")):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        omabox.save_sources([{"name": self.EVIL, "url": "https://a.example/feed\x1b[2J", "cadence": "daily"}])
+        state = omabox.load_state()
+        state["items"].append({"id": "a1", "source": self.EVIL, "title": self.EVIL, "html": "", "read": False,
+                               "published": "2026-09-27T09:00:00Z"})
+        state["errors"][self.EVIL] = "HTTPError: HTTP Error 500: \x1b]0;title\x07"
+        omabox.save_state(state)
+
+    def output(self, command, **args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            command(argparse.Namespace(**args))
+        return out.getvalue()
+
+    def test_feed_text_reaches_the_terminal_without_control_characters(self):
+        found = {"title": self.EVIL, "url": "https://a.example/\x1b]8;;x\x07", "count": 1,
+                 "latest": {"title": self.EVIL, "published": "2026-09-27T09:00:00Z"}}
+        with mock.patch.object(omabox, "discover", lambda url: found):
+            outputs = [self.output(omabox.cmd_list, all=False), self.output(omabox.cmd_search, query=[], json=False),
+                       self.output(omabox.cmd_sources, json=False), self.output(omabox.cmd_discover, url="x", json=False)]
+        for out in outputs:
+            self.assertIn("a post  ]52;c;ZWNobyBwd25lZA==  with  2J words", out)
+            self.assertIsNone(re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", out), repr(out))
+        self.assertEqual(json.loads(self.output(omabox.cmd_search, query=[], json=True))[0]["title"], self.EVIL)
+
+
 class SearchPickTest(unittest.TestCase):
     NOW = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
 

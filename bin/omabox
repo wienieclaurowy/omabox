@@ -1823,7 +1823,7 @@ def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base
             try:
                 item.update(article(item["link"], title), full_fetched=fetched_at)
             except Exception as error:
-                print(f"{source}: no full article for {item['link']}: {article_error(error)}", file=sys.stderr)
+                print(shown(f"{source}: no full article for {item['link']}: {article_error(error)}"), file=sys.stderr)
         built[entry["guid"]] = (shaped, item)
 
     def store(target):
@@ -2216,6 +2216,15 @@ def download_feed(url, cached=None, opener=None):
         raise
     validators = {key: value for key, value in (("etag", reply.get("ETag")), ("modified", reply.get("Last-Modified"))) if value}
     return data, ({**validators, "media": MEDIA_VERSION} if validators else {})
+
+
+# C0 and C1 controls: a terminal runs feed text holding them as escape sequences (clipboard writes, title changes)
+TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def shown(text):
+    """Feed-derived text for a terminal line, controls blanked."""
+    return TERMINAL_CONTROL_RE.sub(" ", str(text))
 
 
 def now_iso():
@@ -3068,7 +3077,7 @@ class Gathered:
     def __call__(self, state):
         if self.error:
             record_error(state, self.name, self.error, self.stamp)
-            print(f"{self.name}: {self.error}", file=sys.stderr)
+            print(shown(f"{self.name}: {self.error}"), file=sys.stderr)
             return 0
         return self.store(state)
 
@@ -3084,11 +3093,11 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         if data is None:
             def unchanged(state):
                 record_success(state, name, stamp)
-                print(f"{name}: not modified")
+                print(f"{shown(name)}: not modified")
                 return 0
             return Gathered(name, url, stamp, store=unchanged)
         mentions = "https://x.com/" if x_feed else ""
-        muted = mute_filter(source.get("mute"), lambda problem: print(f"{name}: {problem}, skipped", file=sys.stderr))
+        muted = mute_filter(source.get("mute"), lambda problem: print(shown(f"{name}: {problem}, skipped"), file=sys.stderr))
         article = extract if source.get("full_text") and not needs_rsshub(url) else None
         entries = list(parse_x_feed(data) if x_feed else parse_bluesky(data) if bluesky else parse_feed(data))
         if is_hnrss(url):
@@ -3116,7 +3125,7 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         state["icons"][name] = looks["icons"][name]
         if name in looks["profiles"]:
             state["profiles"][name] = looks["profiles"][name]
-        print(f"{name}: {added} new")
+        print(f"{shown(name)}: {added} new")
         return added
 
     return Gathered(name, url, stamp, store=stored)
@@ -3299,7 +3308,7 @@ def run_fetch(args, snapshot=None):
                 gathered += gather_via_rsshub(snapshot, via_rsshub, stamp)
         except Exception as error:
             gathered += [Gathered(source["name"], source["url"], stamp, error=f"RSSHub: {error}") for source in via_rsshub]
-            print(f"RSSHub: {error}", file=sys.stderr)
+            print(shown(f"RSSHub: {error}"), file=sys.stderr)
     added = {}
     with locked():
         state = load_state()
@@ -3355,7 +3364,7 @@ def cmd_sources(args):
         status = f"error: {row['error']}" if row["error"] else (row["fetched"] or "never fetched")
         if row["stale"]:
             status += f" ({stale_text(row['stale'])})"
-        print(f"{row['name']:<20} {row['cadence']:<7} {row['url']}\n{'':<20} {status}")
+        print(f"{shown(row['name']):<20} {row['cadence']:<7} {shown(row['url'])}\n{'':<20} {shown(status)}")
 
 
 def error_text(error):
@@ -3373,13 +3382,13 @@ def cmd_discover(args):
             token = isinstance(error, XTokenMissing) or message == X_TOKEN_ERROR
             print(json.dumps({"error": message, **({"needs": "x-token"} if token else {})}))
             return
-        sys.exit(message)
+        sys.exit(shown(message))
     if args.json:
         print(json.dumps(found, ensure_ascii=False))
         return
-    print(f"{found['title']}\n{found['url']}")
+    print(f"{shown(found['title'])}\n{shown(found['url'])}")
     if found["latest"]:
-        print(f"latest: {found['latest']['title']} ({found['latest']['published'][:10]})")
+        print(f"latest: {shown(found['latest']['title'])} ({shown(found['latest']['published'][:10])})")
 
 
 def cmd_add(args):
@@ -3387,16 +3396,16 @@ def cmd_add(args):
     try:
         found = discover(args.url)
     except Exception as error:
-        sys.exit(error_text(error))
+        sys.exit(shown(error_text(error)))
     name = (args.name or found["title"]).strip()
     if name_taken(sources, name):
-        sys.exit(f"a source named {name!r} already exists")
+        sys.exit(shown(f"a source named {name!r} already exists"))
     if any(s["url"] == found["url"] for s in sources):
-        sys.exit(f"already subscribed to {found['url']}")
+        sys.exit(shown(f"already subscribed to {found['url']}"))
     source = {"name": name, "url": found["url"], "cadence": args.cadence}
     sources.append(source)
     save_sources(sources)
-    print(f"added {name}: {found['url']}")
+    print(f"added {shown(name)}: {shown(found['url'])}")
     if args.cadence != "paused":
         with rsshub_session(needs_rsshub(source["url"])):
             result = gather_source(load_state(), source, now_iso(), get=discovered_or_download)
@@ -3590,7 +3599,7 @@ def cmd_list(args):
         if item.get("cleared") or (item["read"] and not args.all):
             continue
         mark = " " if item["read"] else "•"
-        print(f"{mark} {item['id']}  {item['published'][:10]}  {item['source']}: {item['title']}")
+        print(f"{mark} {item['id']}  {shown(item['published'][:10])}  {shown(item['source'])}: {shown(item['title'])}")
 
 
 def set_read(ids, value, everything=False):
@@ -3670,7 +3679,7 @@ def cmd_search(args):
     for row in rows:
         mark = " " if row["read"] else "•"
         flags = "".join(f"  [{flag}]" for flag in ("later", "snoozed") if row[flag])
-        print(f"{mark} {row['id']}  {row['published'][:10]}  {row['source']}: {row['title']}{flags}")
+        print(f"{mark} {row['id']}  {shown(row['published'][:10])}  {shown(row['source'])}: {shown(row['title'])}{flags}")
 
 
 def relative_date(value, now):
@@ -4711,7 +4720,7 @@ def cmd_doctor(args):
     def line(good, text):
         nonlocal problems
         problems += 0 if good else 1
-        print(f"{ok if good else bad} {text}")
+        print(f"{ok if good else bad} {shown(text)}")
 
     try:
         sources = load_sources()
@@ -4924,7 +4933,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         sys.exit(130)
     except (OSError, ValueError, RuntimeError) as error:
-        sys.exit(f"omabox: {error_text(error)}")
+        sys.exit(shown(f"omabox: {error_text(error)}"))
 
 
 if __name__ == "__main__":
