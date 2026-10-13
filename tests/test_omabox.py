@@ -2716,6 +2716,8 @@ class ViewerTest(unittest.TestCase):
         with self.installed("mpv", "yt-dlp"):
             self.assertEqual(omabox.direct_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--"] + urls)
         self.assertTrue(omabox.direct_video(reddit[0]))
+        self.assertTrue(omabox.direct_video("https://video.bsky.app/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
+        self.assertFalse(omabox.direct_video("https://video.bsky.app.example/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
         self.assertFalse(omabox.direct_video("https://v.redd.it.example/ab12cd/DASHPlaylist.mpd"))
         self.assertFalse(omabox.youtube_video("https://www.youtube.com/channel/UC1234567890123456789012"))
 

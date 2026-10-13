@@ -2265,13 +2265,15 @@ def youtube_video(url):
 
 
 REDDIT_VIDEO_RE = re.compile(r"^https://v\.redd\.it/\w+/DASHPlaylist\.mpd$")
+BLUESKY_VIDEO_RE = re.compile(r"^https://video\.bsky\.app/watch/[\w%:.-]+/\w+/playlist\.m3u8$")
 
 
 def direct_video(url):
-    """Videos on fixed hosts that mpv opens itself: YouTube watch pages (through yt-dlp) and Reddit's DASH
-    manifests, whose segments the relay's single-file passthrough cannot follow. Not Reddit's HLS playlist:
-    ffmpeg stops after its first byte-range segment."""
-    return youtube_video(url) or bool(REDDIT_VIDEO_RE.match(url or ""))
+    """Videos on fixed hosts that mpv opens itself: YouTube watch pages (through yt-dlp), Reddit's DASH manifests
+    and Bluesky's HLS playlists, whose segments the relay's single-file passthrough cannot follow. Not Reddit's
+    HLS playlist: ffmpeg stops after its first byte-range segment."""
+    url = url or ""
+    return youtube_video(url) or bool(REDDIT_VIDEO_RE.match(url) or BLUESKY_VIDEO_RE.match(url))
 
 
 def is_youtube(url):
