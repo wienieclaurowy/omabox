@@ -770,6 +770,16 @@ class SourcesFileTest(unittest.TestCase):
         self.assertEqual(names, [s["name"] for s in omabox.load_sources(omabox.DEFAULT_SOURCES)])
         self.assertTrue((root / "omabox" / "sources.toml").exists())
 
+    def test_arguments_can_come_on_stdin_instead_of_argv(self):
+        stdin = io.StringIO(json.dumps(["rename", "Old \u00e9", "New -- name"]) + "\n")
+        with mock.patch.object(omabox.sys, "stdin", stdin), mock.patch.object(omabox, "cmd_rename") as rename:
+            omabox.main([omabox.ARGS_ON_STDIN])
+        self.assertEqual((rename.call_args[0][0].old, rename.call_args[0][0].new), ("Old \u00e9", "New -- name"))
+        for line in ("", "not json\n", '{"a": 1}\n', '["mute", 3]\n'):
+            with mock.patch.object(omabox.sys, "stdin", io.StringIO(line)), self.assertRaises(SystemExit) as caught:
+                omabox.main([omabox.ARGS_ON_STDIN])
+            self.assertIn("one line of JSON", str(caught.exception.code))
+
     def test_cli_reports_errors_without_a_traceback(self):
         with self.assertRaises(SystemExit) as caught:
             omabox.main(["pause", "soon"])

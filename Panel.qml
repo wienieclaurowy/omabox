@@ -728,7 +728,8 @@ Panel {
     persistSettings({ hints: !root.hintsVisible })
   }
 
-  // ---- omabox CLI: the one writer of sources.toml and items.json.
+  // ---- omabox CLI: the one writer of sources.toml and items.json. Arguments go on stdin (--args-on-stdin), never argv,
+  // which every local user can read: they carry feed URLs (private feeds hold tokens), source names and mute words.
   function runCli(args, done) {
     var queue = root.cliQueue.slice()
     queue.push({ args: args, done: done })
@@ -741,7 +742,9 @@ Panel {
     var job = root.cliQueue[0]
     root.cliQueue = root.cliQueue.slice(1)
     root.cliDone = job.done
-    cliProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin].concat(job.args)
+    cliProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "--args-on-stdin"]
+    cliProc.stdinArgs = JSON.stringify(job.args) + "\n"
+    cliProc.stdinEnabled = true
     cliProc.running = true
   }
 
@@ -1303,6 +1306,13 @@ Panel {
 
   Process {
     id: cliProc
+    property string stdinArgs: ""
+    // Turning stdin off closes it after the one line.
+    onStarted: {
+      write(stdinArgs)
+      stdinArgs = ""
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

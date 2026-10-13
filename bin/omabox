@@ -4871,7 +4871,25 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+# `omabox --args-on-stdin` reads its arguments as one JSON line instead: the panel passes feed URLs, source names,
+# mute words and video URLs that way, since every local user can read a process's argv.
+ARGS_ON_STDIN = "--args-on-stdin"
+
+
+def args_on_stdin(stream=None):
+    try:
+        args = json.loads((stream or sys.stdin).readline())
+    except ValueError:
+        args = None
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        sys.exit(f"omabox: {ARGS_ON_STDIN} takes one line of JSON, a list of strings")
+    return args
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == [ARGS_ON_STDIN]:
+        argv = args_on_stdin()
     parser = argparse.ArgumentParser(prog="omabox")
     parser.add_argument("--version", action="version", version=f"omabox {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
