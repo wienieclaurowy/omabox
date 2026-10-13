@@ -2256,6 +2256,16 @@ def youtube_video(url):
     return bool(YOUTUBE_VIDEO_RE.match(url or ""))
 
 
+REDDIT_VIDEO_RE = re.compile(r"^https://v\.redd\.it/\w+/DASHPlaylist\.mpd$")
+
+
+def direct_video(url):
+    """Videos on fixed hosts that mpv opens itself: YouTube watch pages (through yt-dlp) and Reddit's DASH
+    manifests, whose segments the relay's single-file passthrough cannot follow. Not Reddit's HLS playlist:
+    ffmpeg stops after its first byte-range segment."""
+    return youtube_video(url) or bool(REDDIT_VIDEO_RE.match(url or ""))
+
+
 def is_youtube(url):
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host == "youtube.com" or host.endswith(".youtube.com")
@@ -2318,19 +2328,29 @@ REDDIT_FOOTER_RE = re.compile(
     r'(?:<span>\s*)?<a href="([^"]*)">\[comments\]</a>(?:\s*</span>)?', re.I)
 
 
+REDDIT_VIDEO_LINK_RE = re.compile(r"^https://v\.redd\.it/(\w+)/?$")
+REDDIT_PREVIEW_RE = re.compile(r'<a href="[^"]*">\s*<img src="(https://[^"]+)"[^>]*>\s*</a>')
+
+
 def reddit_entry(entry):
     """Reddit ends each body with "submitted by /u/name [link] [comments]". It becomes one line like Hacker News's:
-    the poster, the linked site when the post links away from Reddit, then the discussion."""
+    the poster, the linked site when the post links away from Reddit, then the discussion. A video post's preview
+    picture becomes the poster of its video."""
     footer = REDDIT_FOOTER_RE.search(entry["html"])
     if not footer:
         return entry
     user, target, comments = footer.groups()
     host = (urllib.parse.urlparse(html.unescape(target)).hostname or "").lower()
+    body = entry["html"][:footer.start()] + entry["html"][footer.end():]
+    video = REDDIT_VIDEO_LINK_RE.match(html.unescape(target))
+    if video:
+        # the feed's preview picture links to the post; it becomes the poster of the video's DASH manifest
+        body = REDDIT_PREVIEW_RE.sub(lambda m: f'<video src="https://v.redd.it/{video.group(1)}/DASHPlaylist.mpd" '
+                                               f'poster="{m.group(1)}"></video>', body, count=1)
     links = [f"u/{html.escape(user)}"]
     if host and not reddit_host(target) and host != "redd.it" and not host.endswith(".redd.it"):
         links.append(f'<a href="{target}">{html.escape(host.removeprefix("www."))}</a>')
     links.append(f'<a href="{comments}">Discussion on Reddit</a>')
-    body = entry["html"][:footer.start()] + entry["html"][footer.end():]
     return {**entry, "html": body + f"<p>{' · '.join(links)}</p>"}
 
 
@@ -2845,9 +2865,9 @@ def player_argv(urls, start, desktop_file=default_desktop_file):
     return None
 
 
-def youtube_player_argv(urls, start):
-    """mpv, which plays YouTube watch pages through yt-dlp; None without both. Other players cannot open them."""
-    if shutil.which("mpv") and shutil.which("yt-dlp"):
+def direct_player_argv(urls, start):
+    """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them."""
+    if shutil.which("mpv") and (shutil.which("yt-dlp") or not any(youtube_video(url) for url in urls)):
         return ["mpv", f"--playlist-start={start}", "--", *urls]
     return None
 
@@ -4426,7 +4446,7 @@ def hold_focus(address, run=subprocess.run, seconds=1.5, every=0.1):
 
 
 def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.2, wait_seconds=30, relay=start_relay,
-             focus=hold_focus, players=player_argv, youtube_players=youtube_player_argv):
+             focus=hold_focus, players=player_argv, direct_players=direct_player_argv):
     """Plays a post's videos in the default video player (else mpv) from the clicked one, through the loopback
     relay, and returns when the player's window closes. Prints "opened" once the window is up: X files take
     about half a second to start, and the panel stays on screen until then. Prints "no player" without one."""
@@ -4434,15 +4454,15 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     if not all(url.startswith("https://") for url in urls):
         sys.exit("refused: videos play from https addresses only")
     start = min(max(args.start, 0), len(urls) - 1)
-    # a watch page is no media file for the relay to pass on; mpv resolves it itself
-    youtube = all(youtube_video(url) for url in urls)
-    argv = youtube_players(urls, start) if youtube else players(relay(urls), start)
+    # watch pages and playlists are no single media file for the relay to pass on; mpv fetches them itself
+    direct = all(direct_video(url) for url in urls)
+    argv = direct_players(urls, start) if direct else players(relay(urls), start)
     if argv is None:
         print("no player", flush=True)
-        sys.exit("no video player: YouTube videos need mpv and yt-dlp" if youtube else "no video player: install mpv")
-    # the player reaches only the loopback relay, which a proxy from the environment could not reach; mpv's yt-dlp
-    # goes to YouTube itself and keeps the proxy
-    env = dict(os.environ) if youtube else {
+        sys.exit("no video player: these videos need mpv (and yt-dlp for YouTube)" if direct else "no video player: install mpv")
+    # the player reaches only the loopback relay, which a proxy from the environment could not reach; for direct
+    # videos mpv goes out itself and keeps the proxy
+    env = dict(os.environ) if direct else {
         key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     before = windows()
     try:

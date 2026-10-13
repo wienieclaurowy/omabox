@@ -366,6 +366,14 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(own["html"].endswith(
             '<p>u/emberfield · <a href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/">Discussion on Reddit</a></p>'))
         self.assertEqual(omabox.reddit_entry({"html": "<p>no footer</p>"}), {"html": "<p>no footer</p>"})
+        clip = omabox.reddit_entry({"html": '<table><tr><td><a href="https://www.reddit.com/r/lanterns/comments/1ab4/clip/">'
+                                            ' <img src="https://external-preview.redd.it/clip.png?width=640&amp;s=1" alt="Clip" /> '
+                                            '</a></td><td>' + reddit_footer("wickmaker", "https://v.redd.it/ab12cd",
+                                            "https://www.reddit.com/r/lanterns/comments/1ab4/clip/") + "</td></tr></table>"})
+        self.assertIn('<video src="https://v.redd.it/ab12cd/DASHPlaylist.mpd" '
+                      'poster="https://external-preview.redd.it/clip.png?width=640&amp;s=1"></video>', clip["html"])
+        self.assertIn("<p>u/wickmaker · <a href", clip["html"])
+        self.assertNotIn("v.redd.it</a>", clip["html"])
 
     def test_version_of(self):
         self.assertEqual(omabox.version_of("v4.0.4"), "4.0.4")
@@ -2615,7 +2623,7 @@ class ViewerTest(unittest.TestCase):
     PATHS = ["/c/a.png", "/c/b.jpg", "/c/c.gif"]
     URLS = ["https://video.twimg.com/a.mp4", "https://video.twimg.com/b.mp4"]
 
-    def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None, youtube_players=None):
+    def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None, direct_players=None):
         """cmd_play against a fake player whose window shows after window_after looks and closes after
         window_gone_after (default: the next look); exits: poll() result."""
         launched, looks = [], []
@@ -2651,7 +2659,7 @@ class ViewerTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), mock.patch.dict(omabox.os.environ, {"http_proxy": "http://192.0.2.1:3128"}):
             omabox.cmd_play(argparse.Namespace(urls=urls, start=start), run, windows, poll_every=0, wait_seconds=5,
                             relay=relay, focus=lambda address: launched.append("focus " + address),
-                            players=players or mpv_only, youtube_players=youtube_players or mpv_only)
+                            players=players or mpv_only, direct_players=direct_players or mpv_only)
         self.looks = len(looks)
         return launched, out.getvalue()
 
@@ -2683,12 +2691,16 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual(launched[0], ["mpv", "--playlist-start=1", "--"] + urls)
         self.assertEqual(self.env["http_proxy"], "http://192.0.2.1:3128")
         with self.assertRaises(SystemExit) as caught:
-            self.play(urls, youtube_players=lambda urls, start: None)
-        self.assertIn("need mpv and yt-dlp", str(caught.exception.code))
+            self.play(urls, direct_players=lambda urls, start: None)
+        self.assertIn("need mpv (and yt-dlp for YouTube)", str(caught.exception.code))
+        reddit = ["https://v.redd.it/ab12cd/DASHPlaylist.mpd"]
         with self.installed("mpv"):
-            self.assertIsNone(omabox.youtube_player_argv(urls, 0))
+            self.assertIsNone(omabox.direct_player_argv(urls, 0))
+            self.assertEqual(omabox.direct_player_argv(reddit, 0), ["mpv", "--playlist-start=0", "--"] + reddit)
         with self.installed("mpv", "yt-dlp"):
-            self.assertEqual(omabox.youtube_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--"] + urls)
+            self.assertEqual(omabox.direct_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--"] + urls)
+        self.assertTrue(omabox.direct_video(reddit[0]))
+        self.assertFalse(omabox.direct_video("https://v.redd.it.example/ab12cd/DASHPlaylist.mpd"))
         self.assertFalse(omabox.youtube_video("https://www.youtube.com/channel/UC1234567890123456789012"))
 
     def test_play_without_a_player_says_so(self):
