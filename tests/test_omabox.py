@@ -2279,6 +2279,22 @@ class FeedRedirectTest(unittest.TestCase):
                 omabox.download_feed(f"http://127.0.0.1:{lan_to_file}/feed.xml")
 
 
+class DowngradeTest(unittest.TestCase):
+    def test_no_opener_follows_https_down_to_http(self):
+        request = urllib.request.Request("https://img.example/v.mp4")
+        with mock.patch.object(omabox, "public_host", lambda url: True):
+            for opener in (omabox.PUBLIC_OPENER, omabox.LAN_OPENER, omabox.LOOPBACK_OPENER):
+                (handler,) = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+                self.assertIsInstance(handler, omabox.WebRedirects)
+                with self.assertRaises(ValueError):
+                    handler.redirect_request(request, None, 302, "Found", {}, "http://img.example/v.mp4")
+                followed = handler.redirect_request(request, None, 302, "Found", {}, "https://cdn.example/v.mp4")
+                self.assertEqual(followed.full_url, "https://cdn.example/v.mp4")
+                plain = urllib.request.Request("http://img.example/v.mp4")
+                self.assertEqual(handler.redirect_request(plain, None, 302, "Found", {}, "https://img.example/v.mp4")
+                                 .full_url, "https://img.example/v.mp4")
+
+
 class ConditionalGetTest(unittest.TestCase):
     CACHED = {"etag": '"v1"', "modified": "Sat, 26 Sep 2026 06:00:00 GMT", "media": omabox.MEDIA_VERSION}
 
