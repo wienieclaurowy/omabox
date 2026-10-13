@@ -442,7 +442,14 @@ class ImageFetcher:
 
 # Qt rich text decodes every picture of a post on the GUI thread at full size; the reader column is ~800 px wide.
 MAX_PICTURE_WIDTH = 1600
+MAX_PICTURE_HEIGHT = 4096
+# what a picture that cannot be scaled down (animated, no magick) may hold: 64 MB once decoded, 12 per post
+MAX_PICTURE_PIXELS = 16_000_000
 SHRINK_SECONDS = 20
+
+
+def oversized(width, height):
+    return width > MAX_PICTURE_WIDTH or height > MAX_PICTURE_HEIGHT
 
 
 def animated(data, ext):
@@ -450,29 +457,30 @@ def animated(data, ext):
 
 
 def shrink_picture(data, info, run=None, which=None):
-    """(bytes, image_info) of the picture scaled down to MAX_PICTURE_WIDTH with ImageMagick, or None to keep the
-    original: narrow enough, animated, or magick missing, failing or too slow."""
-    ext, width, _ = info
-    if width <= MAX_PICTURE_WIDTH or animated(data, ext) or not (which or shutil.which)("magick"):
+    """(bytes, image_info) of the picture scaled down to fit MAX_PICTURE_WIDTH x MAX_PICTURE_HEIGHT with
+    ImageMagick, or None to keep the original: small enough, animated, or magick missing, failing or too slow."""
+    ext, width, height = info
+    if not oversized(width, height) or animated(data, ext) or not (which or shutil.which)("magick"):
         return None
     kind = "jpeg" if ext == "jpg" else ext
-    size = f"{MAX_PICTURE_WIDTH}x{MAX_PICTURE_WIDTH}"
+    size = f"{MAX_PICTURE_WIDTH}x{MAX_PICTURE_HEIGHT}"
     argv = ["magick", "-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB",
-            "-define", f"jpeg:size={size}", f"{kind}:-", "-auto-orient", "-resize", f"{MAX_PICTURE_WIDTH}x>", "-strip",
+            "-define", f"jpeg:size={size}", f"{kind}:-", "-auto-orient", "-resize", f"{size}>", "-strip",
             *(["-quality", "85"] if ext in ("jpg", "webp") else []), f"{kind}:-"]
     try:
         result = (run or subprocess.run)(argv, input=data, capture_output=True, timeout=SHRINK_SECONDS)
     except (OSError, subprocess.SubprocessError):
         return None
     shrunk = image_info(result.stdout) if result.returncode == 0 else None
-    if not shrunk or shrunk[0] != ext or shrunk[1] > MAX_PICTURE_WIDTH:
+    if not shrunk or shrunk[0] != ext or oversized(shrunk[1], shrunk[2]):
         return None
     return result.stdout, shrunk
 
 
 def cache_image(src, fetch, directory, limit):
     """(file name, width, height) of the picture at src in the cache directory, downloaded the first time, or None
-    when the bytes are no PNG, JPEG, GIF or WebP. Wide pictures are cached scaled down; tracking pixels not at all."""
+    when the bytes are no PNG, JPEG, GIF or WebP. Large pictures are cached scaled down, or not at all past
+    MAX_PICTURE_PIXELS when they cannot be; tracking pixels not at all."""
     stem = hashlib.sha1(src.encode()).hexdigest()[:20]
     cached = next(iter(directory.glob(stem + ".*")), None) if directory.exists() else None
     if cached:
@@ -485,11 +493,15 @@ def cache_image(src, fetch, directory, limit):
         return None
     if not cached and info[1] > TRACKING_PIXEL_MAX and info[2] > TRACKING_PIXEL_MAX:
         data, info = shrink_picture(data, info) or (data, info)
+        if info[1] * info[2] > MAX_PICTURE_PIXELS:
+            return None
         directory.mkdir(parents=True, exist_ok=True)
         tmp = directory / f".{stem}.{os.getpid()}.{threading.get_ident()}"
         tmp.write_bytes(data)
         os.replace(tmp, directory / f"{stem}.{info[0]}")
     ext, width, height = info
+    if width * height > MAX_PICTURE_PIXELS:
+        return None
     return f"{stem}.{ext}", width, height
 
 

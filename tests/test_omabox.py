@@ -1016,6 +1016,29 @@ class ImageTest(unittest.TestCase):
         run.assert_not_called()
         self.assertIn('width="4000"', body)
 
+    @unittest.skipUnless(omabox.shutil.which("magick"), "needs ImageMagick")
+    def test_tall_pictures_are_cached_scaled_down_too(self):
+        tall = subprocess.run(["magick", "-size", "1000x8000", "gradient:navy-orange", "png:-"], capture_output=True,
+                              check=True).stdout
+        self.served["https://blog.example/tall.png"] = tall
+        body, _ = omabox.sanitize('<img src="/tall.png">', self.fetcher())
+        self.assertIn('width="512" height="4096"', body)
+
+    def test_pictures_too_large_to_scale_down_are_dropped(self):
+        self.served["https://blog.example/tall.png"] = png(1600, 40000)
+        self.served["https://blog.example/huge.gif"] = b"GIF89a" + (4000).to_bytes(2, "little") + (5000).to_bytes(2, "little")
+        with mock.patch.object(omabox.shutil, "which", lambda name: None):
+            for name in ("tall.png", "huge.gif"):
+                body, _ = omabox.sanitize(f'<img src="/{name}">', self.fetcher())
+                self.assertNotIn("<img", body)
+                self.assertIn(f'href="https://blog.example/{name}"', body)
+        self.assertFalse(self.dir.exists() and any(self.dir.iterdir()))
+        # one cached by an older version is not shown either
+        self.dir.mkdir(parents=True)
+        stem = omabox.hashlib.sha1(b"https://blog.example/tall.png").hexdigest()[:20]
+        (self.dir / f"{stem}.png").write_bytes(png(1600, 40000))
+        self.assertIsNone(omabox.cache_image("https://blog.example/tall.png", self.fetch, self.dir, omabox.MAX_IMAGE_BYTES))
+
     def test_skips_tracking_pixels_without_download_when_declared(self):
         body, _ = omabox.sanitize('<img src="https://t.example/p.gif" width="1" height="1">', self.fetcher())
         self.assertEqual(body, "")
