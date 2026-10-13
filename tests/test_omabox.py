@@ -3073,6 +3073,19 @@ MASTODON_CONTEXT = json.dumps({"ancestors": [], "descendants": [
 ]})
 
 
+def hn_comment(cid, author, text, children=()):
+    return {"id": cid, "author": author, "text": text, "created_at": "2026-09-27T09:00:00.000Z", "children": list(children)}
+
+
+HN_ITEM = json.dumps({"id": 4100, "author": "lampwright", "title": "Show HN: Lantern groups", "children": [
+    hn_comment(4101, "wick", "<p>Oldest one</p>", [hn_comment(4102, "lampwright", "Thanks!", [
+        hn_comment(4103, "wick", "Sure", [hn_comment(4104, "ember", "too deep")])])]),
+    hn_comment(4105, None, None, [hn_comment(4106, "ember", "under a deleted one")]),
+    hn_comment(4107, "glow", "Ranked first by HN"),
+    hn_comment(4108, "late", "Not ranked yet"),
+]})
+
+
 REPLIES_FEED = json.dumps({"version": "https://jsonfeed.org/version/1.1", "items": [
     reply_entry("rowanvale", 100, "Rowan", "Thrilled to announce", avatar="https://pbs.twimg.com/profile_images/9/rowanvale_normal.jpg",
                 published="2026-09-26T16:13:00.000Z"),
@@ -3216,7 +3229,7 @@ class RepliesTest(unittest.TestCase):
         self.assertEqual(omabox.fetch_avatars(["https://pbs.twimg.com/a_bigger.jpg"], broken), {})
 
     def test_failures_are_one_line_errors(self):
-        for iid, text in (("blog", "only X, Reddit, Bluesky and Mastodon posts"), ("nope", "no post nope")):
+        for iid, text in (("blog", "only X, Reddit, Hacker News, Bluesky and Mastodon posts"), ("nope", "no post nope")):
             with self.assertRaisesRegex(ValueError, text):
                 omabox.load_replies(iid, fetch=self.fetch, session=self.session)
         self.assertEqual(self.urls, [])
@@ -3271,6 +3284,38 @@ class RepliesTest(unittest.TestCase):
         self.assertIn("@wick.bsky.example · ", markup)
         self.assertEqual(markup.count('class="opcomment"'), 1)
         self.assertIn("Replies on Bluesky", markup)
+
+    def test_hacker_news_comments_follow_the_sites_ranking(self):
+        discussion = '<p><a href="https://lantern.example">lantern.example</a> · ' \
+                     '<a href="https://news.ycombinator.com/item?id=4100">Discussion on Hacker News</a></p>'
+        self.assertEqual(omabox.hn_item_ref({"link": "https://lantern.example", "html": discussion}), "4100")
+        self.assertEqual(omabox.hn_item_ref({"link": "https://news.ycombinator.com/item?id=4100", "html": ""}), "4100")
+        self.assertIsNone(omabox.hn_item_ref({"link": "https://lantern.example", "html": "<p>hi</p>"}))
+        author, threads = omabox.parse_hn_comments(HN_ITEM, [4107, 4101, 4105])
+        self.assertEqual(author, "lampwright")
+        self.assertEqual([[r["id"] for r in thread] for thread in threads], [["4107"], ["4101", "4102", "4103"], ["4108"]])
+        self.assertEqual(threads[0][0]["link"], "https://news.ycombinator.com/item?id=4107")
+        _, oldest_first = omabox.parse_hn_comments(HN_ITEM)
+        self.assertEqual([thread[0]["id"] for thread in oldest_first], ["4101", "4107", "4108"])
+
+    def test_hacker_news_fetch_survives_a_missing_ranking(self):
+        state = omabox.load_state()
+        state["items"].append({"id": "hn", "source": "Hacker News", "title": "Lantern groups", "published": "2026-09-27T08:00:00Z",
+                               "read": False, "link": "https://news.ycombinator.com/item?id=4100", "html": ""})
+        omabox.save_state(state)
+
+        def fetch(url, limit):
+            self.urls.append(url)
+            if "firebaseio" in url:
+                raise OSError("down")
+            return url, "application/json", HN_ITEM.encode()
+
+        fields = omabox.load_hn_comments(omabox.load_state()["items"][-1], "4100", fetch, self.picture)
+        self.assertEqual(self.urls, ["https://hn.algolia.com/api/v1/items/4100",
+                                     "https://hacker-news.firebaseio.com/v0/item/4100.json"])
+        self.assertEqual(fields["replies_count"], 5)
+        # the submitter answered in the oldest thread, so it leads
+        self.assertLess(fields["replies_html"].index("Oldest one"), fields["replies_html"].index("Ranked first by HN"))
 
     def test_author_threads_then_most_liked_come_first(self):
         def thread(handle, likes, *answers):
@@ -3333,7 +3378,7 @@ class RepliesTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             omabox.main(["replies", "blog", "--json"])
-        self.assertEqual(json.loads(out.getvalue()), {"error": "only X, Reddit, Bluesky and Mastodon posts have comments to show"})
+        self.assertEqual(json.loads(out.getvalue()), {"error": "only X, Reddit, Hacker News, Bluesky and Mastodon posts have comments to show"})
 
 
 class FetchLockTest(unittest.TestCase):

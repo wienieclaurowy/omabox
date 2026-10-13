@@ -2467,6 +2467,17 @@ BLUESKY_POST_RE = re.compile(r"^https://bsky\.app/profile/([\w.:-]+)/post/(\w+)/
 MASTODON_POST_RE = re.compile(r"^https://([\w.-]+)/@(\w+)(?:@[\w.-]+)?/(\d+)/?$", re.I)
 
 
+HN_ITEM_RE = re.compile(r"https://news\.ycombinator\.com/item\?id=(\d+)")
+
+
+def hn_item_ref(item):
+    """The Hacker News item id of a post: its link for Ask HN and text posts, else the discussion link hn_entry
+    puts under a linked article. None for other posts."""
+    match = re.match(HN_ITEM_RE.pattern + "$", item.get("link") or "") or re.search(
+        r'<a href="' + HN_ITEM_RE.pattern + r'">Discussion on Hacker News</a>', item.get("html") or "")
+    return match.group(1) if match else None
+
+
 def bluesky_post_ref(link):
     """https://bsky.app/profile/example.bsky.social/post/3abc -> ("example.bsky.social", "3abc"), else None."""
     match = BLUESKY_POST_RE.match(link or "")
@@ -3793,6 +3804,34 @@ def parse_bluesky_replies(data, limit=MAX_REPLY_THREADS):
     return author, [descend(top, 2, [reply(top)]) for top in shown(thread.get("replies"))][:limit]
 
 
+def parse_hn_comments(data, ranked=()):
+    """(submitter, threads) from Algolia's item tree, whose children come oldest first. ranked: the story's kids in
+    Hacker News's own order (its Firebase API), which orders the top-level comments; ones it lacks go last. Deleted
+    and flagged comments have no text and are left out with their answers."""
+    story = json.loads(data)
+    place = {str(kid): index for index, kid in enumerate(ranked)}
+
+    def comment(node):
+        cid = str(node.get("id") or "")
+        name = str(node.get("author") or "")
+        return {"name": name, "handle": name, "id": cid, "avatar": "", "label": "", "mentions": "",
+                "link": f"https://news.ycombinator.com/item?id={cid}", "published": iso_utc(node.get("created_at")),
+                "html": str(node.get("text") or "")}
+
+    def shown(nodes):
+        return [node for node in nodes or [] if node.get("text") and node.get("author")]
+
+    def descend(node, depth, out):
+        for child in shown(node.get("children")):
+            out.append(comment(child))
+            if depth < REPLY_DEPTH:
+                descend(child, depth + 1, out)
+        return out
+
+    tops = sorted(shown(story.get("children")), key=lambda node: place.get(str(node.get("id")), len(place)))
+    return str(story.get("author") or ""), [descend(top, 2, [comment(top)]) for top in tops]
+
+
 MASTODON_MENTIONS_RE = re.compile(r'^<p>(?:\s*<span class="h-card"[^>]*>\s*<a [^>]*>@<span>[^<]*</span></a>\s*</span>)+\s*')
 
 
@@ -3961,6 +4000,7 @@ def rank_threads(threads, author):
 
 REPLIES_LINES = {"X": ("Top replies on X, the author's threads first", "No replies on X yet"),
                  "Reddit": ("Top comments on Reddit, best first", "No comments on Reddit yet"),
+                 "Hacker News": ("Top comments on Hacker News, the author's threads first", "No comments on Hacker News yet"),
                  "Bluesky": ("Replies on Bluesky, the author's threads and most liked first", "No replies on Bluesky yet"),
                  "Mastodon": ("Replies on Mastodon, the author's threads and most liked first", "No replies on Mastodon yet")}
 
@@ -3990,12 +4030,15 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     reddit = reddit_post_ref(item.get("link"))
     if reddit:
         return load_reddit_comments(item, reddit, fetch, image_fetch), False
+    hacker_news = hn_item_ref(item)
+    if hacker_news:
+        return load_hn_comments(item, hacker_news, image_fetch=image_fetch), False
     bluesky, mastodon = bluesky_post_ref(item.get("link")), mastodon_post_ref(item.get("link"))
     if bluesky or mastodon:
         return load_fediverse_replies(item, bluesky, mastodon, image_fetch=image_fetch), False
     ref = x_post_ref(item.get("link"))
     if not ref:
-        raise ValueError("only X, Reddit, Bluesky and Mastodon posts have comments to show")
+        raise ValueError("only X, Reddit, Hacker News, Bluesky and Mastodon posts have comments to show")
     # JSON, not RSS: only JSON Feed keeps each reply's avatar and the post it answers
     url = f"{RSSHUB_BASE}/twitter/tweet/{ref[0]}/status/{ref[1]}?format=json&sorted=false"
     try:
@@ -4028,6 +4071,22 @@ def load_reddit_comments(item, ref, fetch=download, image_fetch=download_limited
     except Exception as error:
         raise ValueError(fetch_error(error, url)) from None
     return store_replies(item, threads, author, "Reddit", image_fetch)
+
+
+def load_hn_comments(item, story, fetch=download_public, image_fetch=download_limited):
+    """Comments from Algolia's public Hacker News API, ranked by Hacker News's own API; without that ranking they
+    keep Algolia's oldest-first order."""
+    url = f"https://hn.algolia.com/api/v1/items/{story}"
+    try:
+        _, _, data = fetch(url, MAX_FEED_BYTES)
+        try:
+            ranked = json.loads(fetch(f"https://hacker-news.firebaseio.com/v0/item/{story}.json", MAX_FEED_BYTES)[2]).get("kids") or []
+        except Exception:
+            ranked = []
+        author, threads = parse_hn_comments(data, ranked)
+    except Exception as error:
+        raise ValueError(fetch_error(error, url)) from None
+    return store_replies(item, threads, author, "Hacker News", image_fetch)
 
 
 def load_fediverse_replies(item, bluesky, mastodon, fetch=download_public, image_fetch=download_limited):
