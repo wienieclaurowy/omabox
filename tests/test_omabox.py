@@ -1,6 +1,7 @@
 import argparse
 import codecs
 import contextlib
+import html
 import http.server
 import importlib.machinery
 import importlib.util
@@ -325,6 +326,25 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(ask["html"].endswith('<p><a href="https://news.ycombinator.com/item?id=4101">Discussion on Hacker News</a></p>'))
         mastodon = {"name": "Tidepool", "url": "https://mastodon.example/@tidepool.rss"}
         self.assertFalse(omabox.is_hnrss(mastodon["url"]))
+
+    def test_reddit_posts_end_with_one_link_line(self):
+        gathered = omabox.gather_source(omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json"),
+                                        {"name": "r/lanterns", "url": "https://www.reddit.com/r/lanterns/.rss"},
+                                        "2026-09-27T08:00:00Z", get=lambda url, cached: (REDDIT_FEED, {}))
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gathered.store(state)
+        link, own = sorted(state["items"], key=lambda item: item["title"])
+        for item in (link, own):
+            self.assertNotIn("submitted by", item["html"])
+            self.assertNotIn("[comments]", item["html"])
+        self.assertTrue(link["html"].endswith(
+            '<p>u/wickmaker · <a href="https://lantern.example/guide">lantern.example</a>'
+            ' · <a href="https://www.reddit.com/r/lanterns/comments/1ab2/a_guide/">Discussion on Reddit</a></p>'))
+        self.assertTrue(own["html"].startswith("<div><p>Which wick lasts longest?</p>"))
+        self.assertTrue(own["html"].endswith(
+            '<p>u/emberfield · <a href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/">Discussion on Reddit</a></p>'))
+        self.assertEqual(omabox.reddit_entry({"html": "<p>no footer</p>"}), {"html": "<p>no footer</p>"})
 
     def test_version_of(self):
         self.assertEqual(omabox.version_of("v4.0.4"), "4.0.4")
@@ -2965,6 +2985,25 @@ def reply_entry(handle, status, name, text, answers=None, avatar="", published="
 
 # X's order (RSSHub asked not to sort): the post, a thread its author answered, a promoted post, a thread a quoting
 # reply joins, a repeat, and a post the focal one answers.
+def reddit_footer(user, target, comments):
+    return (f'&#32; submitted by &#32; <a href="https://www.reddit.com/user/{user}"> /u/{user} </a> <br/> '
+            f'<span><a href="{target}">[link]</a></span> &#32; <span><a href="{comments}">[comments]</a></span>')
+
+
+REDDIT_FEED = ("""<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>lanterns</title>
+<entry><id>t3_1ab2</id><title>A guide to wicks</title><updated>2026-09-27T07:00:00+00:00</updated>
+<link href="https://www.reddit.com/r/lanterns/comments/1ab2/a_guide/"/><content type="html">"""
+               + html.escape(reddit_footer("wickmaker", "https://lantern.example/guide",
+                                           "https://www.reddit.com/r/lanterns/comments/1ab2/a_guide/"))
+               + """</content></entry>
+<entry><id>t3_1ab3</id><title>Which wick?</title><updated>2026-09-27T06:00:00+00:00</updated>
+<link href="https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/"/><content type="html">"""
+               + html.escape('<!-- SC_OFF --><div class="md"><p>Which wick lasts longest?</p></div><!-- SC_ON --> '
+                             + reddit_footer("emberfield", "https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/",
+                                             "https://www.reddit.com/r/lanterns/comments/1ab3/which_wick/"))
+               + "</content></entry></feed>").encode()
+
+
 REPLIES_FEED = json.dumps({"version": "https://jsonfeed.org/version/1.1", "items": [
     reply_entry("rowanvale", 100, "Rowan", "Thrilled to announce", avatar="https://pbs.twimg.com/profile_images/9/rowanvale_normal.jpg",
                 published="2026-09-26T16:13:00.000Z"),

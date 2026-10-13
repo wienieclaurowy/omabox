@@ -2274,6 +2274,28 @@ def hn_entry(entry):
     return {**entry, "html": body + (f"<p>{' · '.join(links)}</p>" if links else "")}
 
 
+REDDIT_FOOTER_RE = re.compile(
+    r'(?:\s|&#32;)*submitted by(?:\s|&#32;)*<a href="[^"]*">\s*/?u/([\w-]+)\s*</a>\s*(?:<br\s*/?>)?\s*'
+    r'(?:<span>\s*)?<a href="([^"]*)">\[link\]</a>(?:\s*</span>)?(?:\s|&#32;)*'
+    r'(?:<span>\s*)?<a href="([^"]*)">\[comments\]</a>(?:\s*</span>)?', re.I)
+
+
+def reddit_entry(entry):
+    """Reddit ends each body with "submitted by /u/name [link] [comments]". It becomes one line like Hacker News's:
+    the poster, the linked site when the post links away from Reddit, then the discussion."""
+    footer = REDDIT_FOOTER_RE.search(entry["html"])
+    if not footer:
+        return entry
+    user, target, comments = footer.groups()
+    host = (urllib.parse.urlparse(html.unescape(target)).hostname or "").lower()
+    links = [f"u/{html.escape(user)}"]
+    if host and not reddit_host(target) and host != "redd.it" and not host.endswith(".redd.it"):
+        links.append(f'<a href="{target}">{html.escape(host.removeprefix("www."))}</a>')
+    links.append(f'<a href="{comments}">Discussion on Reddit</a>')
+    body = entry["html"][:footer.start()] + entry["html"][footer.end():]
+    return {**entry, "html": body + f"<p>{' · '.join(links)}</p>"}
+
+
 class FeedLinkFinder(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -2841,6 +2863,8 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         entries = list(parse_x_feed(data) if x_feed else parse_bluesky(data) if bluesky else parse_feed(data))
         if is_hnrss(url):
             entries = [hn_entry(entry) for entry in entries]
+        elif reddit_host(url):
+            entries = [reddit_entry(entry) for entry in entries]
         store = prepare_merge(snapshot, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or url),
                               mentions_base=mentions, cards=True, muted=muted, article=article)
         looks = {"icons": {name: snapshot["icons"].get(name, {})}, "profiles": {}}
