@@ -40,8 +40,9 @@ If you want every post as soon as it appears, a regular feed reader will suit yo
   channels, Bluesky, Mastodon, Reddit, Hacker News and, optionally, X profiles. Paste a page address and
   Omabox finds the feed.
 - **A reader.** Posts open in the panel with pictures, link previews and videos (played in your video
-  player). Feeds that only send a summary can fetch the whole article. Posts from X, Reddit, Hacker News,
-  Bluesky and Mastodon show their comments under them.
+  player; YouTube, Reddit and Bluesky videos in `mpv`). Feeds that only send a summary can fetch the whole
+  article, and posts that are only a link fetch it by themselves. Posts from X, Reddit, Hacker News, Bluesky
+  and Mastodon show their comments under them.
 - **Calm tools.** Snooze a post until later or tomorrow, keep a read-later list, mute words or patterns per
   source, search everything, and mark old posts read in one step.
 - **Notification history.** Omarchy keeps its last 10 notifications; Omabox keeps every one for 7 days, with
@@ -56,7 +57,8 @@ If you want every post as soon as it appears, a regular feed reader will suit yo
 Optional:
 
 - a video player and a picture viewer: Omabox opens your default ones, else `mpv` and `imv` (both come
-  with Omarchy)
+  with Omarchy). YouTube, Reddit and Bluesky videos always play in `mpv`, YouTube through `yt-dlp` (also
+  part of Omarchy).
 - `wl-copy` to copy links
 - `podman` or `docker` for X sources (see [X sources](#x-sources))
 
