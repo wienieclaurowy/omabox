@@ -168,7 +168,7 @@ Panel {
   // size on taller screens. `panel` is the KeyboardPanel below, whose availableCardHeight is the screen minus bar and gaps.
   readonly property real bodyMaxHeight: panel.availableCardHeight > 0 ? panel.availableCardHeight - panel.verticalContentInset : 1e6
   // What the body shows under the lists.
-  readonly property real tailHeight: [listSeparator, statusLine, confirmRow, hintsFlow]
+  readonly property real tailHeight: [statusLine, confirmRow, hintsFlow]
     .reduce(function(sum, item) { return sum + (item.visible ? item.height + body.spacing : 0) }, 0)
 
   function listHeight(list) {
@@ -1518,7 +1518,36 @@ Panel {
             }
           }
 
+          Text {
+            id: headerStatus
+            readonly property bool failed: root.view === "feed" && root.hostWidget !== null && root.hostWidget.tickProblem !== ""
+            anchors.left: tabRow.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: toolRow.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignRight
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            text: root.view === "feed"
+              ? (root.errorSources.length > 0
+                ? Model.deliveredLabel(root.feedState, root.now, "", hostWidget ? hostWidget.tickProblem : "")
+                  + "\nfailed: " + root.errorSources.join(", ")
+                : Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
+                  .split("  ·  ").join("\n"))
+              : root.view === "sources" && root.sourcesLoaded
+                ? root.sources.length + (root.sources.length === 1 ? " source" : " sources")
+              : ""
+            color: failed ? Color.urgent : root.faint
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1
+          }
+
           Row {
+            id: toolRow
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
@@ -2087,15 +2116,8 @@ Panel {
           delegate: sourceRow
         }
 
-        PanelSeparator {
-          id: listSeparator
-          width: parent.width
-          foreground: root.fg
-        }
-
         Text {
           id: statusLine
-          readonly property bool failed: root.view === "feed" && root.hostWidget !== null && root.hostWidget.tickProblem !== ""
           // Messages ("Copied …", CLI answers) take this line for a while instead of a row above the list, which
           // pushed the list down and back. A space keeps the line's height while there is nothing to say yet.
           width: parent.width
@@ -2108,19 +2130,14 @@ Panel {
             : root.busy ? "Looking…"
             : root.message !== "" ? root.message
             : root.fetching ? "Fetching new posts…"
-            : root.view === "feed" && !failed && root.recoveredFile !== ""
+            : root.view === "feed" && !headerStatus.failed && root.recoveredFile !== ""
               ? "Omabox could not read its saved posts and started over. The old file is " + root.stateDirLabel + "/"
                 + root.recoveredFile + "."
-            : root.view === "feed"
-              ? Model.deliveredLabel(root.feedState, root.now, root.deliveryTime, hostWidget ? hostWidget.tickProblem : "")
-                + (root.errorSources.length > 0 ? "  ·  failed: " + root.errorSources.join(", ") : "")
-            : root.view === "notifications" ? (root.notificationsLoaded ? root.notifications.length + " from the last 7 days" : " ")
-            : root.sourcesLoaded ? root.sources.length + (root.sources.length === 1 ? " source" : " sources") : " "
+            : " "
           color: root.confirming || root.catchupOpen ? root.fg
             : root.busy ? root.faint
             : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
             : root.fetching ? root.faint
-            : failed ? Color.urgent
             : root.view === "feed" && root.recoveredFile !== "" ? root.dim : root.faint
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
