@@ -311,6 +311,25 @@ class ParseTest(unittest.TestCase):
         self.assertIn("<3 the bread stall is open!<br><br>It closes", next(omabox.parse_feed(hearts))["html"])
         self.assertEqual(next(omabox.parse_feed(RSS_FEED))["html"].count("<br>"), 0)
 
+    def test_media_content_pictures_join_a_body_without_pictures(self):
+        feed = b"""<?xml version="1.0"?><rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+        <item><guid>1</guid><link>https://social.example/@lantern/1</link><description>&lt;p&gt;Evening walk&lt;/p&gt;</description>
+          <media:content url="https://files.social.example/1.jpg" type="image/jpeg" medium="image">
+            <media:description type="plain">A cat on a path</media:description></media:content>
+          <media:content url="https://files.social.example/2.mp4" type="video/mp4"/>
+          <media:content url="https://files.social.example/media_attachments/files/117/377/970/original/d0a6.mp4"
+            type="video/mp4" medium="image"/></item>
+        <item><guid>2</guid><link>https://blog.example/2</link>
+          <description>&lt;p&gt;&lt;img src="https://blog.example/lead.jpg"&gt;Post&lt;/p&gt;</description>
+          <media:content url="https://blog.example/lead-large.jpg" medium="image"/></item>
+        </channel></rss>"""
+        walk, post = omabox.parse_feed(feed)
+        self.assertEqual(walk["html"], '<p>Evening walk</p><img src="https://files.social.example/1.jpg" alt="A cat on a path">'
+                                       '<video src="https://files.social.example/2.mp4" poster=""></video>'
+                                       '<video src="https://files.social.example/media_attachments/files/117/377/970/original/d0a6.mp4" '
+                                       'poster="https://files.social.example/media_attachments/files/117/377/970/small/d0a6.png"></video>')
+        self.assertNotIn("lead-large", post["html"])
+
     def test_hacker_news_posts_show_no_counts_and_one_link_line(self):
         gathered = omabox.gather_source(omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json"),
                                         {"name": "Hacker News", "url": "https://hnrss.org/frontpage"},

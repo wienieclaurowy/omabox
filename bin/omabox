@@ -1048,6 +1048,28 @@ def media_group_html(entry, link=""):
     return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
 
 
+def media_content_html(item):
+    """An RSS item's media:content pictures and videos (alone or in a media:group) as img and video tags."""
+    out = []
+    for media in item.findall(MEDIA + "content") + item.findall(f"{MEDIA}group/{MEDIA}content"):
+        url = media.get("url", "")
+        # the MIME type first: Mastodon marks its videos medium="image"
+        kind = (media.get("type", "").split("/")[0] or media.get("medium") or "").lower()
+        if not url.startswith(("https://", "http://")):
+            continue
+        if kind == "image":
+            alt = html.escape(media.findtext(MEDIA + "description") or "", quote=True)
+            out.append(f'<img src="{html.escape(url, quote=True)}" alt="{alt}">')
+        elif kind == "video":
+            # Mastodon keeps a video's preview at small/<name>.png beside original/<name>.mp4; elsewhere no poster
+            poster = MASTODON_ORIGINAL_RE.sub(r"/media_attachments/files/\1small/\2.png", url) if MASTODON_ORIGINAL_RE.search(url) else ""
+            out.append(f'<video src="{html.escape(url, quote=True)}" poster="{html.escape(poster, quote=True)}"></video>')
+    return "".join(out)
+
+
+MASTODON_ORIGINAL_RE = re.compile(r"/media_attachments/files/((?:\d{3}/)+)original/(\w+)\.\w+$")
+
+
 def with_guid(entry):
     """Entries with neither guid nor link get one from what they say, so each keeps its own item id."""
     if not entry["guid"]:
@@ -1088,13 +1110,18 @@ def parse_feed(data):
     for item in root.iter(ns + "item"):
         link = (item.findtext(ns + "link") or "").strip()
         body = item.findtext(RSS_CONTENT) or item.findtext(ns + "description") or ""
+        body = body if MARKUP_TAG_RE.search(body) else body.strip().replace("\n", "<br>")
+        # Mastodon sends a post's pictures and videos only as media:content; a body with its own pictures already
+        # shows them (blogs repeat their lead picture there)
+        if not re.search(r"<(?:img|video)\b", body, re.I):
+            body += media_content_html(item)
         yield with_guid({
             "guid": (item.findtext("guid") or item.get(RDF + "about") or link).strip(),
             "title": html.unescape(item.findtext(ns + "title") or "").strip(),
             "link": web_link(link),
             "published": iso_utc(item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date")),
             # tagless descriptions (Bluesky) are plain text whose line breaks matter
-            "html": body if MARKUP_TAG_RE.search(body) else body.strip().replace("\n", "<br>"),
+            "html": body,
         })
 
 
