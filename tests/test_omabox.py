@@ -2945,7 +2945,7 @@ class ViewerTest(unittest.TestCase):
     def test_default_mpv_keeps_the_post_order(self):
         with self.installed("mpv"):
             argv = omabox.player_argv(["u0", "u1"], 1, self.desktop("mpv --player-operation-mode=pseudo-gui -- %U"))
-        self.assertEqual(argv, ["mpv", "--playlist-start=1", "--ytdl=no", "--", "u0", "u1"])
+        self.assertEqual(argv, ["mpv", "--playlist-start=1", "--ytdl=no", "--access-references=no", "--", "u0", "u1"])
 
     def test_player_falls_back_to_mpv_then_none_when_the_default_app_is_gone(self):
         with self.installed("mpv"):
@@ -2998,7 +2998,7 @@ class ViewerTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.play([url])
 
-    def upstream(self, body):
+    def upstream(self, body, content_type="video/mp4"):
         """A local video host that honours Range like a CDN; returns its base URL."""
 
         class Host(http.server.BaseHTTPRequestHandler):
@@ -3011,7 +3011,7 @@ class ViewerTest(unittest.TestCase):
                 if ranged:
                     first, last, status = int(ranged[1]), int(ranged[2] or last), 206
                 self.send_response(status)
-                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(last - first + 1))
                 self.send_header("Set-Cookie", "tracker=1")
                 if ranged:
@@ -3023,7 +3023,7 @@ class ViewerTest(unittest.TestCase):
                 pass
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Host)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
@@ -3038,7 +3038,7 @@ class ViewerTest(unittest.TestCase):
             return error.code, error.headers, b""
 
     def test_relay_serves_each_video_with_ranges_for_seeking(self):
-        body = bytes(range(256)) * 40
+        body = b"\x00\x00\x00\x18ftypisom" + bytes(range(256)) * 40
         base = self.upstream(body)
         plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         local = omabox.start_relay([base + "/v.mp4", base + "/gone.mp4"], opener=plain)
@@ -3050,6 +3050,22 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual((status, headers["Content-Range"], data), (206, f"bytes 100-199/{len(body)}", body[100:200]))
         self.assertEqual(self.fetch(local[1])[0], 404)
         self.assertEqual(self.fetch(local[0].rsplit("/", 2)[0] + "/guess/0.mp4")[0], 404)
+
+    def test_relay_passes_media_files_only_never_playlists(self):
+        plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        lists = (b"#EXTM3U\nhttp://192.0.2.10/lan\n", b"[playlist]\nFile1=http://192.0.2.10/lan\n",
+                 b'<?xml version="1.0"?><MPD><BaseURL>http://192.0.2.10/lan</BaseURL></MPD>', b"http://192.0.2.10/lan\n")
+        for body in lists:
+            local = omabox.start_relay([self.upstream(body * 20) + "/v.mp4"], opener=plain)
+            self.assertEqual(self.fetch(local[0])[0], 415, body)
+            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[0], 415, body)
+        media = {"mp4": b"\x00\x00\x00\x18ftypisom", "webm": b"\x1a\x45\xdf\xa3", "ogg": b"OggS", "mp3": b"ID3\x04\x00"}
+        for name, start in media.items():
+            local = omabox.start_relay([self.upstream(start + bytes(400)) + "/v.mp4"], opener=plain)
+            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[:3:2], (206, bytes(len(start) + 360)), name)
+            self.assertEqual(self.fetch(local[0])[0], 200, name)
+        typed = omabox.start_relay([self.upstream(media["mp4"] + bytes(400), "audio/x-mpegurl") + "/v.mp4"], opener=plain)
+        self.assertEqual(self.fetch(typed[0])[0], 415)
 
     def test_relay_refuses_videos_on_the_lan(self):
         local = omabox.start_relay([self.upstream(b"secret") + "/v.mp4"])

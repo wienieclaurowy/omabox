@@ -2975,7 +2975,8 @@ def player_argv(urls, start, desktop_file=default_desktop_file):
     if argv and Path(argv[0]).name != "mpv":
         return argv
     if shutil.which("mpv"):
-        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--", *urls]
+        # no references: a file naming other files or addresses (a playlist, linked segments) plays nothing
+        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--access-references=no", "--", *urls]
     return None
 
 
@@ -4484,11 +4485,35 @@ def cmd_view(args):
 
 
 RELAY_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag")
+# Playlists and manifests name more addresses, which the player would dial itself; mpv reads them whatever the type says.
+PLAYLIST_TYPE_RE = re.compile(r"mpegurl|dash|mpd|xml|html|json|text/|scpls|asx|ms-asf|ms-wvx|ms-wax|realaudio|smil|xspf", re.I)
+MEDIA_HEAD_BYTES = 192
+MP4_BOXES = (b"ftyp", b"styp", b"moov", b"mdat", b"free", b"skip", b"wide")
+
+
+def media_head(data):
+    """True when data begins like one media file: MP4/MOV, WebM/Matroska, Ogg, FLAC, FLV, WAV/AVI, MPEG-TS or MP3.
+    Playlists and manifests are text and match none of them."""
+    if data[4:8] in MP4_BOXES or data[:4] in (b"\x1a\x45\xdf\xa3", b"OggS", b"fLaC", b"FLV\x01"):
+        return True
+    if data[:4] == b"RIFF" and data[8:12] in (b"WAVE", b"AVI "):
+        return True
+    if len(data) > 188 and data[0] == data[188] == 0x47:
+        return True
+    return data[:3] == b"ID3" or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+
+
+def read_head(response, size=MEDIA_HEAD_BYTES):
+    head = b""
+    while len(head) < size and (chunk := response.read(size - len(head))):
+        head += chunk
+    return head
 
 
 class VideoRelay(http.server.BaseHTTPRequestHandler):
     """Serves each video of a post on loopback, fetched through PUBLIC_OPENER: whichever player plays it never
-    dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking."""
+    dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking.
+    Only single media files pass (by type and by their first bytes), never a playlist naming other addresses."""
 
     def do_GET(self):
         self.relay(body=True)
@@ -4515,6 +4540,18 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
             self.send_error(502)
             return
         with response:
+            head = b""
+            try:
+                if PLAYLIST_TYPE_RE.search(response.headers.get("Content-Type", "")):
+                    raise ValueError("playlist")
+                if body:
+                    from_start = response.status == 200 or response.headers.get("Content-Range", "").startswith("bytes 0-")
+                    head = read_head(response) if from_start else b""
+                    if not (media_head(head) if from_start else self.media_file(url)):
+                        raise ValueError("not a media file")
+            except (OSError, ValueError):
+                self.send_error(415)
+                return
             self.send_response(response.status)
             for name in RELAY_HEADERS:
                 if response.headers.get(name):
@@ -4522,7 +4559,18 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             if body:
                 with contextlib.suppress(OSError):
+                    self.wfile.write(head)
                     shutil.copyfileobj(response, self.wfile, 65536)
+
+    def media_file(self, url):
+        """Whether the file at url begins like media, for a request from its middle; asked once per file."""
+        if url not in self.server.media:
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                           "Range": f"bytes=0-{MEDIA_HEAD_BYTES - 1}"})
+            with self.server.opener.open(request, timeout=15) as response:
+                self.server.media[url] = not PLAYLIST_TYPE_RE.search(response.headers.get("Content-Type", "")) \
+                    and media_head(read_head(response))
+        return self.server.media[url]
 
     def log_message(self, format, *args):
         pass
@@ -4533,7 +4581,7 @@ def start_relay(urls, opener=PUBLIC_OPENER):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), VideoRelay)
     token = secrets.token_urlsafe(16)
     paths = [f"/{token}/{index}{Path(urllib.parse.urlparse(url).path).suffix}" for index, url in enumerate(urls)]
-    server.videos, server.opener = dict(zip(paths, urls)), opener
+    server.videos, server.opener, server.media = dict(zip(paths, urls)), opener, {}
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return [f"http://127.0.0.1:{server.server_port}{path}" for path in paths]
 
