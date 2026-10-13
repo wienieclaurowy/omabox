@@ -229,6 +229,14 @@ The screenshots come from `python3 tools/screenshots/shots.py OUT-DIR feed:tokyo
 real panel with invented data in a second, sandboxed Quickshell for a few seconds, without touching your own
 shell, theme or Omabox data.
 
+## About this project
+
+Omabox is my first public project, and I'm still new to all of this. I built it with the help of AI.
+
+Every change goes through the test suite and a review before it is committed. There will still be rough edges
+I haven't run into yet, so if something breaks or feels wrong, please open an issue. I'll get to it as soon as
+I can, thanks!
+
 ## License
 
 [MIT](LICENSE)
