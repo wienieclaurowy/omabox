@@ -179,6 +179,16 @@ Omabox has no telemetry and no account. It talks only to the feeds you add, to t
 and articles are never fetched from addresses on your local network, so a feed cannot use Omabox to reach your
 router or other machines.
 
+Opening a post can also make requests of its own, and each one shows that service your IP address and the post
+you are reading:
+
+- **Comments** load when a post stays open: from Reddit, from Algolia's public Hacker News API and Hacker
+  News's own API (hosted on Google's Firebase), from Bluesky's public API, from the Mastodon server that hosts
+  the post, and for X through the local RSSHub container. None of them needs an account.
+- **Articles** load by themselves for posts that are only a link, such as most Hacker News posts, so the linked
+  site sees the visit as soon as you open the post.
+- **Videos** from YouTube, Reddit and Bluesky play in `mpv` straight from those sites when you press play.
+
 The notification history keeps the text of your notifications, which can include sign-in codes, for 7 days in
 `~/.local/state/omabox/notifications`. `X` in the Notifications view clears it.
 
