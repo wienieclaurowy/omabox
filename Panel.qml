@@ -467,10 +467,12 @@ Panel {
 
   // The note shows once wl-copy answered, so a missing or failing wl-copy is reported instead of "Copied". wl-copy forks
   // a child that serves the clipboard; its output goes to /dev/null so that child holds none of this Process's pipes.
+  // The text goes through stdin, never argv: argv is readable by every local user and notifications hold sign-in codes.
   function copyText(text, done) {
     if (copyProc.running) return
     copyProc.done = done
-    copyProc.command = ["bash", "-c", "command -v wl-copy >/dev/null || exit 127; exec wl-copy -- \"$1\" >/dev/null 2>&1", "--", text]
+    copyProc.text = text
+    copyProc.stdinEnabled = true
     copyProc.running = true
   }
 
@@ -1281,6 +1283,14 @@ Panel {
   Process {
     id: copyProc
     property string done: ""
+    property string text: ""
+    command: ["bash", "-c", "command -v wl-copy >/dev/null || exit 127; exec wl-copy --type 'text/plain;charset=utf-8' >/dev/null 2>&1"]
+    // Turning stdin off closes it, the EOF wl-copy waits for.
+    onStarted: {
+      write(text)
+      text = ""
+      stdinEnabled = false
+    }
     onExited: function(code) {
       if (code === 0) {
         root.note(done)
