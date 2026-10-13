@@ -279,7 +279,8 @@ class ParseTest(unittest.TestCase):
     def test_youtube_entry_gets_thumbnail_and_description(self):
         (entry,) = omabox.parse_feed(YOUTUBE_FEED)
         self.assertEqual(entry["link"], "https://www.youtube.com/watch?v=Zq3vKe8TbWo")
-        self.assertTrue(entry["html"].startswith('<img src="https://i2.ytimg.com/vi/Zq3vKe8TbWo/hqdefault.jpg">'))
+        self.assertTrue(entry["html"].startswith('<video src="https://www.youtube.com/watch?v=Zq3vKe8TbWo" '
+                                                 'poster="https://i2.ytimg.com/vi/Zq3vKe8TbWo/hqdefault.jpg"></video>'))
         self.assertIn("<p>Think of a hand tool &lt;any&gt; at all.<br>We made one.</p><p>Discuss", entry["html"])
 
     def test_youtube_thumbnail_goes_through_the_image_cache(self):
@@ -289,7 +290,8 @@ class ParseTest(unittest.TestCase):
         omabox.merge(state, "Quarry", list(omabox.parse_feed(YOUTUBE_FEED)), "2026-09-27T08:00:00Z",
                      lambda entry: omabox.ImageFetcher(entry["link"], fetch, directory))
         (item,) = state["items"]
-        self.assertIn('<img src="omabox-img:', item["html"])
+        self.assertTrue(item["html"].startswith('<p><a href="https://www.youtube.com/watch?v=Zq3vKe8TbWo">'
+                                                '<img src="omabox-poster:'))
         self.assertIn('width="480" height="360"', item["html"])
         self.assertTrue(item["excerpt"].startswith("Think of a hand tool <any> at all."))
         self.assertIn('<a href="https://forum.example/topic/1643100/">', item["html"])
@@ -2594,7 +2596,7 @@ class ViewerTest(unittest.TestCase):
     PATHS = ["/c/a.png", "/c/b.jpg", "/c/c.gif"]
     URLS = ["https://video.twimg.com/a.mp4", "https://video.twimg.com/b.mp4"]
 
-    def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None):
+    def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None, youtube_players=None):
         """cmd_play against a fake player whose window shows after window_after looks and closes after
         window_gone_after (default: the next look); exits: poll() result."""
         launched, looks = [], []
@@ -2630,7 +2632,7 @@ class ViewerTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), mock.patch.dict(omabox.os.environ, {"http_proxy": "http://192.0.2.1:3128"}):
             omabox.cmd_play(argparse.Namespace(urls=urls, start=start), run, windows, poll_every=0, wait_seconds=5,
                             relay=relay, focus=lambda address: launched.append("focus " + address),
-                            players=players or mpv_only)
+                            players=players or mpv_only, youtube_players=youtube_players or mpv_only)
         self.looks = len(looks)
         return launched, out.getvalue()
 
@@ -2655,6 +2657,20 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual(out, "opened\n")
         self.assertEqual(launched[1:], ["focus 0xplayer", "waited"])
         self.assertEqual(self.looks, 7)
+
+    def test_youtube_videos_go_to_mpv_as_watch_pages_with_the_proxy_kept(self):
+        urls = ["https://www.youtube.com/watch?v=Zq3vKe8TbWo", "https://www.youtube.com/shorts/Ab3vKe8TbW_"]
+        launched, out = self.play(urls, start=1, window_after=3)
+        self.assertEqual(launched[0], ["mpv", "--playlist-start=1", "--"] + urls)
+        self.assertEqual(self.env["http_proxy"], "http://192.0.2.1:3128")
+        with self.assertRaises(SystemExit) as caught:
+            self.play(urls, youtube_players=lambda urls, start: None)
+        self.assertIn("need mpv and yt-dlp", str(caught.exception.code))
+        with self.installed("mpv"):
+            self.assertIsNone(omabox.youtube_player_argv(urls, 0))
+        with self.installed("mpv", "yt-dlp"):
+            self.assertEqual(omabox.youtube_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--"] + urls)
+        self.assertFalse(omabox.youtube_video("https://www.youtube.com/channel/UC1234567890123456789012"))
 
     def test_play_without_a_player_says_so(self):
         with self.assertRaises(SystemExit) as caught:

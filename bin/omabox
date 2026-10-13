@@ -1033,14 +1033,18 @@ def paragraphs_html(text):
                    for part in re.split(r"\n\s*\n", text) if part.strip())
 
 
-def media_group_html(entry):
-    """YouTube entries carry no content, only media:group: a thumbnail and a plain-text description."""
+def media_group_html(entry, link=""):
+    """YouTube entries carry no content, only media:group: a thumbnail and a plain-text description. On a YouTube
+    video the thumbnail is the poster of a video whose file is the watch page, which omabox play hands to mpv."""
     group = entry.find(MEDIA + "group")
     if group is None:
         return ""
     thumbnail = group.find(MEDIA + "thumbnail")
-    url = thumbnail.get("url", "") if thumbnail is not None else ""
-    picture = f'<img src="{html.escape(url, quote=True)}">' if url else ""
+    url = html.escape(thumbnail.get("url", "") if thumbnail is not None else "", quote=True)
+    if url and youtube_video(link):
+        picture = f'<video src="{html.escape(link, quote=True)}" poster="{url}"></video>'
+    else:
+        picture = f'<img src="{url}">' if url else ""
     return picture + paragraphs_html(group.findtext(MEDIA + "description") or "")
 
 
@@ -1078,7 +1082,7 @@ def parse_feed(data):
                 "title": html.unescape(atom_text(entry, ATOM + "title")).strip(),
                 "link": web_link(link),
                 "published": iso_utc(atom_text(entry, ATOM + "published") or atom_text(entry, ATOM + "updated")),
-                "html": atom_text(entry, ATOM + "content") or atom_text(entry, ATOM + "summary") or media_group_html(entry),
+                "html": atom_text(entry, ATOM + "content") or atom_text(entry, ATOM + "summary") or media_group_html(entry, link),
             })
         return
     for item in root.iter(ns + "item"):
@@ -1602,7 +1606,7 @@ def ensure_profile(state, source, feed_data, fetch=download_limited, directory=N
 
 
 # Bumped when the stored html format changes; older items get their html rebuilt on the next fetch.
-MEDIA_VERSION = 10
+MEDIA_VERSION = 11
 
 
 def is_short_post(title, text):
@@ -2218,6 +2222,13 @@ def site_name(feed_url):
     return None
 
 
+YOUTUBE_VIDEO_RE = re.compile(r"^https://(?:www\.|m\.)?youtube\.com/(?:watch\?v=|shorts/)[\w-]{11}(?:[&?#]|$)", re.I)
+
+
+def youtube_video(url):
+    return bool(YOUTUBE_VIDEO_RE.match(url or ""))
+
+
 def is_youtube(url):
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host == "youtube.com" or host.endswith(".youtube.com")
@@ -2793,6 +2804,13 @@ def player_argv(urls, start, desktop_file=default_desktop_file):
         return argv
     if shutil.which("mpv"):
         return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--", *urls]
+    return None
+
+
+def youtube_player_argv(urls, start):
+    """mpv, which plays YouTube watch pages through yt-dlp; None without both. Other players cannot open them."""
+    if shutil.which("mpv") and shutil.which("yt-dlp"):
+        return ["mpv", f"--playlist-start={start}", "--", *urls]
     return None
 
 
@@ -4313,7 +4331,7 @@ def hold_focus(address, run=subprocess.run, seconds=1.5, every=0.1):
 
 
 def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.2, wait_seconds=30, relay=start_relay,
-             focus=hold_focus, players=player_argv):
+             focus=hold_focus, players=player_argv, youtube_players=youtube_player_argv):
     """Plays a post's videos in the default video player (else mpv) from the clicked one, through the loopback
     relay, and returns when the player's window closes. Prints "opened" once the window is up: X files take
     about half a second to start, and the panel stays on screen until then. Prints "no player" without one."""
@@ -4321,12 +4339,16 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     if not all(url.startswith("https://") for url in urls):
         sys.exit("refused: videos play from https addresses only")
     start = min(max(args.start, 0), len(urls) - 1)
-    argv = players(relay(urls), start)
+    # a watch page is no media file for the relay to pass on; mpv resolves it itself
+    youtube = all(youtube_video(url) for url in urls)
+    argv = youtube_players(urls, start) if youtube else players(relay(urls), start)
     if argv is None:
         print("no player", flush=True)
-        sys.exit("no video player: install mpv")
-    # the player reaches only the loopback relay, which a proxy from the environment could not reach
-    env = {key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+        sys.exit("no video player: YouTube videos need mpv and yt-dlp" if youtube else "no video player: install mpv")
+    # the player reaches only the loopback relay, which a proxy from the environment could not reach; mpv's yt-dlp
+    # goes to YouTube itself and keeps the proxy
+    env = dict(os.environ) if youtube else {
+        key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
     before = windows()
     try:
         player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
