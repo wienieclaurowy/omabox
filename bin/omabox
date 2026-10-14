@@ -539,10 +539,15 @@ BOILERPLATE_RE = re.compile(
     r"^\s*(download:|sha-?256|checksum|full changelog|you can upgrade existing machines|install on new machines)", re.I
 )
 CONTRIBUTORS_RE = re.compile(r"contributors", re.I)
+# (?<!\s) and (?<!<br>) start a match only where a run begins: tried from every position inside a long run of spaces,
+# a pattern opening with \s+ costs quadratic time.
 CREDIT_RE = re.compile(
-    r'(\s+by\s+<a href="[^"]*">@[\w.-]+</a>(?:(?:,\s*|\s+and\s+)<a href="[^"]*">@[\w.-]+</a>)*'
+    r'(?<!\s)(\s++by\s+<a href="[^"]*">@[\w.-]+</a>(?:(?:,\s*|\s+and\s+)<a href="[^"]*">@[\w.-]+</a>)*'
     r'(?:\s+in\s+<a href="[^"]*">[^<]*</a>)?)(?=\s*</li>)'
 )
+LEADING_BLANKS_RE = re.compile(r"\A(?:\s|<br>)++")
+TRAILING_BLANKS_RE = re.compile(r"(?<!\s)(?<!<br>)(?:\s|<br>)++$")
+TRAILING_BREAKS_RE = re.compile(r"(?<!\s)(?<!<br>)(?:\s*+<br>)++\s*+$")
 
 
 def strip_tags(markup):
@@ -998,7 +1003,6 @@ class NotAFeed(ValueError):
 
 
 XML_ENCODING_RE = re.compile(rb"""^<\?xml[^>]*?\bencoding\s*=\s*["']([A-Za-z][\w.:-]*)["']""")
-XML_RAW_RE = re.compile(r"(<!\[CDATA\[.*?\]\]>|<!--.*?-->)", re.S)
 ENTITY_REF_RE = re.compile(r"&(?:([A-Za-z][A-Za-z0-9]*);|(#[0-9]+;|#[xX][0-9A-Fa-f]+;))?")
 XML_ENTITIES = {"amp", "lt", "gt", "quot", "apos"}
 BOMS = ((codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
@@ -1043,8 +1047,30 @@ def repair_xml(text):
         value = html.entities.html5.get(name + ";")
         return "".join(f"&#{ord(char)};" for char in value) if value else f"&amp;{name};"
 
-    parts = XML_RAW_RE.split(text)
-    return "".join(part if index % 2 else ENTITY_REF_RE.sub(entity, part) for index, part in enumerate(parts))
+    return "".join(part if raw else ENTITY_REF_RE.sub(entity, part) for raw, part in xml_raw_split(text))
+
+
+XML_RAW_CLOSERS = {"<![CDATA[": "]]>", "<!--": "-->"}
+
+
+def xml_raw_split(text):
+    """(raw, part) pairs, raw for CDATA sections and comments. str.find, not a lazy regex: a regex retries every
+    unclosed opener up to the end of the text, quadratic in a feed of many."""
+    start, next_at = 0, {opener: text.find(opener) for opener in XML_RAW_CLOSERS}
+    while next_at := {opener: index for opener, index in next_at.items() if index >= 0}:
+        opener = min(next_at, key=next_at.get)
+        index = next_at[opener]
+        end = text.find(XML_RAW_CLOSERS[opener], index + len(opener))
+        if end < 0:
+            # no later one of this kind is closed either
+            del next_at[opener]
+            continue
+        end += len(XML_RAW_CLOSERS[opener])
+        yield False, text[start:index]
+        yield True, text[index:end]
+        start = end
+        next_at = {other: at if at >= start else text.find(other, start) for other, at in next_at.items()}
+    yield False, text[start:]
 
 
 def parse_xml(data):
@@ -1164,14 +1190,14 @@ def parse_feed(data):
 
 
 X_REPOST_HEAD_RE = re.compile(r"^RT\s+([^<]{1,50})<br>")
-X_QUOTE_RE = re.compile(r'(?:<hr\b[^>]*>\s*)?<div class="rsshub-quote">(.*)</div>\s*$', re.S)
+X_QUOTE_RE = re.compile(r'(?:<hr\b[^>]{0,200}>\s*+)?<div class="rsshub-quote">(.*)</div>\s*$', re.S)
 X_QUOTE_NAME_RE = re.compile(r"^([^<:]{1,50}):\s*")
 # RSSHub marks a reply with "Re " before its text, in the body and in the title (after a repost's "RT name: ")
 X_REPLY_MARK_RE = re.compile(r"^Re\s+")
 X_TITLE_REPLY_RE = re.compile(r"^((?:RT [^:]{1,50}:\s*)?)Re\s+(?:@\w{1,15}(?:\s+|$))*")
 X_REPLY_NAMES_RE = re.compile(r"^(?:@\w{1,15}(?:\s+|(?=<)|$))+")
 # the quoted author's avatar, there when the route asks for it (x_feed_url)
-X_QUOTE_AVATAR_RE = re.compile(r'^<img\b[^>]*\bsrc="(https://[^"]+)"[^>]*>')
+X_QUOTE_AVATAR_RE = re.compile(r'^<img\b[^>]{0,500}?\bsrc="(https://[^"]{1,2000})"[^>]{0,500}>')
 X_EPOCH_MS = 1288834974657
 
 
@@ -1197,7 +1223,7 @@ def reply_names(body):
 def drop_status_url(text, status):
     """The text without a link to post status at its end (before any media), as X shows a quoting post: RSSHub keeps
     a pasted link to the quoted post, which would otherwise get a link card repeating the quote card."""
-    return re.sub(rf"\s*https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/[\w/]{{1,30}}/status/{status}(?:[?#][^\s<]*)?"
+    return re.sub(rf"(?<!\s)\s*+https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/[\w/]{{1,30}}/status/{status}(?:[?#][^\s<]*)?"
                   r"(?=(?:\s|<br>)*(?:<(?:img|video|a)\b|$))", "", text, count=1)
 
 
@@ -1226,7 +1252,8 @@ def parse_x_feed(data):
             reply_to, body = reply_names(body[mark.end():])
             title = X_TITLE_REPLY_RE.sub(r"\1", title, count=1)
         quote = None
-        cut = X_QUOTE_RE.search(body)
+        # searched only when it can match: each opening div with no closing one at the end rescans the rest
+        cut = X_QUOTE_RE.search(body) if body.rstrip().endswith("</div>") else None
         if cut:
             body, inner = body[:cut.start()], cut.group(1)
             face = X_QUOTE_AVATAR_RE.match(inner)
@@ -1697,7 +1724,7 @@ def is_short_post(title, text):
         return bool(text)
     # RSSHub titles reposts "RT <name>: <text>" while the body starts with the text itself.
     head = re.sub(r"^RT [^:]{1,50}:\s*(?:Re\s+)?", "", title or "")
-    head = re.sub(r"[.…\s]+$", "", head)[:60]
+    head = re.sub(r"(?<![.…\s])[.…\s]++$", "", head)[:60]
     return len(head) >= 20 and head in text[:len(head) + 120]
 
 
@@ -1808,7 +1835,7 @@ def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base
         if entry.get("reply_to"):
             body = replying_to(entry["reply_to"], mentions_base) + body
         if entry.get("quote"):
-            body = re.sub(r"(?:\s*<br>)+\s*$", "", body)
+            body = TRAILING_BREAKS_RE.sub("", body)
             body += quote_markup(entry["quote"], images(entry) if images else None, mentions_base)
         title = excerpt(text, 110) if short else (entry["title"] or excerpt(text, 80) or "(untitled)")
         shaped = {"html": body, "excerpt": "" if short else excerpt(text), "summary": summary, "minutes": minutes,
@@ -2413,9 +2440,13 @@ def is_hnrss(url):
     return (urllib.parse.urlparse(url).hostname or "").lower() == "hnrss.org"
 
 
-HN_ARTICLE_RE = re.compile(r'\s*<p>\s*Article URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
-HN_COMMENTS_RE = re.compile(r'\s*<p>\s*Comments URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
-HN_COUNT_RE = re.compile(r"\s*<p>\s*(?:Points|# Comments):\s*\d+\s*</p>", re.I)
+HN_ARTICLE_RE = re.compile(r'(?<!\s)\s*+<p>\s*Article URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
+HN_COMMENTS_RE = re.compile(r'(?<!\s)\s*+<p>\s*Comments URL:\s*<a href="([^"]*)">[^<]*</a>\s*</p>', re.I)
+HN_COUNT_RE = re.compile(r"(?<!\s)\s*+<p>\s*(?:Points|# Comments):\s*\d+\s*</p>", re.I)
+
+# (?:\s*<hr\s*/?>)+$ read backwards: matched once at the start of the reversed body instead of tried from every
+# position, which costs quadratic time over a long run of rules.
+HN_TRAILING_RULES_REVERSED_RE = re.compile(r"(?:>/?\s*+rh<\s*+)++")
 
 
 def hn_entry(entry):
@@ -2424,7 +2455,9 @@ def hn_entry(entry):
     body = entry["html"]
     article, comments = HN_ARTICLE_RE.search(body), HN_COMMENTS_RE.search(body)
     body = HN_COUNT_RE.sub("", HN_COMMENTS_RE.sub("", HN_ARTICLE_RE.sub("", body)))
-    body = re.sub(r"(?:\s*<hr\s*/?>)+\s*$", "", body.strip())
+    body = body.strip()
+    rules = HN_TRAILING_RULES_REVERSED_RE.match(body[::-1])
+    body = body[:len(body) - rules.end()] if rules else body
     links = []
     if article:
         site = (urllib.parse.urlparse(html.unescape(article.group(1))).hostname or "").removeprefix("www.")
@@ -4242,7 +4275,7 @@ def reply_paragraphs(body, css):
     out, loose = [], []
 
     def flush():
-        text = re.sub(r"^(?:\s|<br>)+|(?:\s|<br>)+$", "", "".join(loose))
+        text = TRAILING_BLANKS_RE.sub("", LEADING_BLANKS_RE.sub("", "".join(loose)))
         if text:
             out.append(f'<p class="{css}">{text}</p>')
         loose.clear()

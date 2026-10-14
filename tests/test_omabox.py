@@ -2016,6 +2016,39 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertEqual([p.name for p in archive.iterdir()], [kept])
 
 
+class HostileRunsTest(unittest.TestCase):
+    """Long runs of spaces, breaks, rules or unclosed comments: each took minutes when a pattern was tried from every
+    position of the run; a linear pass takes well under a second."""
+    N = 100_000
+
+    def assertQuick(self, call):
+        started = time.monotonic()
+        call()
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_shaping_a_post_is_linear_in_its_runs(self):
+        n, state = self.N, {"items": [], **{key: {} for key in omabox.SOURCE_STATE_KEYS}}
+        entry = {"guid": "1", "title": "a" + " ." * n + "b", "link": "", "published": "2026-01-01T00:00:00Z",
+                 "html": "<ul><li>a" + " " * n + "b</li></ul>" + " <br>" * n + "c",
+                 "quote": {"name": "q", "handle": "q", "html": "q", "link": "https://x.com/q/status/1"}}
+        self.assertQuick(lambda: omabox.merge(state, "Tides", [entry], "2026-01-01T00:00:00Z"))
+        self.assertQuick(lambda: omabox.hn_entry({"html": "a" + " " * n + "<p>x</p>" + " <hr />" * n + "b"}))
+        self.assertQuick(lambda: omabox.reply_paragraphs("a" + "<br> " * n + "b", "reply"))
+        self.assertQuick(lambda: omabox.drop_status_url("a" + " " * n + "b", "123"))
+        self.assertQuick(lambda: omabox.repair_xml("<!--" * n + "<![CDATA[" * n))
+        feed = {"items": [{"id": "1", "content_html": "<hr " * n + '<div class="rsshub-quote">' * n}]}
+        self.assertQuick(lambda: list(omabox.parse_x_feed(json.dumps(feed).encode())))
+
+    def test_trailing_runs_still_go(self):
+        self.assertEqual(omabox.hn_entry({"html": "<p>Story</p> <hr/>\n<hr >  <hr>"})["html"], "<p>Story</p>")
+        self.assertEqual(omabox.reply_paragraphs("<br> a <br> b<br> ", "r"), '<p class="r">a <br> b</p>')
+        self.assertEqual(omabox.TRAILING_BREAKS_RE.sub("", "a <br>\n<br> "), "a")
+        self.assertEqual(omabox.TRAILING_BREAKS_RE.sub("", "a  "), "a  ")
+        self.assertEqual(list(omabox.xml_raw_split("a<!--x<![CDATA[y]]>--><![CDATA[z]]>b<!--")),
+                         [(False, "a"), (True, "<!--x<![CDATA[y]]>-->"), (False, ""), (True, "<![CDATA[z]]>"),
+                          (False, "b<!--")])
+
+
 class ShortPostTest(unittest.TestCase):
     def test_title_repeating_the_text_marks_a_short_post(self):
         text = "Glad to say that @tidewright now keeps the garden beds in order. Photos soon."
