@@ -2518,15 +2518,22 @@ def discovered_path(url):
     return DISCOVER_DIR / hashlib.sha1(url.encode()).hexdigest()[:20]
 
 
+def prune_discovered():
+    """Deletes the feeds discover kept that are past DISCOVER_SECONDS; every run does, so a feed looked up and not
+    added is gone minutes later rather than at the next discover."""
+    cutoff = time.time() - DISCOVER_SECONDS
+    with contextlib.suppress(OSError):
+        for old in DISCOVER_DIR.iterdir():
+            with contextlib.suppress(OSError):
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+
+
 def remember_feed(urls, data):
     """Keeps a feed discover downloaded for a few minutes. Adding from the panel runs discover, then add, which
     discovers and fetches: three requests in seconds, and Reddit answers the second with 429 Too Many Requests."""
     app_dir(DISCOVER_DIR)
-    cutoff = time.time() - DISCOVER_SECONDS
-    for old in DISCOVER_DIR.iterdir():
-        with contextlib.suppress(OSError):
-            if old.stat().st_mtime < cutoff:
-                old.unlink()
+    prune_discovered()
     for url in dict.fromkeys(urls):
         with open_private(discovered_path(url), mode="wb") as f:
             f.write(data)
@@ -5069,6 +5076,7 @@ def main(argv=None):
     # SIGTERM (logout, a stopped service) and SIGHUP must still run the finally blocks that stop the RSSHub container.
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, lambda number, frame: sys.exit(128 + number))
+    prune_discovered()
     try:
         args.func(args)
     except KeyboardInterrupt:

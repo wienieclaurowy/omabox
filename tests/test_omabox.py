@@ -900,6 +900,15 @@ class DiscoverTest(unittest.TestCase):
         omabox.discover(feed)
         self.assertEqual(self.requested, [feed, feed])
 
+    def test_any_run_drops_feeds_kept_past_their_minutes(self):
+        omabox.remember_feed(["https://a.example/feed", "https://b.example/feed"], RSS_FEED)
+        stale = time.time() - omabox.DISCOVER_SECONDS - 5
+        os.utime(omabox.discovered_path("https://a.example/feed"), (stale, stale))
+        with mock.patch.object(omabox, "cmd_list", lambda args: None):
+            omabox.main(["list"])
+        self.assertEqual(sorted(path.name for path in omabox.DISCOVER_DIR.iterdir()),
+                         [omabox.discovered_path("https://b.example/feed").name])
+
     def test_site_urls_map_to_their_feeds(self):
         cases = {
             "https://www.youtube.com/channel/UCq7rWm2Lk9vBfT4xNcD8sYe":
