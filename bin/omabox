@@ -1948,7 +1948,9 @@ def paused(state, now=None):
     return bool(until) and datetime.fromisoformat(until) > now
 
 
-NOTE_HISTORY_DIR = HOME / ".local/state/omarchy/notifications/history"
+# Omarchy keeps a notification in NOTE_POPUP_DIR while its popup shows, then moves it, same name, into history.
+NOTE_POPUP_DIR = HOME / ".local/state/omarchy/notifications"
+NOTE_HISTORY_DIR = NOTE_POPUP_DIR / "history"
 NOTE_ARCHIVE_DIR = STATE_PATH.parent / "notifications"
 NOTE_KEEP_DAYS = 7
 NOTE_NAME_RE = re.compile(r"^(\d{10,})-\d+\.json$")
@@ -4838,15 +4840,17 @@ def cmd_forget_notification(args):
     for name in args.names:
         if not NOTE_NAME_RE.match(name):
             sys.exit(f"not a notification file name: {name}")
-        (NOTE_ARCHIVE_DIR / name).unlink(missing_ok=True)
-        (NOTE_HISTORY_DIR / name).unlink(missing_ok=True)
+        # the popup's file too: Omarchy would move it into history later and the next archive would copy it back
+        for folder in (NOTE_ARCHIVE_DIR, NOTE_HISTORY_DIR, NOTE_POPUP_DIR):
+            (folder / name).unlink(missing_ok=True)
 
 
 def cmd_clear_notifications(args):
-    if NOTE_ARCHIVE_DIR.is_dir():
-        for path in NOTE_ARCHIVE_DIR.iterdir():
-            if NOTE_NAME_RE.match(path.name):
-                path.unlink(missing_ok=True)
+    for folder in (NOTE_ARCHIVE_DIR, NOTE_POPUP_DIR):
+        if folder.is_dir():
+            for path in folder.iterdir():
+                if NOTE_NAME_RE.match(path.name):
+                    path.unlink(missing_ok=True)
 
 
 def directory_size(path):

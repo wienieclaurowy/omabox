@@ -1991,6 +1991,31 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertEqual((archive / f"{stamp}-1.json").read_text(), '{"summary": "hi"}')
 
 
+    def test_a_cleared_popup_is_not_archived_again(self):
+        root = Path(tempfile.mkdtemp())
+        popup, archive = root / "popup", root / "archive"
+        history = popup / "history"
+        history.mkdir(parents=True)
+        archive.mkdir()
+        for name, path in (("NOTE_POPUP_DIR", popup), ("NOTE_HISTORY_DIR", history), ("NOTE_ARCHIVE_DIR", archive)):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        stamp = int(time.time() * 1000)
+        forgotten, cleared, kept = (f"{stamp}-{n}.json" for n in (1, 2, 3))
+        for name in (forgotten, cleared):
+            (popup / name).write_text('{"summary": "Sign-in code"}')
+        (popup / "notes.txt").write_text("not a notification")
+        (history / kept).write_text("{}")
+        omabox.archive_notifications(history, archive)
+        omabox.main(["forget-notification", forgotten])
+        self.assertEqual(sorted(p.name for p in popup.iterdir() if p.is_file()), [cleared, "notes.txt"])
+        omabox.main(["clear-notifications"])
+        self.assertEqual(sorted(p.name for p in popup.iterdir() if p.is_file()), ["notes.txt"])
+        omabox.archive_notifications(history, archive)
+        self.assertEqual([p.name for p in archive.iterdir()], [kept])
+
+
 class ShortPostTest(unittest.TestCase):
     def test_title_repeating_the_text_marks_a_short_post(self):
         text = "Glad to say that @tidewright now keeps the garden beds in order. Photos soon."
