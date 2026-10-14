@@ -385,8 +385,83 @@ PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandl
 # never through a proxy from the environment, which could not reach them.
 LAN_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects, PrivateHTTPHandler,
                                          PrivateHTTPSHandler)
-# Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route and the key
-LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects)
+PROC_NET_TCP = (Path("/proc/net/tcp"), Path("/proc/net/tcp6"))
+TCP_LISTEN = "0A"
+LOOPBACK_LISTEN_ADDRESSES = {ipaddress.ip_address(a) for a in ("127.0.0.1", "0.0.0.0", "::")}
+
+
+def proc_address(text):
+    """(address, port) of a /proc/net/tcp address field: 32-bit words in host byte order, then the hex port.
+    IPv4-mapped IPv6 addresses come back as IPv4."""
+    address, port = text.split(":")
+    raw = bytes.fromhex(address)
+    if sys.byteorder == "little":
+        raw = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+    ip = ipaddress.ip_address(raw)
+    return getattr(ip, "ipv4_mapped", None) or ip, int(port, 16)
+
+
+def tcp_sockets(tables=None):
+    """(local, remote, state, uid) of each TCP socket in this network namespace, as the kernel lists them for every
+    account: both ends of a loopback connection, and an accepted socket with its listener's uid."""
+    for table in tables or PROC_NET_TCP:
+        try:
+            lines = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) > 7:
+                yield proc_address(fields[1]), proc_address(fields[2]), fields[3], int(fields[7])
+
+
+def peer_uid(sock):
+    """uid of the account holding the other end of a loopback TCP connection, None when it is not listed."""
+    here, there = (sock.getsockname()[:2], sock.getpeername()[:2])
+    here, there = [(getattr(ip, "ipv4_mapped", None) or ip, port)
+                   for ip, port in ((ipaddress.ip_address(host), port) for host, port in (here, there))]
+    return next((uid for local, remote, _, uid in tcp_sockets() if local == there and remote == here), None)
+
+
+def listener_uids(port):
+    """uids of the listening sockets a connection to 127.0.0.1:port can reach."""
+    return {uid for (address, local_port), _, state, uid in tcp_sockets()
+            if state == TCP_LISTEN and local_port == port and address in LOOPBACK_LISTEN_ADDRESSES}
+
+
+def own_uid(uid):
+    """This account, or root, whose sockets no other account can take over."""
+    return uid in (os.getuid(), 0)
+
+
+class ForeignPeer(OSError):
+    pass
+
+
+class OwnedLoopbackConnection(http.client.HTTPConnection):
+    """Goes on only when the other end belongs to this account (rootless podman's pasta) or root (docker-proxy),
+    checked on every connection: another account may take the port once the container is gone."""
+
+    def connect(self):
+        super().connect()
+        uid = peer_uid(self.sock)
+        if uid is None or not own_uid(uid):
+            self.sock.close()
+            self.sock = None
+            if uid is None:
+                # the other end closed at once, as pasta does while the container starts: nothing is sent
+                raise ConnectionResetError(f"127.0.0.1:{self.port} closed the connection")
+            raise ForeignPeer(f"127.0.0.1:{self.port} is held by another account (uid {uid}), not Omabox's RSSHub")
+
+
+class OwnedLoopbackHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(OwnedLoopbackConnection, req)
+
+
+# Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route, and only to a
+# listener of this account or root.
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects, OwnedLoopbackHandler)
 
 
 DOWNLOAD_SECONDS = 30
@@ -2902,21 +2977,27 @@ def rsshub_live_base():
 
 
 def rsshub_keyed(url):
-    """The address a request for url goes to: an RSSHub route goes to Omabox's own container, with its key. Never
-    to a listener Omabox did not start: without the container running, an RSSHub route is refused."""
+    """The address a request for url goes to: an RSSHub route goes to Omabox's own container, with RSSHub's access
+    code for that path, md5(path + key), never the key itself. Never to a listener Omabox did not start: without
+    the container running, an RSSHub route is refused."""
     if not needs_rsshub(url):
         return url
     if not RSSHUB_KEY or not RSSHUB_LIVE_PORT:
         raise RuntimeError("Omabox's RSSHub container is not running")
     parts = urllib.parse.urlsplit(url)
-    url = urllib.parse.urlunsplit(("http", f"127.0.0.1:{RSSHUB_LIVE_PORT}", parts.path, parts.query, ""))
-    return url + ("&" if "?" in url else "?") + "key=" + RSSHUB_KEY
+    code = hashlib.md5((parts.path + RSSHUB_KEY).encode(), usedforsecurity=False).hexdigest()
+    query = f"{parts.query}&code={code}" if parts.query else f"code={code}"
+    return urllib.parse.urlunsplit(("http", f"127.0.0.1:{RSSHUB_LIVE_PORT}", parts.path, query, ""))
 
 
 def rsshub_up(timeout=2):
     try:
         with LOOPBACK_OPENER.open(rsshub_live_base() + "/", timeout=timeout):
             return True
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, ForeignPeer):
+            raise RuntimeError(str(error.reason)) from None
+        return False
     except Exception:
         return False
 
@@ -2930,28 +3011,14 @@ def wait_for_rsshub(seconds=90):
     raise RuntimeError(f"RSSHub did not answer on {rsshub_live_base()} within {seconds}s")
 
 
-def rsshub_status(path, timeout=10):
-    try:
-        with LOOPBACK_OPENER.open(rsshub_live_base() + path, timeout=timeout) as response:
-            return response.status
-    except urllib.error.HTTPError as error:
-        error.close()
-        return error.code
-
-
-def check_rsshub(status=rsshub_status):
-    """Raises unless the listener on the live port is the container started with this run's key: it must refuse a
-    wrong key and accept a code made from the real one (RSSHub's md5(path + key)), so the key itself is not sent."""
-    path = f"/omabox-check-{secrets.token_hex(8)}"
-    code = hashlib.md5((path + RSSHUB_KEY).encode(), usedforsecurity=False).hexdigest()
-    asks = [("wrong", f"{path}?key={secrets.token_urlsafe(24)}"), ("right", f"{path}?code={code}")]
-    secrets.SystemRandom().shuffle(asks)
-    try:
-        answers = {kind: status(query) for kind, query in asks}
-    except OSError as error:
-        raise RuntimeError(f"RSSHub check on {rsshub_live_base()} failed: {error}") from None
-    if answers["wrong"] != 403 or answers["right"] == 403 or not 200 <= answers["right"] < 500:
-        raise RuntimeError(f"the server on {rsshub_live_base()} is not Omabox's RSSHub container")
+def check_rsshub(uids=listener_uids):
+    """Raises unless what listens on the live port belongs to this account or root, as the container's port does
+    (podman's pasta, docker-proxy). Answers cannot prove it: a listener that knows no key can answer like RSSHub.
+    Every request checks its own connection again (OwnedLoopbackConnection)."""
+    found = uids(RSSHUB_LIVE_PORT)
+    if not found or not all(own_uid(uid) for uid in found):
+        raise RuntimeError(f"the server on {rsshub_live_base()} is not Omabox's RSSHub container "
+                           f"(listening accounts: {', '.join(map(str, sorted(found))) or 'none'})")
 
 
 def free_port():
