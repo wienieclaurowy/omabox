@@ -2965,7 +2965,8 @@ Panel {
           textFormat: Text.PlainText
           wrapMode: full ? Text.WordWrap : Text.NoWrap
           elide: full ? Text.ElideNone : Text.ElideRight
-          text: Model.sourceStatus(source.modelData, root.now) + "  ·  " + source.modelData.items + " posts"
+          text: Model.sourceStatus(source.modelData, root.now) + "  ·  " + source.modelData.items
+            + (source.modelData.items === 1 ? " post" : " posts")
             + Model.muteSummary(source.modelData)
           color: source.modelData.error ? Commons.Color.urgent : source.faintColor
           font.family: root.fontFamily
