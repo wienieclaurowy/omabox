@@ -2055,6 +2055,11 @@ def name_taken(sources, name):
     return any(s["name"] == name for s in sources)
 
 
+def source_name(text):
+    """A name as typed or found, never starting with "-": every command that takes a name would read it as an option."""
+    return " ".join(str(text).split()).lstrip("-").strip()
+
+
 def unique_name(sources, name):
     candidate, n = name, 2
     while name_taken(sources, candidate):
@@ -2087,7 +2092,7 @@ def opml_feeds(data):
     for outline in root.iter("outline"):
         url = next((value for key, value in outline.attrib.items() if key.lower() == "xmlurl"), "").strip()
         if url:
-            name = " ".join((outline.get("text") or outline.get("title") or "").split())
+            name = source_name(outline.get("text") or outline.get("title") or "")
             yield name, url, outline.get(f"{{{OMABOX_NS}}}cadence", "")
 
 
@@ -3517,7 +3522,7 @@ def cmd_add(args):
         found = discover(args.url)
     except Exception as error:
         sys.exit(shown(error_text(error)))
-    name = (args.name or found["title"]).strip()
+    name = source_name(args.name or found["title"]) or urllib.parse.urlparse(found["url"]).netloc
     if name_taken(sources, name):
         sys.exit(shown(f"a source named {name!r} already exists"))
     if any(s["url"] == found["url"] for s in sources):
@@ -3550,9 +3555,9 @@ def cmd_remove(args):
 
 def cmd_rename(args):
     sources = load_sources()
-    new = args.new.strip()
+    new = source_name(args.new)
     if not new:
-        sys.exit("name cannot be empty")
+        sys.exit("name cannot be empty or only dashes")
     if new != args.old and name_taken(sources, new):
         sys.exit(f"a source named {new!r} already exists")
     find_source(sources, args.old)["name"] = new

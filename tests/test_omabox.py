@@ -832,6 +832,15 @@ class OpmlTest(unittest.TestCase):
         self.assertEqual(sources[1], {"name": "Omarchy (2)", "url": "https://omarchy.org/feed.xml", "cadence": "daily"})
         self.assertEqual(existing[1:], [])
 
+    def test_names_never_start_with_a_dash(self):
+        opml = b"""<opml version="2.0"><body>
+          <outline text="--help" xmlUrl="https://a.example/feed"/>
+          <outline text="  -  " xmlUrl="https://b.example/feed"/>
+        </body></opml>"""
+        sources, added, _ = omabox.opml_import([], opml)
+        self.assertEqual([s["name"] for s in sources], ["help", "b.example"])
+        self.assertEqual(omabox.source_name("- Tide  report"), "Tide report")
+
     def test_nested_groups_are_flattened(self):
         opml = b"""<?xml version="1.0"?><opml version="2.0"><head><title>Reader</title></head><body>
           <outline text="Tech">

@@ -496,12 +496,12 @@ Panel {
       root.openingVideo = item.id + ":" + media.index
       // on stdin like runCli: which videos the user watches stays out of argv
       videoPlayer.command = [root.omaboxBin, "--args-on-stdin"]
-      videoPlayer.stdinArgs = JSON.stringify(["play", "--start", String(media.index)].concat(urls)) + "\n"
+      videoPlayer.stdinArgs = JSON.stringify(["play", "--start", String(media.index), "--"].concat(urls)) + "\n"
       videoPlayer.stdinEnabled = true
       videoPlayer.running = true
     } else if (media.kind === "picture" && paths.length > 0) {
       root.viewingMedia = true
-      imageViewer.command = [root.omaboxBin, "view", "--start", String(media.index)].concat(paths)
+      imageViewer.command = [root.omaboxBin, "view", "--start", String(media.index), "--"].concat(paths)
       imageViewer.running = true
     } else {
       note("No pictures or videos in this post.")
@@ -534,7 +534,7 @@ Panel {
   function fetchArticle(post) {
     root.articleLoadingId = post.id
     note("Fetching the full article…")
-    runCli(["article", post.id, "--json"], function(code, text) {
+    runCli(["article", "--json", "--", post.id], function(code, text) {
       root.articleLoadingId = ""
       var result = null
       try { result = JSON.parse(text) } catch (e) {}
@@ -582,8 +582,8 @@ Panel {
 
   function fetchReplies(post, refresh) {
     root.repliesLoadingId = post.id
-    repliesProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "replies", post.id, "--json"]
-      .concat(refresh ? ["--refresh"] : [])
+    repliesProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "replies", "--json"]
+      .concat(refresh ? ["--refresh"] : [], ["--", post.id])
     repliesProc.running = true
   }
 
@@ -696,7 +696,7 @@ Panel {
     var ids = Model.clearableIds(items)
     if (ids.length === 0) return
     hostWidget.override(ids, { read: true, cleared: true })
-    runCli(["clear-read"].concat(ids), function() {})
+    runCli(["clear-read", "--"].concat(ids), function() {})
     root.cursor = 0
     note("Cleared " + ids.length + (ids.length === 1 ? " read post." : " read posts."))
   }
@@ -712,7 +712,7 @@ Panel {
     if (!row || !row.file) return
     root.notifications = notifications.filter(function(other) { return other.file !== row.file })
     root.cursor = Math.min(root.cursor, Math.max(0, root.noteRows.length - 1))
-    runCli(["forget-notification", row.file], function() {})
+    runCli(["forget-notification", "--", row.file], function() {})
   }
 
   function runNotificationAction(index) {
@@ -854,7 +854,7 @@ Panel {
     if (url === "" || root.busy) return
     root.busy = true
     root.message = ""
-    runCli(["discover", "--json", url], function(code, text) {
+    runCli(["discover", "--json", "--", url], function(code, text) {
       root.busy = false
       if (root.mode !== "add-url") return
       var found = null
@@ -947,7 +947,7 @@ Panel {
     root.busy = true
     root.mode = "list"
     focusCatcher()
-    runCli(["add", root.discovered.url, "--name", name], afterSourceChange)
+    runCli(["add", "--name=" + name, "--", root.discovered.url], afterSourceChange)
   }
 
   function startRename() {
@@ -969,7 +969,7 @@ Panel {
     focusCatcher()
     var name = String(text || "").trim()
     if (!source || name === "" || name === source.name) return
-    runCli(["rename", source.name, name], afterSourceChange)
+    runCli(["rename", "--", source.name, name], afterSourceChange)
   }
 
   function startMute() {
@@ -1009,32 +1009,32 @@ Panel {
     if (picked !== "") {
       if (rule === picked) return
       if (rule === "") {
-        runCli(["unmute", source.name, "--", picked], afterMuteChange)
+        runCli(["unmute", "--", source.name, picked], afterMuteChange)
         return
       }
       // The old rule goes only once the new one was accepted, so a refused regex loses nothing.
-      runCli(["mute", source.name, "--", rule], function(code, text) {
+      runCli(["mute", "--", source.name, rule], function(code, text) {
         if (code !== 0) afterMuteChange(code, text)
-        else runCli(["unmute", source.name, "--", picked], function(code2, text2) { afterMuteChange(code2, text + "\n" + text2) })
+        else runCli(["unmute", "--", source.name, picked], function(code2, text2) { afterMuteChange(code2, text + "\n" + text2) })
       })
       return
     }
     if (rule === "") cancelTyping()
     else if (rules.indexOf(rule) >= 0) note("Already muted: " + rule)
-    else runCli(["mute", source.name, "--", rule], afterMuteChange)
+    else runCli(["mute", "--", source.name, rule], afterMuteChange)
   }
 
   function removeMute(rule) {
     if (!currentSource) return
     root.mutePick = -1
     muteField.text = ""
-    runCli(["unmute", currentSource.name, "--", rule], afterMuteChange)
+    runCli(["unmute", "--", currentSource.name, rule], afterMuteChange)
   }
 
   function toggleReposts() {
     var source = currentSource
     if (!source || !source.x_hidden) return
-    runCli([source.x_hidden.reposts ? "unmute" : "mute", source.name, "--reposts"], afterMuteChange)
+    runCli([source.x_hidden.reposts ? "unmute" : "mute", "--reposts", "--", source.name], afterMuteChange)
   }
 
   // Shows the CLI's answer ("muted: …", "removed 3 stored posts" or why a regex was refused).
@@ -1049,12 +1049,12 @@ Panel {
   }
 
   function setCadence(cadence) {
-    if (currentSource && cadence !== currentSource.cadence) runCli(["cadence", currentSource.name, cadence], afterSourceChange)
+    if (currentSource && cadence !== currentSource.cadence) runCli(["cadence", "--", currentSource.name, cadence], afterSourceChange)
   }
 
   function togglePause() {
     if (!currentSource) return
-    runCli(["cadence", currentSource.name, currentSource.cadence === "paused" ? "daily" : "paused"], afterSourceChange)
+    runCli(["cadence", "--", currentSource.name, currentSource.cadence === "paused" ? "daily" : "paused"], afterSourceChange)
   }
 
   function askRemove() {
@@ -1072,7 +1072,7 @@ Panel {
   function confirmRemove(yes) {
     var source = currentSource
     root.mode = "list"
-    if (yes && source) runCli(["remove", source.name], afterSourceChange)
+    if (yes && source) runCli(["remove", "--", source.name], afterSourceChange)
   }
 
   function cancelTyping() {
