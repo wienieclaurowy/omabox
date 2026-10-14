@@ -246,13 +246,14 @@ def public_host(url):
         return False
 
 
-def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
-    """socket.create_connection that dials only the addresses it checked. public_host alone is not enough: the
-    connection resolves the name again, and a short-TTL record can answer that second lookup with a LAN address."""
+def connect_checked(address, timeout, source_address, public):
+    """socket.create_connection that dials only the addresses it checked, all public or all not. A check of the name
+    before connecting is not enough: the connection resolves it again, and a short-TTL record can answer that second
+    lookup differently."""
     host, port = address
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not all(public_address(info[4][0]) for info in infos):
-        raise OSError(f"non-public address refused: {host}")
+    if not all(public_address(info[4][0]) == public for info in infos):
+        raise OSError(f"{'non-public' if public else 'public'} address refused: {host}")
     error = OSError(f"no address for {host}")
     for family, kind, proto, _, sockaddr in infos:
         sock = socket.socket(family, kind, proto)
@@ -269,6 +270,14 @@ def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_addre
     raise error
 
 
+def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    return connect_checked(address, timeout, source_address, public=True)
+
+
+def connect_private(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    return connect_checked(address, timeout, source_address, public=False)
+
+
 class PublicConnection:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -281,6 +290,30 @@ class PublicHTTPConnection(PublicConnection, http.client.HTTPConnection):
 
 class PublicHTTPSConnection(PublicConnection, http.client.HTTPSConnection):
     pass
+
+
+class PrivateConnection:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = connect_private
+
+
+class PrivateHTTPConnection(PrivateConnection, http.client.HTTPConnection):
+    pass
+
+
+class PrivateHTTPSConnection(PrivateConnection, http.client.HTTPSConnection):
+    pass
+
+
+class PrivateHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(PrivateHTTPConnection, req)
+
+
+class PrivateHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(PrivateHTTPSConnection, req, context=self._context)
 
 
 def proxied(req):
@@ -348,8 +381,10 @@ class PublicOnlyRedirects(WebRedirects):
 
 
 PUBLIC_OPENER = urllib.request.build_opener(PublicOnlyRedirects, PublicHTTPHandler, PublicHTTPSHandler)
-# feeds the user runs on this machine or the local network
-LAN_OPENER = urllib.request.build_opener(WebRedirects)
+# Feeds the user runs on this machine or the local network (local_source): local addresses only, at every hop, and
+# never through a proxy from the environment, which could not reach them.
+LAN_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects, PrivateHTTPHandler,
+                                         PrivateHTTPSHandler)
 # Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route and the key
 LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects)
 
@@ -2071,6 +2106,8 @@ SOURCES_HEADER = """\
 # X sources leave replies out; `omabox mute NAME --reposts` leaves reposts out too (a route parameter in the url).
 # full_text = true: new posts also get the whole article from their web page at delivery, for feeds that only carry
 # a summary (`omabox fulltext NAME on`). Not for X sources.
+# lan = true: a feed on this machine or the local network behind a name (add sets it). Without it only an address
+# like 192.168.1.20, localhost, a name without dots or one ending in .local, .lan, .home.arpa or .internal is local.
 # Written by omabox add/remove/rename/cadence/mute/unmute/fulltext/opml import and the panel's sources view: comments
 # here are not kept.
 """
@@ -2104,8 +2141,9 @@ def load_sources(path=None):
         mute = raw.get("mute", [])
         if not isinstance(mute, list) or not all(isinstance(rule, str) for rule in mute):
             raise ValueError(f"{raw['name']}: mute must be a list of strings")
-        if not isinstance(raw.get("full_text", False), bool):
-            raise ValueError(f"{raw['name']}: full_text must be true or false")
+        for key in ("full_text", "lan"):
+            if not isinstance(raw.get(key, False), bool):
+                raise ValueError(f"{raw['name']}: {key} must be true or false")
         raw.setdefault("cadence", "daily")
         sources.append(raw)
     return sources
@@ -2128,6 +2166,8 @@ def save_sources(sources, path=None):
             lines.append(f"mute = [{', '.join(toml_string(rule) for rule in source['mute'])}]")
         if source.get("full_text"):
             lines.append("full_text = true")
+        if source.get("lan"):
+            lines.append("lan = true")
         blocks.append("\n".join(lines))
     private_dir(path.parent)
     tmp = path.with_suffix(".tmp")
@@ -2270,26 +2310,41 @@ def private_target(url):
     return bool(infos) and not any(public_address(info[4][0]) for info in infos)
 
 
-def feed_opener(url):
-    """The opener for a feed download, http(s) only. A feed at a public address can redirect to public hosts only;
-    one on this machine or the local network, as self-hosted feeds are, anywhere."""
+LOCAL_NAME_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localhost")
+
+
+def local_url(url):
+    """Whether url names this machine or the local network by itself, with no lookup: a literal loopback, private or
+    link-local address, localhost, a single-label name or a special-use local suffix. No public DNS answers these."""
+    host = (urllib.parse.urlsplit(url).hostname or "").rstrip(".").lower()
+    if not host:
+        return False
+    with contextlib.suppress(ValueError):
+        ipaddress.ip_address(host)
+        return not public_address(host)
+    return host == "localhost" or "." not in host or host.endswith(LOCAL_NAME_SUFFIXES)
+
+
+def feed_opener(url, lan=False):
+    """The opener for a feed download, http(s) only. A feed the user added at a local address (local_url, or a source
+    with lan = true) gets LAN_OPENER; any other PUBLIC_OPENER, whatever its name resolves to later, so a public feed
+    cannot move itself onto the LAN by its DNS."""
     if not url.startswith(("https://", "http://")):
         raise ValueError(f"not a web address: {url}")
     if needs_rsshub(url):
         return LOOPBACK_OPENER
-    return LAN_OPENER if private_target(url) else PUBLIC_OPENER
+    return LAN_OPENER if lan or local_url(url) else PUBLIC_OPENER
 
 
-def linked_feed(typed, url):
-    """(url, opener) for a feed a page links to; refused when it points off the web or at Omabox's RSSHub. Behind
-    a public address the user typed, only public hosts: PUBLIC_OPENER checks again when it connects."""
+def linked_feed(lan, url):
+    """(url, lan) for the feed a page links to; refused when it points off the web or at Omabox's RSSHub. A page on
+    the local network (lan) may link a feed there; a public page only a public one."""
     if not url.startswith(("https://", "http://")) or needs_rsshub(url):
         raise ValueError(f"refused the page's feed link: {url}")
-    if private_target(typed):
-        return url, None
-    if private_target(url):
+    local = local_url(url) or private_target(url)
+    if local and not lan:
         raise ValueError(f"refused the page's feed link to a local address: {url}")
-    return url, PUBLIC_OPENER.open
+    return url, local
 
 
 def download(url, headers=None, opener=None):
@@ -2301,10 +2356,10 @@ def download(url, headers=None, opener=None):
         return final_url, feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
 
 
-def download_feed(url, cached=None, opener=None):
+def download_feed(url, cached=None, opener=None, lan=False):
     """Conditional GET: (body, validators), body None when the server answers 304 Not Modified."""
     cached = cached or {}
-    opener = opener or feed_opener(url).open
+    opener = opener or feed_opener(url, lan).open
     headers = {"User-Agent": USER_AGENT}
     # Validators stand for items built by one MEDIA_VERSION; after a bump the body is needed to rebuild them.
     if cached.get("media") == MEDIA_VERSION:
@@ -2610,8 +2665,10 @@ DISCOVER_DIR = CACHE_DIR / "discover"
 DISCOVER_SECONDS = 600
 
 
-def discovered_path(url):
-    return DISCOVER_DIR / hashlib.sha1(url.encode()).hexdigest()[:20]
+def discovered_path(url, lan=False):
+    # keyed by the opener too: a copy fetched from a public address must not stand in for a local one, or back
+    lan = lan or local_url(url)
+    return DISCOVER_DIR / hashlib.sha1(f"{'lan ' if lan else ''}{url}".encode()).hexdigest()[:20]
 
 
 def prune_discovered():
@@ -2625,33 +2682,33 @@ def prune_discovered():
                     old.unlink()
 
 
-def remember_feed(urls, data):
+def remember_feed(urls, data, lan=False):
     """Keeps a feed discover downloaded for a few minutes. Adding from the panel runs discover, then add, which
     discovers and fetches: three requests in seconds, and Reddit answers the second with 429 Too Many Requests."""
     app_dir(DISCOVER_DIR)
     prune_discovered()
     for url in dict.fromkeys(urls):
-        with open_private(discovered_path(url), mode="wb") as f:
+        with open_private(discovered_path(url, lan), mode="wb") as f:
             f.write(data)
 
 
-def remembered_feed(url):
-    path = discovered_path(url)
+def remembered_feed(url, lan=False):
+    path = discovered_path(url, lan)
     with contextlib.suppress(OSError):
         if time.time() - path.stat().st_mtime < DISCOVER_SECONDS:
             return path.read_bytes()
     return None
 
 
-def discover_download(url, headers=None, opener=None):
-    data = remembered_feed(url)
-    return (url, data) if data is not None else download(url, headers, opener=opener)
+def discover_download(url, headers=None, lan=False):
+    data = remembered_feed(url, lan)
+    return (url, data) if data is not None else download(url, headers, opener=feed_opener(url, lan).open)
 
 
-def discovered_or_download(url, cached=None):
+def discovered_or_download(url, cached=None, lan=False):
     """download_feed for add's first fetch, which reuses the feed discover just downloaded."""
-    data = remembered_feed(url)
-    return (data, {}) if data is not None else download_feed(url, cached)
+    data = remembered_feed(url, lan)
+    return (data, {}) if data is not None else download_feed(url, cached, lan=lan)
 
 
 def discover(url):
@@ -2676,26 +2733,29 @@ def discover(url):
         entries = list(parse_feed(data))
         name = x_route(x_feed)[0].rsplit("/", 1)[1]
         return {"url": x_feed, "title": f"@{name} on X", "latest": latest_entry(entries), "count": len(entries)}
-    final_url, data = discover_download(url, YOUTUBE_CONSENT if is_youtube(url) else None)
+    # The user typed this address now, so a local answer means a feed on their own network: LAN_OPENER, which
+    # dials local addresses only. add stores the answer (lan = true) rather than asking DNS again at each fetch.
+    lan = local_url(url) or private_target(url)
+    final_url, data = discover_download(url, YOUTUBE_CONSENT if is_youtube(url) else None, lan)
     try:
         entries = list(parse_feed(data))
         feed_url = final_url
-        remember_feed([url, final_url], data)
+        remember_feed([url, final_url], data, lan)
     except (ET.ParseError, NotAFeed):
         finder = FeedLinkFinder()
         finder.feed(data.decode("utf-8", "replace"))
         if not finder.links:
             raise ValueError("no feed found on that page")
-        linked, opener = linked_feed(url, urllib.parse.urljoin(final_url, finder.links[0]))
-        final_url, data = discover_download(linked, opener=opener)
+        linked, lan = linked_feed(lan, urllib.parse.urljoin(final_url, finder.links[0]))
+        final_url, data = discover_download(linked, lan=lan)
         feed_url = final_url
         entries = list(parse_feed(data))
-        remember_feed([linked, final_url], data)
+        remember_feed([linked, final_url], data, lan)
     title = site_name(feed_url) or feed_title(data)
     if github:
         title = f"{github.group(2)} releases"
     return {"url": feed_url, "title": title or urllib.parse.urlparse(feed_url).netloc, "latest": latest_entry(entries),
-            "count": len(entries)}
+            "count": len(entries), "lan": lan}
 
 
 # Pinned to the build whose X code was checked (2026-09-26, git 4b25ea7): its X routes only read. A new pin is a release.
@@ -3305,7 +3365,8 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
         x_feed = needs_rsshub(url) and "/twitter/" in url
         bluesky = bluesky_actor(url)
         address = x_feed_url(url) if x_feed else bluesky_feed_url(bluesky) if bluesky else url
-        data, validators = get(address, snapshot["http"].get(name))
+        cached = snapshot["http"].get(name)
+        data, validators = get(address, cached, lan=True) if source.get("lan") else get(address, cached)
         if data is None:
             def unchanged(state):
                 record_success(state, name, stamp)
@@ -3626,6 +3687,8 @@ def cmd_add(args):
     if any(s["url"] == found["url"] for s in sources):
         sys.exit(shown(f"already subscribed to {found['url']}"))
     source = {"name": name, "url": found["url"], "cadence": args.cadence}
+    if found.get("lan") and not local_url(found["url"]):
+        source["lan"] = True
     sources.append(source)
     save_sources(sources)
     print(f"added {shown(name)}: {shown(found['url'])}")

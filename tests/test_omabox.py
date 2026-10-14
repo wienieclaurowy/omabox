@@ -2614,6 +2614,57 @@ class FeedRedirectTest(unittest.TestCase):
         self.assertEqual(omabox.download(f"http://127.0.0.1:{other}/feed.xml")[1], RSS_FEED)
         self.assertEqual(self.lan_seen, ["/feed.xml", "/moved.xml"])
 
+    def resolving(self, answers):
+        real = socket.getaddrinfo
+
+        def resolve(host, port, *args, **kwargs):
+            if host not in answers:
+                return real(host, port, *args, **kwargs)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (answers[host], port or 0))]
+
+        return mock.patch.object(omabox.socket, "getaddrinfo", resolve)
+
+    def test_a_public_name_answering_a_local_address_stays_public(self):
+        source = {"name": "Tides", "url": f"http://feeds.example:{self.lan}/feed.xml", "cadence": "daily"}
+        with self.resolving({"feeds.example": "127.0.0.1"}):
+            self.assertIs(omabox.feed_opener(source["url"]), omabox.PUBLIC_OPENER)
+            gathered = omabox.gather_source({"items": [], "http": {}, "icons": {}, "profiles": {}}, source, omabox.now_iso())
+        self.assertIn("non-public address refused", gathered.error)
+        self.assertEqual(self.lan_seen, [])
+
+    def test_a_local_source_by_name_dials_local_addresses_only(self):
+        source = {"name": "Nas", "url": f"http://nas.example.net:{self.lan}/feed.xml", "cadence": "daily", "lan": True}
+        snapshot = {"items": [], "http": {}, "icons": {}, "profiles": {}}
+        with self.resolving({"nas.example.net": "127.0.0.1"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(omabox.gather_source(snapshot, source, omabox.now_iso()).error, "")
+        self.assertEqual(self.lan_seen, ["/feed.xml"])
+        with self.resolving({"nas.example.net": "127.0.0.2"}):
+            self.assertIn("public address refused", omabox.gather_source(snapshot, source, omabox.now_iso()).error)
+        self.assertEqual(self.lan_seen, ["/feed.xml"])
+
+    def test_local_urls_are_known_without_a_lookup(self):
+        shared = ipaddress.ip_network((0x64400000, 10))  # RFC 6598 shared address space
+        local = ["http://192.168.1.20/feed", "http://[::1]:8080/", "http://localhost/", "http://nas:8080/rss",
+                 f"http://{shared[7]}/", *(f"http://reader{suffix}./feed" for suffix in omabox.LOCAL_NAME_SUFFIXES)]
+        for url in local:
+            self.assertTrue(omabox.local_url(url), url)
+        for url in ("https://feeds.example/rss", "https://93.184.216.34/", "https://local.example/", "file:///x"):
+            self.assertFalse(omabox.local_url(url), url)
+
+    def test_adding_a_feed_by_a_local_name_marks_it(self):
+        root = Path(tempfile.mkdtemp())
+        for name, path in (("CONFIG_PATH", root / "sources.toml"), ("STATE_PATH", root / "items.json"),
+                           ("DISCOVER_DIR", root / "discover"), ("IMAGE_DIR", root / "images"), ("ICON_DIR", root / "icons")):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        omabox.save_sources([])
+        with self.resolving({"nas.example.net": "127.0.0.1"}), contextlib.redirect_stdout(io.StringIO()):
+            omabox.cmd_add(argparse.Namespace(url=f"http://nas.example.net:{self.lan}/feed.xml", name="Nas", cadence="daily"))
+            omabox.cmd_add(argparse.Namespace(url=f"http://127.0.0.1:{self.lan}/other.xml", name="Here", cadence="daily"))
+        self.assertEqual([source.get("lan") for source in omabox.load_sources()], [True, None])
+        self.assertEqual(self.lan_seen, ["/feed.xml", "/other.xml"])
+
     def test_only_web_addresses(self):
         path = Path(tempfile.mkdtemp()) / "feed.xml"
         path.write_bytes(RSS_FEED)
