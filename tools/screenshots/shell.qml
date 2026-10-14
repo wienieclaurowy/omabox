@@ -120,9 +120,7 @@ ShellRoot {
     id: typeUrl
     interval: 300
     onTriggered: {
-      var field = rig.findItem(widget.item.panelItem(), function(item) {
-        return item.placeholderText !== undefined && String(item.placeholderText).indexOf("YouTube") >= 0
-      })
+      var field = rig.findItem(widget.item.panelItem(), function(item) { return item.objectName === "urlField" })
       if (field) field.text = "https://x.com/someone"
     }
   }

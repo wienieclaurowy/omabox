@@ -3,7 +3,9 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-Row {
+// A Flow, so a language with long labels wraps onto a second line when given a width; without one it is a single row.
+// Children are not anchored (Flow forbids it); the cancel button sits in a box as tall as a choice.
+Flow {
   id: root
 
   // [{ key, label, choice, detail? }]; the key is only shown, the panel's key handler does the picking.
@@ -18,11 +20,11 @@ Row {
   spacing: Style.space(10)
 
   Repeater {
+    id: choiceRows
     model: root.choices
 
     Row {
       required property var modelData
-      anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(4)
 
       Text {
@@ -46,12 +48,18 @@ Row {
     }
   }
 
-  PanelActionButton {
-    anchors.verticalCenter: parent.verticalCenter
-    iconText: "󰅖"
-    tooltipText: "Cancel (esc)"
-    foreground: root.dim
-    fontFamily: root.fontFamily
-    onClicked: root.cancelled()
+  Item {
+    width: cancelButton.width
+    height: Math.max(cancelButton.height, choiceRows.count > 0 && choiceRows.itemAt(0) ? choiceRows.itemAt(0).height : 0)
+
+    PanelActionButton {
+      id: cancelButton
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: "󰅖"
+      tooltipText: Tr.t("actions.cancel")
+      foreground: root.dim
+      fontFamily: root.fontFamily
+      onClicked: root.cancelled()
+    }
   }
 }

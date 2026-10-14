@@ -13,6 +13,7 @@ import re
 import socket
 import socketserver
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "omabox"
+# English whatever the machine's Omarchy language is; I18nTest points it elsewhere itself.
+os.environ["OMARCHY_LANGUAGE_FILE"] = os.devnull
 loader = importlib.machinery.SourceFileLoader("omabox", str(BIN))
 spec = importlib.util.spec_from_loader("omabox", loader)
 omabox = importlib.util.module_from_spec(spec)
@@ -2051,6 +2054,58 @@ class DeliveryMessageTest(unittest.TestCase):
         self.assertEqual(sent[0][-2:], ["Omabox: 3 new posts", "from 2 sources"])
         self.assertTrue(sent[1][-1].endswith("1 X source waiting."), sent[1])
         self.assertFalse(any(name in arg for argv in sent for arg in argv), sent)
+
+
+class I18nTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp())
+        self.language = root / "language"
+        catalogs = root / "i18n"
+        catalogs.mkdir()
+        (catalogs / "en.json").write_text((self.ROOT / "i18n" / "en.json").read_text())
+        (catalogs / "pt.json").write_text(json.dumps({"notify.xTokenRejected": "Token do X recusado"}))
+        (catalogs / "pl.json").write_text(json.dumps({"notify.newPosts": {"one": "%1 nowy wpis", "few": "%1 nowe wpisy",
+                                                                          "many": "%1 nowych wpisów", "other": "%1 wpisu"}}))
+        for patcher in (mock.patch.object(omabox, "I18N_DIR", catalogs),
+                        mock.patch.dict(os.environ, {"OMARCHY_LANGUAGE_FILE": str(self.language)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        omabox.catalog.cache_clear()
+        self.addCleanup(omabox.catalog.cache_clear)
+
+    def test_catalog_matches_the_code(self):
+        result = subprocess.run([sys.executable, "-I", str(self.ROOT / "tests" / "i18n_check.py"), str(self.ROOT / "i18n"),
+                                 "--sources", str(self.ROOT), "--en-only"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_language_is_read_for_each_message(self):
+        self.language.write_text("pl\n")
+        self.assertEqual([omabox.trn("notify.newPosts", n) for n in (1, 3, 5, 22)],
+                         ["1 nowy wpis", "3 nowe wpisy", "5 nowych wpisów", "22 nowe wpisy"])
+        self.assertEqual(omabox.tr("notify.xTokenRejected"), "X token rejected")
+        self.language.write_text("pt-BR")
+        self.assertEqual(omabox.tr("notify.xTokenRejected"), "Token do X recusado")
+        self.assertEqual(omabox.trn("notify.newPosts", 2), "2 new posts")
+        for bad in ("../etc", "PL", "", "en_US"):
+            self.language.write_text(bad)
+            self.assertEqual(omabox.language(), "en")
+        self.language.unlink()
+        self.assertEqual(omabox.delivery_message({"Rowan": 1}), ("1 new post", "from 1 source"))
+
+    def test_plural_rules_match_the_checker(self):
+        loader = importlib.machinery.SourceFileLoader("i18n_check", str(self.ROOT / "tests" / "i18n_check.py"))
+        check = importlib.util.module_from_spec(importlib.util.spec_from_loader("i18n_check", loader))
+        loader.exec_module(check)
+        for code in check.LANGUAGES + ["en"]:
+            for n in list(range(250)) + [1000000, 2000001]:
+                self.assertEqual(omabox.plural_category(code, n), check.category(code, n), (code, n))
+
+    def test_fill_never_refills_an_argument(self):
+        self.assertEqual(omabox.fill("%1 and %2", ("%2", "b")), "%2 and b")
+        missing = "no.such.key"
+        self.assertEqual(omabox.tr(missing), missing)
 
 
 class NotificationArchiveTest(unittest.TestCase):
@@ -4401,8 +4456,8 @@ class ModelJsTest(unittest.TestCase):
     @unittest.skipUnless(QMLTESTRUNNER, "needs qmltestrunner (qt6-declarative)")
     def test_model_js(self):
         result = subprocess.run([QMLTESTRUNNER, "-input", str(Path(__file__).parent / "tst_model.qml")],
-                                env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}, capture_output=True, text=True,
-                                timeout=60)
+                                env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QML_XHR_ALLOW_FILE_READ": "1"},
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

@@ -288,7 +288,8 @@ BarWidget {
     function report() {
       if (exitCode < 0) return
       var lines = tickErrors.text.trim().split("\n")
-      root.tickProblem = exitCode === 0 ? "" : Model.cliProblem(exitCode, lines[lines.length - 1]) || "omabox tick exited with " + exitCode
+      root.tickProblem = exitCode === 0 ? "" : Model.cliProblem(exitCode, lines[lines.length - 1], Tr)
+        || Model.fill(Tr.t("bar.tickExited"), [exitCode])
     }
     onStarted: exitCode = -1
     onExited: function(code) {
@@ -359,7 +360,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "󰚇"
-    tooltipText: root.unread > 0 ? "Omabox: " + root.unread + " unread" : "Omabox"
+    tooltipText: root.unread > 0 ? Tr.tn("bar.unread", root.unread).arg(Tr.formatNumber(root.unread)) : "Omabox"
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.markAllRead()
       else root.toggle()

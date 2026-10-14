@@ -125,7 +125,7 @@ Panel {
     return -1
   }
   readonly property var readingPost: readingIndex < 0 ? null
-    : view === "notifications" ? Model.noteAsItem(noteRows[readingIndex]) : items[readingIndex]
+    : view === "notifications" ? Model.noteAsItem(noteRows[readingIndex], Tr) : items[readingIndex]
   // A stored full article is what the reader shows; feedVersionId is the post switched back to its feed html.
   property string feedVersionId: ""
   // Stays set after the viewer or player closes, until the next open(): the reader keeps its body (and scroll) meanwhile.
@@ -140,7 +140,7 @@ Panel {
   property string repliesLoadingId: ""
   property var repliesFailed: ({})
   readonly property var readingItem: Model.withReplies(Model.articleView(readingPost, feedVersionId !== "" && feedVersionId === readingId),
-    repliesLoadingId !== "" && repliesLoadingId === readingId)
+    repliesLoadingId !== "" && repliesLoadingId === readingId, Tr)
   readonly property var scroller: reading ? reader.flick : list
   readonly property string readerCss: Model.readerCss({
     gap: Style.space(10),
@@ -159,9 +159,10 @@ Panel {
   })
   readonly property var commentFaces: ({ avatar: Style.space(30), gap: Style.space(10), pad: Style.space(8), mini: Style.space(22) })
   readonly property string clearQuestion: {
-    if (view === "notifications") return "Clear all " + notifications.length + (notifications.length === 1 ? " notification?" : " notifications?")
+    if (view === "notifications")
+      return Tr.tn("notifications.clearQuestion", notifications.length).arg(Tr.formatNumber(notifications.length))
     var count = Model.clearableIds(items).length
-    return "Clear " + count + (count === 1 ? " read post" : " read posts") + " from the feed? Read later stays."
+    return Tr.tn("feed.clearQuestion", count).arg(Tr.formatNumber(count))
   }
   readonly property var currentSource: view === "sources" && cursor < sources.length ? sources[cursor] : null
   readonly property var muteRules: currentSource && currentSource.mute ? currentSource.mute : []
@@ -421,7 +422,7 @@ Panel {
     closeCatchup()
     var ids = Model.catchupIds(root.items, choice, new Date())
     if (ids.length > 0) hostWidget.markRead(ids)
-    note("Marked " + ids.length + (ids.length === 1 ? " post" : " posts") + " read.")
+    note(Tr.tn("feed.markedRead", ids.length).arg(Tr.formatNumber(ids.length)))
   }
 
   function closePickers() {
@@ -469,7 +470,7 @@ Panel {
     if (item === undefined) item = currentItem()
     var link = item ? Model.webLink(item.link) : ""
     if (!link) return
-    copyText(link, "Copied " + link)
+    copyText(link, Model.fill(Tr.t("feed.copiedLink"), [link]))
   }
 
   // The note shows once wl-copy answered, so a missing or failing wl-copy is reported instead of "Copied". wl-copy forks
@@ -505,7 +506,7 @@ Panel {
       imageViewer.command = [root.omaboxBin, "view", "--start", String(media.index), "--"].concat(paths)
       imageViewer.running = true
     } else {
-      note("No pictures or videos in this post.")
+      note(Tr.t("reader.noMedia"))
     }
   }
 
@@ -534,7 +535,7 @@ Panel {
 
   function fetchArticle(post) {
     root.articleLoadingId = post.id
-    note("Fetching the full article…")
+    note(Tr.t("reader.fetchingArticle"))
     runCli(["article", "--json", "--", post.id], function(code, text) {
       root.articleLoadingId = ""
       var result = null
@@ -545,7 +546,7 @@ Panel {
         failed[post.id] = true
         root.articleFailed = failed
         root.messageError = true
-        root.message = "No full article: " + (result && result.error ? result.error : text || "omabox article failed")
+        root.message = Model.fill(Tr.t("reader.noArticle"), [result && result.error ? result.error : text || Tr.t("reader.articleCommandFailed")])
         return
       }
       root.message = ""
@@ -600,7 +601,7 @@ Panel {
       failed[id] = true
       root.repliesFailed = failed
       root.messageError = true
-      root.message = "No comments: " + (result && result.error ? result.error : text || "omabox replies failed")
+      root.message = Model.fill(Tr.t("reader.noComments"), [result && result.error ? result.error : text || Tr.t("reader.repliesCommandFailed")])
     } else {
       if (root.repliesFailed[id]) {
         var kept = {}
@@ -678,8 +679,8 @@ Panel {
   // X or the clear button: the feed hides its read posts (Model.clearableIds), notifications drop all history.
   function askClear() {
     if (reading || mode !== "list") return
-    if (view === "feed" && Model.clearableIds(items).length === 0) note("No read posts to clear.")
-    else if (view === "notifications" && notifications.length === 0) note("No notifications to clear.")
+    if (view === "feed" && Model.clearableIds(items).length === 0) note(Tr.t("feed.nothingToClear"))
+    else if (view === "notifications" && notifications.length === 0) note(Tr.t("notifications.nothingToClear"))
     else if (view === "feed" || view === "notifications") {
       closePickers()
       root.mode = "confirm-clear"
@@ -699,7 +700,7 @@ Panel {
     hostWidget.override(ids, { read: true, cleared: true })
     runCli(["clear-read", "--"].concat(ids), function() {})
     root.cursor = 0
-    note("Cleared " + ids.length + (ids.length === 1 ? " read post." : " read posts."))
+    note(Tr.tn("feed.cleared", ids.length).arg(Tr.formatNumber(ids.length)))
   }
 
   function clearNotifications() {
@@ -718,7 +719,7 @@ Panel {
 
   function runNotificationAction(index) {
     var row = index >= 0 && index < noteRows.length ? noteRows[index] : null
-    var step = Model.actionStep(row, root.pendingAction, root.message)
+    var step = Model.actionStep(row, root.pendingAction, root.message, Tr)
     root.pendingAction = step.pending
     if (!step.run) {
       note(step.message)
@@ -733,7 +734,7 @@ Panel {
     var row = index >= 0 && index < noteRows.length ? noteRows[index] : null
     var text = row ? Model.plainBody(row.body) || String(row.summary || "") : ""
     if (!text) return
-    copyText(text, "Copied: “" + (text.length > 60 ? text.slice(0, 60) + "…" : text) + "”")
+    copyText(text, Model.fill(Tr.t("notifications.copied"), [text.length > 60 ? text.slice(0, 60) + "…" : text]))
   }
 
   function toggleHints() {
@@ -793,10 +794,10 @@ Panel {
     if (day === root.weeklyDay) return
     root.weeklyDay = day
     runCli(["delivery", "--weekly-day", day, "--json"], function(code, text) {
-      if (code === 0) note("Weekly sources come in on " + Model.weekdayName(day) + ".")
+      if (code === 0) note(Model.fill(Tr.t("sources.weeklyDaySaved"), [Model.weekdayName(day, Tr)]))
       else {
         root.messageError = true
-        root.message = "Weekly day not saved: " + text
+        root.message = Model.fill(Tr.t("sources.weeklyDayNotSaved"), [text])
         loadDelivery()
       }
     })
@@ -808,10 +809,12 @@ Panel {
       try { result = JSON.parse(text) } catch (e) {}
       if (code !== 0 || !result) {
         root.messageError = true
-        root.message = "Delivery time not saved: " + text
+        root.message = Model.fill(Tr.t("sources.deliveryNotSaved"), [text])
         loadDelivery()
       } else {
-        note("Next delivery " + (result.next || result.time) + ".")
+        var next = new Date(result.next_at || "")
+        note(Model.fill(Tr.t("sources.nextDelivery"),
+          [isNaN(next.getTime()) ? result.next || result.time : next.toLocaleString(Tr.locale, Tr.t("time.weekdayTime"))]))
       }
     })
   }
@@ -915,7 +918,7 @@ Panel {
     runCli(["x-token", "--remove"], function(code, text) {
       root.xTokenSaved = false
       root.messageError = code !== 0
-      root.message = code === 0 ? "X token removed from this computer." : text
+      root.message = code === 0 ? Tr.t("xToken.removed") : text
     })
   }
 
@@ -932,7 +935,7 @@ Panel {
     if (url === "") {
       root.mode = "list"
       focusCatcher()
-      note("X token saved.")
+      note(Tr.t("xToken.saved"))
       return
     }
     root.mode = "add-url"
@@ -1021,7 +1024,7 @@ Panel {
       return
     }
     if (rule === "") cancelTyping()
-    else if (rules.indexOf(rule) >= 0) note("Already muted: " + rule)
+    else if (rules.indexOf(rule) >= 0) note(Model.fill(Tr.t("mute.already"), [rule]))
     else runCli(["mute", "--", source.name, rule], afterMuteChange)
   }
 
@@ -1266,7 +1269,7 @@ Panel {
     onStarted: root.close()
     onExited: function(exitCode) {
       root.controller.show()
-      if (exitCode !== 0) root.note("No picture viewer opened.")
+      if (exitCode !== 0) root.note(Tr.t("reader.noViewer"))
     }
   }
 
@@ -1296,7 +1299,7 @@ Panel {
     onExited: function(exitCode) {
       root.openingVideo = ""
       if (videoPlayer.shown) root.controller.show()
-      else root.note(videoPlayer.noPlayer ? "No video player found. Install mpv to play videos." : "The video did not play.")
+      else root.note(videoPlayer.noPlayer ? Tr.t("reader.noPlayer") : Tr.t("reader.videoFailed"))
     }
   }
 
@@ -1317,7 +1320,7 @@ Panel {
         return
       }
       root.messageError = true
-      root.message = code === 127 ? "Not copied: wl-copy is not installed." : "Not copied: wl-copy failed."
+      root.message = code === 127 ? Tr.t("common.noWlCopy") : Tr.t("common.wlCopyFailed")
     }
   }
 
@@ -1333,7 +1336,7 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var result = Model.splitCliOutput(text)
+        var result = Model.splitCliOutput(text, Tr)
         var done = root.cliDone
         root.cliDone = null
         if (done) done(result.code, result.text)
@@ -1353,7 +1356,7 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var result = Model.splitCliOutput(text)
+        var result = Model.splitCliOutput(text, Tr)
         root.tokenSaved(result.code, result.text)
       }
     }
@@ -1364,7 +1367,7 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var result = Model.splitCliOutput(text)
+        var result = Model.splitCliOutput(text, Tr)
         root.repliesFetched(result.code, result.text)
       }
     }
@@ -1501,7 +1504,7 @@ Panel {
             spacing: Style.space(6)
 
             Button {
-              text: "Feed"
+              text: Tr.t("tabs.feed")
               bordered: true
               selected: root.view === "feed"
               foreground: root.fg
@@ -1510,7 +1513,7 @@ Panel {
             }
 
             Button {
-              text: "Notifications"
+              text: Tr.t("tabs.notifications")
               bordered: true
               selected: root.view === "notifications"
               foreground: root.fg
@@ -1533,11 +1536,11 @@ Panel {
             maximumLineCount: 2
             elide: Text.ElideRight
             text: root.view === "feed"
-              ? [Model.deliveryNotice(root.feedState, root.now, hostWidget ? hostWidget.tickProblem : "").split("  ·  ").join("\n"),
-                 root.errorSources.length > 0 ? "failed: " + root.errorSources.join(", ") : ""]
+              ? [Model.deliveryNotice(root.feedState, root.now, hostWidget ? hostWidget.tickProblem : "", Tr).split("  ·  ").join("\n"),
+                 root.errorSources.length > 0 ? Model.fill(Tr.t("feed.failedSources"), [root.errorSources.join(Tr.t("common.listSeparator"))]) : ""]
                 .filter(function(part) { return part !== "" }).join("\n")
               : root.view === "sources" && root.sourcesLoaded
-                ? root.sources.length + (root.sources.length === 1 ? " source" : " sources")
+                ? Tr.tn("sources.count", root.sources.length).arg(Tr.formatNumber(root.sources.length))
               : ""
             color: failed ? Commons.Color.urgent : root.faint
             font.family: root.fontFamily
@@ -1554,7 +1557,7 @@ Panel {
             PanelActionButton {
               visible: root.view !== "sources"
               iconText: "󰍉"
-              tooltipText: "Search (/)"
+              tooltipText: Tr.t("actions.search")
               foreground: root.query !== "" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.startSearch()
@@ -1564,9 +1567,9 @@ Panel {
               visible: root.view !== "sources"
               iconText: "󰈲"
               tooltipText: root.filter !== ""
-                ? "Next filter: " + (Model.filterLabel(root.view === "feed" ? Model.nextFilter(root.filter, root.allItems)
-                  : Model.nextNoteFilter(root.filter, root.notifications)) || "all").toLowerCase() + " (f)"
-                : root.view === "feed" ? "Filter by source (f)" : "Filter by app (f)"
+                ? Model.fill(Tr.t("actions.nextFilter"), [(Model.filterLabel(root.view === "feed" ? Model.nextFilter(root.filter, root.allItems)
+                  : Model.nextNoteFilter(root.filter, root.notifications), Tr) || Tr.t("actions.filterAll")).toLowerCase()])
+                : (root.view === "feed" ? Tr.t("actions.filterBySource") : Tr.t("actions.filterByApp"))
               foreground: root.filter !== "" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.cycleFilter()
@@ -1575,7 +1578,7 @@ Panel {
             PanelActionButton {
               visible: root.view !== "sources"
               iconText: root.dnd ? "󰂛" : "󰂚"
-              tooltipText: root.dnd ? "Do not disturb is on (d)" : "Do not disturb is off (d)"
+              tooltipText: root.dnd ? Tr.t("actions.dndOn") : Tr.t("actions.dndOff")
               foreground: root.dnd ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.toggleDnd()
@@ -1585,7 +1588,7 @@ Panel {
               visible: root.view !== "sources"
               enabled: root.view === "feed" ? Model.clearableIds(root.items).length > 0 : root.notifications.length > 0
               iconText: "󰎟"
-              tooltipText: root.view === "feed" ? "Clear read posts (X)" : "Clear history (X)"
+              tooltipText: root.view === "feed" ? Tr.t("actions.clearRead") : Tr.t("actions.clearHistory")
               foreground: root.mode === "confirm-clear" ? Commons.Color.urgent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.mode === "confirm-clear" ? root.confirmClear(false) : root.askClear()
@@ -1594,7 +1597,7 @@ Panel {
             PanelActionButton {
               visible: root.view === "sources"
               iconText: "󰐕"
-              tooltipText: "New source (n)"
+              tooltipText: Tr.t("actions.newSource")
               foreground: root.fg
               fontFamily: root.fontFamily
               onClicked: root.startAdd()
@@ -1602,7 +1605,7 @@ Panel {
 
             PanelActionButton {
               iconText: "󰌌"
-              tooltipText: root.hintsVisible ? "Hide keybinds (?)" : "Show keybinds (?)"
+              tooltipText: root.hintsVisible ? Tr.t("actions.hideKeys") : Tr.t("actions.showKeys")
               foreground: root.hintsVisible ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.toggleHints()
@@ -1610,7 +1613,7 @@ Panel {
 
             PanelActionButton {
               iconText: "󰒓"
-              tooltipText: root.view === "sources" ? "Back to feed (esc)" : "Sources (s)"
+              tooltipText: root.view === "sources" ? Tr.t("actions.backToFeed") : Tr.t("actions.sources")
               foreground: root.view === "sources" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.showView(root.view === "sources" ? "feed" : "sources")
@@ -1633,7 +1636,7 @@ Panel {
             visible: root.filter !== ""
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: "󰈲  " + Model.filterLabel(root.filter)
+            text: "󰈲  " + Model.filterLabel(root.filter, Tr)
             color: Commons.Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1656,7 +1659,7 @@ Panel {
             id: searchField
             visible: root.mode === "search"
             width: parent.width - (root.filter !== "" ? Style.space(140) : 0)
-            placeholderText: root.view === "feed" ? "search titles and text" : "search apps and messages"
+            placeholderText: root.view === "feed" ? Tr.t("feed.searchPlaceholder") : Tr.t("notifications.searchPlaceholder")
             foreground: root.fg
             font.family: root.fontFamily
             onTextChanged: if (root.mode === "search") { root.query = text; root.cursor = 0 }
@@ -1670,7 +1673,7 @@ Panel {
             visible: root.mode !== "search"
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰅖"
-            tooltipText: "Clear search and filter (esc)"
+            tooltipText: Tr.t("actions.clearSearch")
             foreground: root.fg
             fontFamily: root.fontFamily
             onClicked: root.clearFilters()
@@ -1695,7 +1698,7 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: unreadRow.unread > 0 ? unreadRow.unread + " UNREAD" : "ALL READ"
+              text: unreadRow.unread > 0 ? Tr.tn("feed.unread", unreadRow.unread).arg(Tr.formatNumber(unreadRow.unread)) : Tr.t("feed.allRead")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1707,8 +1710,8 @@ Panel {
               id: markReadButton
               visible: unreadRow.unread > 0
               anchors.verticalCenter: parent.verticalCenter
-              text: "Mark read"
-              tooltipText: "Mark read (a)"
+              text: Tr.t("feed.markRead")
+              tooltipText: Tr.t("actions.markRead")
               bordered: true
               foreground: root.fg
               fontFamily: root.fontFamily
@@ -1720,8 +1723,9 @@ Panel {
           ChoicePicker {
             id: catchupPicker
             visible: root.catchupOpen
+            width: parent.width
             anchors.verticalCenter: parent.verticalCenter
-            choices: root.catchupOpen ? Model.catchupChoices(root.items, root.now) : []
+            choices: root.catchupOpen ? Model.catchupChoices(root.items, root.now, Tr) : []
             foreground: root.fg
             dim: root.faint
             fontFamily: root.fontFamily
@@ -1746,11 +1750,14 @@ Panel {
 
           Column {
             anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - deliveryControls.width - Style.space(10)
             spacing: Style.space(2)
 
             Text {
+              width: parent.width
               textFormat: Text.PlainText
-              text: "DELIVERY"
+              elide: Text.ElideRight
+              text: Tr.t("sources.deliveryHeading")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1759,8 +1766,10 @@ Panel {
             }
 
             Text {
+              width: parent.width
               textFormat: Text.PlainText
-              text: "Once a day, at this time."
+              elide: Text.ElideRight
+              text: Tr.t("sources.deliveryNote")
               color: root.faint
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1776,7 +1785,7 @@ Panel {
             PanelActionButton {
               anchors.verticalCenter: parent.verticalCenter
               iconText: "󰍴"
-              tooltipText: "Half an hour earlier (-)"
+              tooltipText: Tr.t("sources.earlier")
               foreground: root.fg
               fontFamily: root.fontFamily
               onClicked: root.stepDelivery(-30)
@@ -1795,7 +1804,7 @@ Panel {
             PanelActionButton {
               anchors.verticalCenter: parent.verticalCenter
               iconText: "󰐕"
-              tooltipText: "Half an hour later (+)"
+              tooltipText: Tr.t("sources.later")
               foreground: root.fg
               fontFamily: root.fontFamily
               onClicked: root.stepDelivery(30)
@@ -1810,8 +1819,10 @@ Panel {
 
           Text {
             anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - weekdayChips.width - Style.space(10)
             textFormat: Text.PlainText
-            text: "Weekly sources on"
+            elide: Text.ElideRight
+            text: Tr.t("sources.weeklyOn")
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1823,7 +1834,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
             focusable: false
-            options: Model.weekdayOptions()
+            options: Model.weekdayOptions(Tr)
             value: root.weeklyDay
             foreground: root.fg
             background: "transparent"
@@ -1842,7 +1853,7 @@ Panel {
         Text {
           visible: root.view === "sources"
           textFormat: Text.PlainText
-          text: "SOURCES"
+          text: Tr.t("sources.heading")
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1852,6 +1863,8 @@ Panel {
 
         Column {
           id: addForm
+          // The URL and NAME labels share one column, as wide as the longer one in this language.
+          readonly property real labelWidth: Math.max(Style.space(48), urlLabel.implicitWidth, nameFieldLabel.implicitWidth)
           visible: root.view === "sources" && (root.mode === "add-url" || root.mode === "add-name")
           width: parent.width
           spacing: Style.space(6)
@@ -1861,10 +1874,11 @@ Panel {
             spacing: Style.space(10)
 
             Text {
-              width: Style.space(48)
+              id: urlLabel
+              width: addForm.labelWidth
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: "URL"
+              text: Tr.t("sources.urlLabel")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1874,9 +1888,10 @@ Panel {
 
             TextField {
               id: urlField
-              width: parent.width - Style.space(58)
+              objectName: "urlField"
+              width: parent.width - addForm.labelWidth - Style.space(10)
               enabled: root.mode === "add-url" && !root.busy
-              placeholderText: "page, feed, YouTube, Bluesky, Mastodon, X, Reddit, HN"
+              placeholderText: Tr.t("sources.urlPlaceholder")
               foreground: root.fg
               font.family: root.fontFamily
               Keys.onPressed: function(event) {
@@ -1889,14 +1904,13 @@ Panel {
           Text {
             visible: root.discovered !== null && root.mode === "add-name"
             width: parent.width
-            leftPadding: Style.space(58)
+            leftPadding: addForm.labelWidth + Style.space(10)
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: root.discovered
-              ? "Found: " + root.discovered.title
-                + (root.discovered.latest ? "  ·  latest \"" + root.discovered.latest.title + "\" "
-                  + Model.relativeTime(root.discovered.latest.published, root.now) : "  ·  no posts yet")
-              : ""
+            text: !root.discovered ? ""
+              : root.discovered.latest ? Model.fill(Tr.t("sources.foundLatest"), [root.discovered.title,
+                  root.discovered.latest.title, Model.relativeTime(root.discovered.latest.published, root.now, Tr)])
+              : Model.fill(Tr.t("sources.foundEmpty"), [root.discovered.title])
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -1908,10 +1922,11 @@ Panel {
             spacing: Style.space(10)
 
             Text {
-              width: Style.space(48)
+              id: nameFieldLabel
+              width: addForm.labelWidth
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: "NAME"
+              text: Tr.t("sources.nameLabel")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1921,7 +1936,7 @@ Panel {
 
             TextField {
               id: nameField
-              width: parent.width - Style.space(58)
+              width: parent.width - addForm.labelWidth - Style.space(10)
               foreground: root.fg
               font.family: root.fontFamily
               Keys.onPressed: function(event) {
@@ -1943,7 +1958,7 @@ Panel {
             width: parent.width
             textFormat: Text.PlainText
             elide: Text.ElideRight
-            text: "MUTE  ·  " + (root.currentSource ? root.currentSource.name.toUpperCase() : "")
+            text: Model.fill(Tr.t("mute.heading"), [root.currentSource ? root.currentSource.name.toUpperCase() : ""])
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1954,8 +1969,8 @@ Panel {
           TextField {
             id: muteField
             width: parent.width
-            placeholderText: root.mutePick >= 0 ? "enter removes the rule"
-              : root.muteRules.length > 0 ? "word or /regex/ to leave out  ·  tab picks a rule" : "word or /regex/ to leave out"
+            placeholderText: root.mutePick >= 0 ? Tr.t("mute.removePlaceholder")
+              : root.muteRules.length > 0 ? Tr.t("mute.pickPlaceholder") : Tr.t("mute.placeholder")
             foreground: root.fg
             font.family: root.fontFamily
             Keys.onPressed: function(event) {
@@ -2029,7 +2044,7 @@ Panel {
 
                     PanelToolTip {
                       visible: removeRuleMouse.containsMouse
-                      text: "Remove rule"
+                      text: Tr.t("mute.removeRule")
                       fontFamily: root.fontFamily
                     }
                   }
@@ -2047,14 +2062,14 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: parent.repostsHidden ? "X reposts are left out" : "X reposts come in"
+              text: parent.repostsHidden ? Tr.t("mute.repostsHidden") : Tr.t("mute.repostsShown")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
 
             Button {
-              text: parent.repostsHidden ? "Show reposts" : "Hide reposts"
+              text: parent.repostsHidden ? Tr.t("mute.showReposts") : Tr.t("mute.hideReposts")
               bordered: true
               foreground: root.fg
               fontFamily: root.fontFamily
@@ -2071,8 +2086,8 @@ Panel {
           bottomPadding: Style.space(24)
           horizontalAlignment: Text.AlignHCenter
           textFormat: Text.PlainText
-          text: root.view === "notifications" ? "No notifications. Quiet day."
-            : root.view === "sources" ? "No sources. Press n to add one." : "Nothing here yet."
+          text: root.view === "notifications" ? Tr.t("notifications.empty")
+            : root.view === "sources" ? Tr.t("sources.empty") : Tr.t("feed.empty")
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -2121,9 +2136,9 @@ Panel {
           width: parent.width
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          text: root.mode === "confirm" && root.currentSource ? "Remove " + root.currentSource.name + " and its posts?"
+          text: root.mode === "confirm" && root.currentSource ? Model.fill(Tr.t("sources.removeQuestion"), [root.currentSource.name])
             : root.mode === "confirm-clear" ? root.clearQuestion
-            : root.catchupOpen ? ["MARK READ", Model.filterLabel(root.filter), root.query !== "" ? "/ " + root.query : ""]
+            : root.catchupOpen ? [Tr.t("feed.markReadHeading"), Model.filterLabel(root.filter, Tr), root.query !== "" ? "/ " + root.query : ""]
               .filter(function(part) { return part !== "" }).join("  ·  ")
             : ""
           color: root.fg
@@ -2138,7 +2153,7 @@ Panel {
           spacing: Style.space(6)
 
           Button {
-            text: root.mode === "confirm-clear" ? "Clear" : "Remove"
+            text: root.mode === "confirm-clear" ? Tr.t("common.clear") : Tr.t("common.remove")
             bordered: true
             foreground: Commons.Color.urgent
             fontFamily: root.fontFamily
@@ -2146,7 +2161,7 @@ Panel {
           }
 
           Button {
-            text: "Keep"
+            text: Tr.t("common.keep")
             bordered: true
             foreground: root.fg
             fontFamily: root.fontFamily
@@ -2161,7 +2176,7 @@ Panel {
           spacing: Style.space(12)
 
           Repeater {
-            model: Model.hintEntries(root.view, root.mode, root.reading)
+            model: Model.hintEntries(root.view, root.mode, root.reading, Tr)
 
             Row {
               required property var modelData
@@ -2194,12 +2209,11 @@ Panel {
       Rectangle {
         id: messageStrip
         readonly property string text: statusLine.visible ? ""
-          : root.busy ? "Looking…"
+          : root.busy ? Tr.t("sources.looking")
           : root.message !== "" ? root.message
-          : root.fetching ? "Fetching new posts…"
+          : root.fetching ? Tr.t("feed.fetching")
           : root.view === "feed" && !headerStatus.failed && root.recoveredFile !== ""
-            ? "Omabox could not read its saved posts and started over. The old file is " + root.stateDirLabel + "/"
-              + root.recoveredFile + "."
+            ? Model.fill(Tr.t("feed.recovered"), [root.stateDirLabel + "/" + root.recoveredFile])
           : ""
         visible: text !== "" && !root.overlayShown
         x: body.x
@@ -2266,7 +2280,7 @@ Panel {
                 Text {
                   width: parent.width
                   textFormat: Text.PlainText
-                  text: "Welcome to Omabox"
+                  text: Tr.t("welcome.title")
                   color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.title
@@ -2278,19 +2292,14 @@ Panel {
                   textFormat: Text.PlainText
                   wrapMode: Text.WordWrap
                   lineHeight: 1.25
-                  text: "A quiet inbox. Your feeds arrive once a day, at " + (root.deliveryTime || "08:00")
-                    + ", all together, instead of all day long. In between there is nothing new to check, so you can get on with your day."
+                  text: Model.fill(Tr.t("welcome.intro"), [root.deliveryTime || "08:00"])
                   color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                 }
 
                 Repeater {
-                  model: [
-                    "Add your own sources in Sources: blogs, YouTube channels, Reddit, Bluesky, Mastodon and X.",
-                    "Notifications keeps every desktop notification for 7 days, so nothing is lost when one slips by.",
-                    "Every action has a key. Press ? at any time to see them."
-                  ]
+                  model: [Tr.t("welcome.sources"), Tr.t("welcome.notifications"), Tr.t("welcome.keys")]
 
                   Text {
                     required property var modelData
@@ -2309,7 +2318,7 @@ Panel {
                   spacing: Style.space(6)
 
                   Button {
-                    text: "Start reading"
+                    text: Tr.t("welcome.start")
                     bordered: true
                     foreground: Commons.Color.accent
                     fontFamily: root.fontFamily
@@ -2317,7 +2326,7 @@ Panel {
                   }
 
                   Button {
-                    text: "Add a source"
+                    text: Tr.t("welcome.addSource")
                     bordered: true
                     foreground: root.fg
                     fontFamily: root.fontFamily
@@ -2334,7 +2343,7 @@ Panel {
               Text {
                 width: parent.width
                 textFormat: Text.PlainText
-                text: root.xTokenSaved ? "Replace your X token" : "Connect an X account"
+                text: root.xTokenSaved ? Tr.t("xToken.replaceTitle") : Tr.t("xToken.connectTitle")
                 color: root.fg
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -2345,9 +2354,7 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "Read this first. X has no public feeds, so Omabox reads X with your login. The token below is that login: "
-                  + "whoever has it can use the account as you. X's rules do not allow reading this way and X can lock the account, "
-                  + "so use a spare account, not your main one."
+                text: Tr.t("xToken.warning")
                 color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -2357,20 +2364,14 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "What Omabox does with it: the token stays in a file only you can read, and goes only to one fixed, "
-                  + "checked version of RSSHub that runs on this computer during a delivery and stops right after. That version "
-                  + "can only read X: it has no code that posts, likes, follows, sends messages or deletes anything."
+                text: Tr.t("xToken.handling")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }
 
               Repeater {
-                model: [
-                  "1.  In your browser, sign in to x.com with the account Omabox should use.",
-                  "2.  Open the developer tools (F12), then Application in Chromium or Storage in Firefox, then Cookies, then https://x.com.",
-                  "3.  Copy the value of auth_token (about 40 letters and digits) and paste it below."
-                ]
+                model: [Tr.t("xToken.step1"), Tr.t("xToken.step2"), Tr.t("xToken.step3")]
 
                 Text {
                   required property var modelData
@@ -2389,10 +2390,11 @@ Panel {
                 spacing: Style.space(10)
 
                 Text {
-                  width: Style.space(48)
+                  id: tokenLabel
+                  width: Math.max(Style.space(48), implicitWidth)
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: "TOKEN"
+                  text: Tr.t("xToken.label")
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -2402,10 +2404,10 @@ Panel {
 
                 TextField {
                   id: tokenField
-                  width: parent.width - Style.space(58)
+                  width: parent.width - tokenLabel.width - Style.space(10)
                   password: true
                   enabled: !tokenProc.running
-                  placeholderText: "auth_token value"
+                  placeholderText: Tr.t("xToken.placeholder")
                   foreground: root.fg
                   font.family: root.fontFamily
                   Keys.onPressed: function(event) {
@@ -2419,7 +2421,7 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
-                text: "Signing out of x.com, or \"Log out of all other sessions\" in X's settings, makes the token useless at once."
+                text: Tr.t("xToken.signOut")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -2427,7 +2429,7 @@ Panel {
 
               Button {
                 visible: root.xTokenSaved
-                text: "Remove the saved token"
+                text: Tr.t("xToken.remove")
                 bordered: true
                 foreground: Commons.Color.urgent
                 fontFamily: root.fontFamily
@@ -2484,8 +2486,9 @@ Panel {
         z: 1
         visible: root.snoozePickerId === row.item.id
         x: Style.space(10)
+        width: parent.width - Style.space(20)
         y: rowColumn.y + rowColumn.implicitHeight + Style.space(8)
-        choices: Model.snoozeChoices()
+        choices: Model.snoozeChoices(Tr)
         foreground: root.fg
         dim: root.faint
         fontFamily: root.fontFamily
@@ -2516,7 +2519,7 @@ Panel {
 
         PanelActionButton {
           iconText: row.item.later === true ? "󰃀" : "󰃃"
-          tooltipText: row.item.later === true ? "Remove from read later (m)" : "Read later (m)"
+          tooltipText: row.item.later === true ? Tr.t("actions.unmarkLater") : Tr.t("actions.readLater")
           foreground: row.item.later === true ? Commons.Color.accent : root.fg
           fontFamily: root.fontFamily
           onClicked: root.toggleLaterCurrent(row.item)
@@ -2524,7 +2527,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰒲"
-          tooltipText: "Snooze (z)"
+          tooltipText: Tr.t("actions.snooze")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.openSnooze(row.item)
@@ -2533,7 +2536,7 @@ Panel {
         PanelActionButton {
           visible: row.tag === "newer"
           iconText: "󰚰"
-          tooltipText: "Update Omarchy (U)"
+          tooltipText: Tr.t("actions.updateOmarchy")
           foreground: Commons.Color.accent
           fontFamily: root.fontFamily
           onClicked: root.runUpdate(row.item)
@@ -2542,7 +2545,7 @@ Panel {
         PanelActionButton {
           visible: !!row.item.link
           iconText: "󰏌"
-          tooltipText: "Open in browser (o)"
+          tooltipText: Tr.t("actions.openInBrowser")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.openLink(row.index)
@@ -2551,7 +2554,7 @@ Panel {
         PanelActionButton {
           visible: !!row.item.link
           iconText: "󰆏"
-          tooltipText: "Copy link (yy)"
+          tooltipText: Tr.t("actions.copyLink")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.copyLink(row.item)
@@ -2616,7 +2619,7 @@ Panel {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: row.item ? ("·  " + Model.relativeTime(row.item.published, root.now)).toUpperCase() : ""
+            text: row.item ? ("·  " + Model.relativeTime(row.item.published, root.now, Tr)).toUpperCase() : ""
             color: row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2643,7 +2646,7 @@ Panel {
             visible: row.tag !== ""
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: "·  " + (row.tag === "newer" ? "NEWER THAN YOURS" : "INSTALLED")
+            text: "·  " + (row.tag === "newer" ? Tr.t("feed.newerTag") : Tr.t("feed.installedTag"))
             color: row.tag === "newer" ? Commons.Color.accent : row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2655,7 +2658,7 @@ Panel {
             visible: row.item.later === true
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: "·  󰃀 LATER"
+            text: "·  󰃀 " + Tr.t("feed.laterTag")
             color: Commons.Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2732,7 +2735,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰆏"
-          tooltipText: "Copy message (yy)"
+          tooltipText: Tr.t("actions.copyMessage")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.copyNotification(note.index)
@@ -2740,7 +2743,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰅖"
-          tooltipText: "Remove (x)"
+          tooltipText: Tr.t("actions.remove")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: root.forgetNotification(note.index)
@@ -2770,7 +2773,7 @@ Panel {
           width: Math.min(implicitWidth, parent.width - noteActions.width - Style.space(6))
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          text: [Model.appLabel(note.modelData), Model.relativeTime(new Date(note.modelData.timestamp || 0).toISOString(), root.now)]
+          text: [Model.appLabel(note.modelData), Model.relativeTime(new Date(note.modelData.timestamp || 0).toISOString(), root.now, Tr)]
             .filter(function(part) { return part !== "" }).join("  ·  ").toUpperCase()
           color: note.dimColor
           font.family: root.fontFamily
@@ -2850,7 +2853,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰏫"
-          tooltipText: "Rename (r)"
+          tooltipText: Tr.t("actions.rename")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: { root.selectSource(source.index); root.startRename() }
@@ -2858,7 +2861,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰈉"
-          tooltipText: "Mute rules (m)"
+          tooltipText: Tr.t("actions.muteRules")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: { root.selectSource(source.index); root.startMute() }
@@ -2866,7 +2869,7 @@ Panel {
 
         PanelActionButton {
           iconText: source.modelData.cadence === "paused" ? "󰐊" : "󰏤"
-          tooltipText: source.modelData.cadence === "paused" ? "Resume (space)" : "Pause (space)"
+          tooltipText: source.modelData.cadence === "paused" ? Tr.t("actions.resume") : Tr.t("actions.pause")
           foreground: root.fg
           fontFamily: root.fontFamily
           onClicked: { root.selectSource(source.index); root.togglePause() }
@@ -2874,7 +2877,7 @@ Panel {
 
         PanelActionButton {
           iconText: "󰆴"
-          tooltipText: "Remove (x)"
+          tooltipText: Tr.t("actions.remove")
           foreground: Commons.Color.urgent
           fontFamily: root.fontFamily
           onClicked: { root.selectSource(source.index); root.askRemove() }
@@ -2936,7 +2939,8 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
             focusable: false
-            options: [{ value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }, { value: "paused", label: "Paused" }]
+            options: [{ value: "daily", label: Tr.t("sources.daily") }, { value: "weekly", label: Tr.t("sources.weekly") },
+              { value: "paused", label: Tr.t("sources.paused") }]
             value: String(source.modelData.cadence || "")
             foreground: root.fg
             background: "transparent"
@@ -2965,9 +2969,9 @@ Panel {
           textFormat: Text.PlainText
           wrapMode: full ? Text.WordWrap : Text.NoWrap
           elide: full ? Text.ElideNone : Text.ElideRight
-          text: Model.sourceStatus(source.modelData, root.now) + "  ·  " + source.modelData.items
-            + (source.modelData.items === 1 ? " post" : " posts")
-            + Model.muteSummary(source.modelData)
+          text: Model.sourceStatus(source.modelData, root.now, Tr) + "  ·  "
+            + Tr.tn("sources.postCount", source.modelData.items).arg(Tr.formatNumber(source.modelData.items))
+            + Model.muteSummary(source.modelData, Tr)
           color: source.modelData.error ? Commons.Color.urgent : source.faintColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -2978,7 +2982,7 @@ Panel {
           width: parent.width - (sourceActions.visible ? sourceActions.width + Style.space(4) : 0)
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          text: Model.staleLabel(source.modelData.stale).toUpperCase()
+          text: Model.staleLabel(source.modelData.stale, Tr).toUpperCase()
           color: source.modelData.stale && source.modelData.stale.kind === "failing" ? Commons.Color.urgent : source.dimColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

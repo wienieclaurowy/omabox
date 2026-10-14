@@ -108,7 +108,7 @@ Column {
       id: backLabel
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: root.item && root.item.note ? "‹  NOTIFICATIONS" : "‹  FEED"
+      text: "‹  " + (root.item && root.item.note ? Tr.t("reader.backNotifications") : Tr.t("reader.backFeed"))
       color: backMouse.containsMouse ? Commons.Color.accent : (root.panel ? root.panel.dim : Commons.Color.foreground)
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
@@ -127,7 +127,7 @@ Column {
 
     ChoicePicker {
       visible: root.picking
-      choices: Model.snoozeChoices()
+      choices: Model.snoozeChoices(Tr)
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       foreground: root.buttonColor
@@ -146,7 +146,7 @@ Column {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
-        text: root.panel ? (root.panel.cursor + 1) + " / " + root.panel.rows.length : ""
+        text: root.panel ? Model.fill(Tr.t("reader.position"), [Tr.formatNumber(root.panel.cursor + 1), Tr.formatNumber(root.panel.rows.length)]) : ""
         color: root.panel ? root.panel.faint : Commons.Color.foreground
         font.family: root.panel ? root.panel.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
@@ -154,7 +154,7 @@ Column {
 
       PanelActionButton {
         iconText: "󰅁"
-        tooltipText: "Previous (K)"
+        tooltipText: Tr.t("actions.previous")
         enabled: root.panel !== null && root.panel.cursor > 0
         foreground: root.buttonColor
         fontFamily: root.buttonFont
@@ -163,7 +163,7 @@ Column {
 
       PanelActionButton {
         iconText: "󰅂"
-        tooltipText: "Next (J)"
+        tooltipText: Tr.t("actions.next")
         enabled: root.panel !== null && root.panel.cursor < root.panel.rows.length - 1
         foreground: root.buttonColor
         fontFamily: root.buttonFont
@@ -175,7 +175,7 @@ Column {
         readonly property bool videos: root.isPost && Model.videoUrls(root.item.html).length > 0
         visible: pictures || videos
         iconText: pictures ? "󰋩" : "󰕧"
-        tooltipText: (pictures && videos ? "Pictures and videos" : pictures ? "Pictures" : "Play video") + " (i)"
+        tooltipText: pictures && videos ? Tr.t("actions.picturesAndVideos") : pictures ? Tr.t("actions.pictures") : Tr.t("actions.playVideo")
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.openMedia()
@@ -185,7 +185,7 @@ Column {
         visible: root.articleAvailable
         enabled: !root.loadingArticle
         iconText: String.fromCodePoint(root.loadingArticle ? 0xF051F : 0xF0395)
-        tooltipText: root.loadingArticle ? "Fetching the full article…" : root.showingFull ? "Feed version (r)" : "Full article (r)"
+        tooltipText: root.loadingArticle ? Tr.t("reader.fetchingArticle") : root.showingFull ? Tr.t("actions.feedVersion") : Tr.t("actions.fullArticle")
         foreground: root.showingFull ? Commons.Color.accent : root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.toggleArticle()
@@ -194,7 +194,7 @@ Column {
       PanelActionButton {
         visible: root.isPost
         iconText: root.isPost && root.item.later === true ? "󰃀" : "󰃃"
-        tooltipText: root.isPost && root.item.later === true ? "Remove from read later (m)" : "Read later (m)"
+        tooltipText: root.isPost && root.item.later === true ? Tr.t("actions.unmarkLater") : Tr.t("actions.readLater")
         foreground: root.isPost && root.item.later === true ? Commons.Color.accent : root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.toggleLaterCurrent()
@@ -203,7 +203,7 @@ Column {
       PanelActionButton {
         visible: root.isPost
         iconText: "󰒲"
-        tooltipText: "Snooze (z)"
+        tooltipText: Tr.t("actions.snooze")
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.openSnooze()
@@ -212,7 +212,7 @@ Column {
       PanelActionButton {
         visible: root.tag === "newer"
         iconText: "󰚰"
-        tooltipText: "Update Omarchy (U)"
+        tooltipText: Tr.t("actions.updateOmarchy")
         foreground: Commons.Color.accent
         fontFamily: root.buttonFont
         onClicked: root.panel.runUpdate()
@@ -221,7 +221,7 @@ Column {
       PanelActionButton {
         visible: root.item !== null && (root.isPost ? !!root.item.link : true)
         iconText: "󰆏"
-        tooltipText: root.isPost ? "Copy link (yy)" : "Copy message (yy)"
+        tooltipText: root.isPost ? Tr.t("actions.copyLink") : Tr.t("actions.copyMessage")
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.isPost ? root.panel.copyLink() : root.panel.copyNotification(root.panel.cursor)
@@ -231,7 +231,7 @@ Column {
         visible: root.item !== null && !root.isPost && root.panel !== null
           && Model.notificationArgv(root.panel.noteRows[root.panel.cursor]) !== null
         iconText: "󰐊"
-        tooltipText: "Run action (oo)"
+        tooltipText: Tr.t("actions.runAction")
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.runNotificationAction(root.panel.cursor)
@@ -241,7 +241,7 @@ Column {
         id: openButton
         visible: root.isPost && !!root.item.link
         iconText: "󰏌"
-        tooltipText: "Open in browser (o)"
+        tooltipText: Tr.t("actions.openInBrowser")
         foreground: root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.openLink(root.panel.cursor)
@@ -254,7 +254,7 @@ Column {
     topPadding: Style.space(6)
     leftPadding: Style.space(50)
     textFormat: Text.PlainText
-    text: root.repost ? "󰑖  " + root.profile.name + " reposted" : ""
+    text: root.repost ? "󰑖  " + Model.fill(Tr.t("reader.reposted"), [root.profile.name]) : ""
     color: root.panel ? root.panel.dim : Commons.Color.foreground
     font.family: root.panel ? root.panel.fontFamily : Style.font.family
     font.pixelSize: Style.font.caption
@@ -323,7 +323,7 @@ Column {
         textFormat: Text.PlainText
         text: root.profile && root.item
           ? [root.repost ? (root.repost.handle ? "@" + root.repost.handle : "") : "@" + root.profile.handle,
-              Qt.formatDateTime(new Date(root.item.published), "MMM d yyyy, HH:mm")]
+              new Date(root.item.published).toLocaleString(Tr.locale, Tr.t("time.stampYear"))]
             .filter(function(part) { return part !== "" }).join("  ·  ")
           : ""
         color: root.panel ? root.panel.dim : Commons.Color.foreground
@@ -376,8 +376,8 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: root.item && root.panel
-        ? [Qt.formatDateTime(new Date(root.item.published), root.item.note ? "MMM d yyyy, HH:mm" : "MMM d yyyy"),
-            Model.readingTime(root.item)]
+        ? [new Date(root.item.published).toLocaleString(Tr.locale, root.item.note ? Tr.t("time.stampYear") : Tr.t("time.dateYear")),
+            Model.readingTime(root.item, Tr)]
           .filter(function(part) { return part !== "" }).map(function(part) { return "·  " + part }).join("  ").toUpperCase()
         : ""
       color: root.panel ? root.panel.dim : Commons.Color.foreground
@@ -391,7 +391,7 @@ Column {
       visible: root.tag !== ""
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: "·  " + (root.tag === "newer" ? "NEWER THAN YOURS" : "INSTALLED")
+      text: "·  " + (root.tag === "newer" ? Tr.t("feed.newerTag") : Tr.t("feed.installedTag"))
       color: root.tag === "newer" ? Commons.Color.accent : (root.panel ? root.panel.dim : Commons.Color.foreground)
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
@@ -403,7 +403,7 @@ Column {
       visible: root.showingFull
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: "·  FULL ARTICLE"
+      text: "·  " + Tr.t("reader.fullArticleTag")
       color: Commons.Color.accent
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption

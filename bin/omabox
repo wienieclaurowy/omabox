@@ -6,6 +6,7 @@ import codecs
 import concurrent.futures
 import contextlib
 import fcntl
+import functools
 import grp
 import hashlib
 import html
@@ -3579,15 +3580,79 @@ def wait_for_network(hosts, seconds=60, resolve=socket.getaddrinfo, sleep=time.s
         sleep(2)
 
 
-def plural(count, word):
-    return f"{count} {word}{'' if count == 1 else 's'}"
+I18N_DIR = Path(__file__).resolve().parent.parent / "i18n"
+LANGUAGE_RE = re.compile(r"[a-z]{2,3}(-[A-Za-z]{2})?")
+
+
+def language():
+    """The Omarchy display language as Tr.qml reads it, read again on every message so a switch needs no restart."""
+    path = (os.environ.get("OMARCHY_LANGUAGE_FILE")
+            or Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy" / "language")
+    try:
+        code = Path(path).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return "en"
+    return code if LANGUAGE_RE.fullmatch(code) else "en"
+
+
+@functools.lru_cache(maxsize=None)
+def catalog(code):
+    try:
+        data = json.loads((I18N_DIR / f"{code}.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def plural_category(code, n):
+    """CLDR cardinal category of a whole count; the same rules as Plural.js and tests/i18n_check.py."""
+    n = abs(int(n))
+    n10, n100 = n % 10, n % 100
+    millions = n != 0 and n % 1000000 == 0
+    if code in ("ja", "zh-CN"):
+        return "other"
+    if code in ("fr", "pt-BR"):
+        return "one" if n <= 1 else "many" if millions else "other"
+    if code in ("es-MX", "it"):
+        return "one" if n == 1 else "many" if millions else "other"
+    if code in ("pl", "ru", "uk"):
+        if code == "pl" and n == 1 or code != "pl" and n10 == 1 and n100 != 11:
+            return "one"
+        return "few" if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else "many"
+    return "one" if n == 1 else "other"
+
+
+def message(key, count=None):
+    """The text for key in the language, then its base language, then English; the key itself when none has it."""
+    code = language()
+    for layer in dict.fromkeys((code, code.split("-")[0], "en")):
+        value = catalog(layer).get(key)
+        if isinstance(value, dict):
+            value = value.get(plural_category(layer, count or 0)) or value.get("other")
+        if isinstance(value, str) and value:
+            return value
+    return key
+
+
+def fill(text, args):
+    """%1, %2 ... in one pass, so an argument that holds "%2" is never filled in turn."""
+    return re.sub(r"%(\d)", lambda m: str(args[int(m[1]) - 1]) if 0 < int(m[1]) <= len(args) else m[0], text)
+
+
+def tr(key, *args):
+    return fill(message(key), args)
+
+
+def trn(key, count, *args):
+    """A plural entry: %1 is the count, the other arguments follow from %2."""
+    return fill(message(key, count), (count, *args))
 
 
 def delivery_message(added_by_source):
     """Counts only: notify-send gets the text as arguments, which every account on the computer can read, and the
     source names say what the user reads."""
     total = sum(added_by_source.values())
-    return f"{plural(total, 'new post')}", f"from {plural(sum(1 for count in added_by_source.values() if count), 'source')}"
+    return trn("notify.newPosts", total), trn("notify.fromSources", sum(1 for count in added_by_source.values() if count))
 
 
 def send_notification(summary, body, view, glyph, run=subprocess.run):
@@ -3622,8 +3687,7 @@ def token_notice(state, notify):
 
 
 def notify_token_rejected(waiting, send=send_notification):
-    send("X token rejected", f"Paste a new one in Omabox: Sources, then t. {plural(len(waiting), 'X source')} waiting.",
-         "sources", chr(GLYPHS["twitter"]))
+    send(tr("notify.xTokenRejected"), trn("notify.xTokenWaiting", len(waiting)), "sources", chr(GLYPHS["twitter"]))
 
 
 def prune(state, sources):
@@ -4083,6 +4147,10 @@ def cmd_search(args):
         print(f"{mark} {row['id']}  {shown(row['published'][:10])}  {shown(row['source'])}: {shown(row['title'])}{flags}")
 
 
+MONTH_KEYS = ("month.jan", "month.feb", "month.mar", "month.apr", "month.may", "month.jun", "month.jul", "month.aug",
+              "month.sep", "month.oct", "month.nov", "month.dec")
+
+
 def relative_date(value, now):
     """Model.relativeTime's wording: 5m ago, 3h ago, 2d ago, then Sep 20, or Sep 20 2025 in another year."""
     stamp = iso_utc(value)
@@ -4091,15 +4159,18 @@ def relative_date(value, now):
     then = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     minutes = int((now - then).total_seconds() // 60)
     if minutes < 1:
-        return "just now"
+        return tr("time.justNow")
     if minutes < 60:
-        return f"{minutes}m ago"
+        return trn("time.minutesAgo", minutes)
     if minutes < 24 * 60:
-        return f"{minutes // 60}h ago"
+        return trn("time.hoursAgo", minutes // 60)
     if minutes < 7 * 24 * 60:
-        return f"{minutes // (24 * 60)}d ago"
+        return trn("time.daysAgo", minutes // (24 * 60))
     local = then.astimezone()
-    return f"{local:%b} {local.day}" + ("" if local.year == now.astimezone().year else f" {local.year}")
+    month = tr(MONTH_KEYS[local.month - 1])
+    if local.year == now.astimezone().year:
+        return tr("pick.date", month, local.day)
+    return tr("pick.dateYear", month, local.day, local.year)
 
 
 PICK_LIMIT = 300
@@ -4129,11 +4200,11 @@ def pick_options(items, now=None, limit=PICK_LIMIT):
     now = now or datetime.now(timezone.utc)
     options, ids = [], {}
     for item in items[:limit]:
-        label = menu_text(item.get("title"), 160) or "(untitled)"
+        label = menu_text(item.get("title"), 160) or tr("pick.untitled")
         marks = [menu_text(item.get("source"), 60), relative_date(item.get("published"), now)]
-        marks += [word for word, on in (("unread", not item.get("read")), ("read later", item.get("later")),
-                                        ("snoozed", is_snoozed(item, now))) if on]
-        subtext = " · ".join(mark for mark in marks if mark) or "post"
+        marks += [word for word, on in ((tr("pick.unread"), not item.get("read")), (tr("pick.readLater"), item.get("later")),
+                                        (tr("pick.snoozed"), is_snoozed(item, now))) if on]
+        subtext = " · ".join(mark for mark in marks if mark) or tr("pick.post")
         key, count = f"{label}\t{subtext}", 1
         while key in ids:
             count += 1
@@ -4195,7 +4266,7 @@ def pick_post(query="", run=subprocess.run, select=menu_select, timeout=PICK_TIM
     if not items:
         raise ValueError(f"no posts match {query!r}" if query.strip() else "no posts yet")
     options, ids = pick_options(items, now)
-    prompt = f"Omabox: {menu_text(query, 40)}" if query.strip() else "Omabox posts"
+    prompt = tr("pick.promptQuery", menu_text(query, 40)) if query.strip() else tr("pick.prompt")
     picked = select(options, prompt, run=run, timeout=timeout)
     post_id = pick_selection(picked, ids) if picked else None
     if post_id:
@@ -4862,10 +4933,11 @@ def cmd_delivery(args):
             save_state(state)
     at = delivery_time(state)
     day = weekly_day(state)
-    upcoming = next_delivery_moment(state).strftime("%a %H:%M")
+    moment = next_delivery_moment(state)
+    upcoming = moment.strftime("%a %H:%M")
     if args.json:
-        print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming, "recovered": recovered_file(state),
-                          "fetching": fetching()}))
+        print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming, "next_at": moment.isoformat(),
+                          "recovered": recovered_file(state), "fetching": fetching()}))
         return
     print(f"daily delivery at {at}, weekly sources on {WEEKDAY_NAMES[day]}, next {upcoming}")
 

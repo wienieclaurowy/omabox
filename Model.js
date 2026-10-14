@@ -84,8 +84,16 @@ function clearableIds(items) {
   return ids
 }
 
-function filterLabel(filter) {
-  return filter === "later" ? "READ LATER" : String(filter || "").toUpperCase()
+function filterLabel(filter, Tr) {
+  return filter === "later" ? Tr.t("feed.filterReadLater") : String(filter || "").toUpperCase()
+}
+
+// One pass over the %N holes, so a value that itself holds "%2" (a feed title) is never filled in turn.
+function fill(template, values) {
+  return String(template).replace(/%(\d)/g, function(hole, n) {
+    var value = values[Number(n) - 1]
+    return value === undefined ? hole : String(value)
+  })
 }
 
 function imagePaths(html, imageDir) {
@@ -149,13 +157,13 @@ var ACTION_SHOWN_MAX = 600
 
 // A stored notification's action runs on a second o while the status line still shows what the first one said it
 // would run, for the same notification: Omarchy keeps any app's argv for days. { run: argv or null, pending, message }
-function actionStep(row, pending, message) {
+function actionStep(row, pending, message, Tr) {
   var argv = notificationArgv(row)
-  if (!argv) return { run: null, pending: "", message: "This notification has no action." }
+  if (!argv) return { run: null, pending: "", message: Tr.t("notifications.noAction") }
   var command = commandLine(argv)
   if (command.length > ACTION_SHOWN_MAX)
-    return { run: null, pending: "", message: "This notification's action is too long to show in full (" + command.length + " characters), so it is not run." }
-  var prompt = "o again to run: " + command
+    return { run: null, pending: "", message: Tr.tn("notifications.actionTooLong", command.length).arg(Tr.formatNumber(command.length)) }
+  var prompt = fill(Tr.t("notifications.runPrompt"), [command])
   if (pending !== "" && pending === String(row.file || "") && message === prompt) return { run: argv, pending: "", message: "" }
   return { run: null, pending: String(row.file || ""), message: prompt }
 }
@@ -183,19 +191,18 @@ function versionTag(item, installed) {
   return cmp > 0 ? "newer" : ""
 }
 
-function relativeTime(iso, now) {
+function relativeTime(iso, now, Tr) {
   if (!iso) return ""
   var then = new Date(iso)
   if (isNaN(then.getTime())) return ""
   var minutes = Math.floor((now.getTime() - then.getTime()) / 60000)
-  if (minutes < 1) return "just now"
-  if (minutes < 60) return minutes + "m ago"
+  if (minutes < 1) return Tr.t("time.justNow")
+  if (minutes < 60) return Tr.tn("time.minutesAgo", minutes).arg(Tr.formatNumber(minutes))
   var hours = Math.floor(minutes / 60)
-  if (hours < 24) return hours + "h ago"
+  if (hours < 24) return Tr.tn("time.hoursAgo", hours).arg(Tr.formatNumber(hours))
   var days = Math.floor(hours / 24)
-  if (days < 7) return days + "d ago"
-  if (then.getFullYear() === now.getFullYear()) return Qt.formatDate(then, "MMM d")
-  return Qt.formatDate(then, "MMM d yyyy")
+  if (days < 7) return Tr.tn("time.daysAgo", days).arg(Tr.formatNumber(days))
+  return then.toLocaleDateString(Tr.locale, then.getFullYear() === now.getFullYear() ? Tr.t("time.date") : Tr.t("time.dateYear"))
 }
 
 // "<file name>\t<json>" per line from Omarchy's history dir and Omabox's archive; the same file can appear in both.
@@ -232,7 +239,7 @@ function escapeHtml(text) {
 
 // A notification shaped like a feed item so the reader can show its full text: plain body, escaped, paragraphs
 // on blank lines, line breaks kept, bare URLs linked. Summary is the title; the app glyph stands in for a source icon.
-function noteAsItem(row) {
+function noteAsItem(row, Tr) {
   var body = escapeHtml(plainBody(row.body))
   body = body.replace(/https?:\/\/[^\s<>"]+/g, function(url) {
     var clean = url.replace(/[.,;:!?)\]']+$/, "")
@@ -243,9 +250,9 @@ function noteAsItem(row) {
   return {
     id: "note:" + row.file,
     note: true,
-    source: appLabel(row) || "Notification",
+    source: appLabel(row) || Tr.t("notifications.fallbackTitle"),
     icon: { glyph: appGlyph(row) },
-    title: row.summary || appLabel(row) || "Notification",
+    title: row.summary || appLabel(row) || Tr.t("notifications.fallbackTitle"),
     html: html,
     link: "",
     published: new Date(row.timestamp || 0).toISOString(),
@@ -255,17 +262,13 @@ function noteAsItem(row) {
 }
 
 // Empty while deliveries run normally: the panel shows only what needs attention.
-function deliveryNotice(state, now, problem) {
-  if (problem) return "Delivery failed: " + problem
+function deliveryNotice(state, now, problem, Tr) {
+  if (problem) return fill(Tr.t("feed.deliveryFailed"), [problem])
   if (state.paused_until && String(state.paused_until) > now.toISOString())
-    return "Deliveries paused until " + Qt.formatDateTime(new Date(state.paused_until), "ddd HH:mm") + "  ·  omabox pause off"
-  if (!state.delivered) return "Nothing delivered yet. The first delivery starts within a minute."
+    return fill(Tr.t("feed.pausedUntil"), [new Date(state.paused_until).toLocaleString(Tr.locale, Tr.t("time.weekdayTime"))])
+      + "  ·  omabox pause off"
+  if (!state.delivered) return Tr.t("feed.nothingDelivered")
   return ""
-}
-
-function deliveredLabel(state, now, at, problem) {
-  return deliveryNotice(state, now, problem)
-    || "Delivered " + relativeTime(state.delivered, now) + (at ? "  ·  daily at " + at : "")
 }
 
 // appIcon is often a reverse-DNS desktop id ("com.mitchellh.ghostty") when the sender leaves app empty.
@@ -277,17 +280,18 @@ function appLabel(row) {
 }
 
 var WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-var WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-function weekdayOptions() {
+// Locale.dayName counts from Sunday = 0; its format argument is Locale.LongFormat 0 or ShortFormat 1, which a
+// .pragma library cannot name.
+function weekdayOptions(Tr) {
   return WEEKDAYS.map(function(day, index) {
-    return { value: day, label: WEEKDAY_NAMES[index].slice(0, 3), tooltip: WEEKDAY_NAMES[index] + " (w cycles)" }
+    return { value: day, label: Tr.locale.dayName((index + 1) % 7, 1),
+             tooltip: fill(Tr.t("sources.weekdayTooltip"), [Tr.locale.standaloneDayName((index + 1) % 7, 0)]) }
   })
 }
 
-function weekdayName(day) {
-  var index = WEEKDAYS.indexOf(day)
-  return index < 0 ? WEEKDAY_NAMES[0] : WEEKDAY_NAMES[index]
+function weekdayName(day, Tr) {
+  return Tr.locale.standaloneDayName((Math.max(0, WEEKDAYS.indexOf(day)) + 1) % 7, 0)
 }
 
 function nextWeekday(day) {
@@ -298,28 +302,36 @@ function nextCadence(cadence) {
   return cadence === "daily" ? "weekly" : cadence === "weekly" ? "paused" : "daily"
 }
 
-function sourceStatus(source, now) {
-  if (source.error) return "✗ " + source.error
-  if (!source.fetched) return "never fetched"
-  return "✓ " + relativeTime(source.fetched, now)
+// bin/omabox X_TOKEN_ERROR, stored in items.json in English; the other source errors come from the fetch as they are.
+var X_TOKEN_ERROR = "X token rejected: paste a new one in Sources (t)"
+
+function sourceError(error, Tr) {
+  return String(error) === X_TOKEN_ERROR ? Tr.t("sources.xTokenRejected") : String(error)
 }
 
-// The rejected-token error (bin/omabox X_TOKEN_ERROR) carries its fix, so the source row shows it unelided.
+function sourceStatus(source, now, Tr) {
+  if (source.error) return "✗ " + sourceError(source.error, Tr)
+  if (!source.fetched) return Tr.t("sources.neverFetched")
+  return "✓ " + relativeTime(source.fetched, now, Tr)
+}
+
+// The rejected-token error carries its fix, so the source row shows it unelided.
 function errorNeedsFullText(error) {
   return String(error || "").indexOf("X token rejected") === 0
 }
 
 // stale: `omabox sources --json`'s { kind: "failing" | "quiet", days } or null.
-function staleLabel(stale) {
+function staleLabel(stale, Tr) {
   if (!stale) return ""
-  return (stale.kind === "failing" ? "failing for " : "no new posts for ") + stale.days + " days"
+  return (stale.kind === "failing" ? Tr.tn("sources.failingFor", stale.days) : Tr.tn("sources.quietFor", stale.days))
+    .arg(Tr.formatNumber(stale.days))
 }
 
 // "  ·  2 mute rules  ·  no reposts" for the source row's status line, "" when nothing is muted.
-function muteSummary(source) {
+function muteSummary(source, Tr) {
   var n = source.mute ? source.mute.length : 0
-  var parts = n > 0 ? [n + (n === 1 ? " mute rule" : " mute rules")] : []
-  if (source.x_hidden && source.x_hidden.reposts) parts.push("no reposts")
+  var parts = n > 0 ? [Tr.tn("sources.muteRules", n).arg(Tr.formatNumber(n))] : []
+  if (source.x_hidden && source.x_hidden.reposts) parts.push(Tr.t("sources.noReposts"))
   return parts.map(function(part) { return "  ·  " + part }).join("")
 }
 
@@ -343,26 +355,26 @@ function localPath(url) {
 }
 
 // Output of `bash -c '"$@" 2>&1; echo "::exit $?"'`.
-function splitCliOutput(text) {
+function splitCliOutput(text, Tr) {
   var out = String(text || "")
   var match = out.match(/::exit (\d+)\s*$/)
   var code = match ? parseInt(match[1], 10) : 1
-  return { code: code, text: cliProblem(code, match ? out.slice(0, match.index) : out) }
+  return { code: code, text: cliProblem(code, match ? out.slice(0, match.index) : out, Tr) }
 }
 
 // The CLI's output as one message; a missing or too old Python gets a plain explanation instead of the shell's.
-function cliProblem(code, text) {
+function cliProblem(code, text, Tr) {
   var out = String(text || "").trim()
   if (code === 126 || code === 127 || /No module named 'tomllib'/.test(out))
-    return "Omabox needs Python 3.11 or newer as python3."
+    return Tr.t("cli.needsPython")
   return code === 0 ? out : out.replace(/^omabox: /, "")
 }
 
-function snoozeChoices() {
+function snoozeChoices(Tr) {
   return [
-    { key: "1", label: "1h", choice: "1h" },
-    { key: "2", label: "3h", choice: "3h" },
-    { key: "3", label: "tomorrow", choice: "tomorrow" }
+    { key: "1", label: Tr.t("snooze.oneHour"), choice: "1h" },
+    { key: "2", label: Tr.t("snooze.threeHours"), choice: "3h" },
+    { key: "3", label: Tr.t("snooze.tomorrow"), choice: "tomorrow" }
   ]
 }
 
@@ -388,40 +400,47 @@ function catchupIds(items, choice, now) {
   return ids
 }
 
-function catchupChoices(items, now) {
+function catchupChoices(items, now, Tr) {
   var choices = [
-    { key: "a", label: "all", choice: "all" },
-    { key: "d", label: "older than a day", choice: "day" },
-    { key: "w", label: "older than a week", choice: "week" }
+    { key: "a", label: Tr.t("catchup.all"), choice: "all" },
+    { key: "d", label: Tr.t("catchup.olderThanDay"), choice: "day" },
+    { key: "w", label: Tr.t("catchup.olderThanWeek"), choice: "week" }
   ]
-  for (var i = 0; i < choices.length; i++) choices[i].detail = String(catchupIds(items, choices[i].choice, now).length)
+  for (var i = 0; i < choices.length; i++) choices[i].detail = Tr.formatNumber(catchupIds(items, choices[i].choice, now).length)
   return choices
 }
 
-function hints(view, mode, reading) {
-  if (reading && view === "notifications") return "j/k scroll  ·  space/ctrl+d/u page  ·  J/K next/prev  ·  oo run action  ·  yy copy  ·  +/- size  ·  h back  ·  ? hide"
-  if (reading) return "j/k scroll  ·  space/ctrl+d/u page  ·  ]/[ sections  ·  J/K next/prev  ·  +/- size  ·  i media  ·  r full article  ·  C refresh comments  ·  yy copy link  ·  z snooze  ·  m later  ·  U update  ·  o browser  ·  h back  ·  ? hide"
-  if (mode === "search") return "enter keep  ·  esc clear"
-  if (mode === "confirm-clear") return "y clear  ·  n keep"
+// [key, label] pairs; the key is typed as shown.
+function hintPairs(view, mode, reading, Tr) {
+  var common = [["H/L", Tr.t("hints.feedNotifications")], ["1/2/3", Tr.t("hints.views")], ["?", Tr.t("hints.hide")]]
+  if (reading && view === "notifications") return [["j/k", Tr.t("hints.scroll")], ["space/ctrl+d/u", Tr.t("hints.page")],
+    ["J/K", Tr.t("hints.nextPrev")], ["oo", Tr.t("hints.runAction")], ["yy", Tr.t("hints.copy")], ["+/-", Tr.t("hints.size")], ["h", Tr.t("hints.back")],
+    ["?", Tr.t("hints.hide")]]
+  if (reading) return [["j/k", Tr.t("hints.scroll")], ["space/ctrl+d/u", Tr.t("hints.page")], ["]/[", Tr.t("hints.sections")],
+    ["J/K", Tr.t("hints.nextPrev")], ["+/-", Tr.t("hints.size")], ["i", Tr.t("hints.media")], ["r", Tr.t("hints.fullArticle")],
+    ["C", Tr.t("hints.refreshComments")], ["yy", Tr.t("hints.copyLink")], ["z", Tr.t("hints.snooze")], ["m", Tr.t("hints.later")],
+    ["U", Tr.t("hints.update")], ["o", Tr.t("hints.browser")], ["h", Tr.t("hints.back")], ["?", Tr.t("hints.hide")]]
+  if (mode === "search") return [["enter", Tr.t("hints.keep")], ["esc", Tr.t("hints.clear")]]
+  if (mode === "confirm-clear") return [["y", Tr.t("hints.clear")], ["n", Tr.t("hints.keep")]]
   if (view === "sources") {
-    if (mode === "add-url") return "enter look up  ·  esc cancel"
-    if (mode === "add-name") return "enter save  ·  esc cancel"
-    if (mode === "rename") return "enter save  ·  esc cancel"
-    if (mode === "mute") return "enter add  ·  tab/shift+tab pick a rule to edit or clear  ·  esc close"
-    if (mode === "confirm") return "y remove  ·  n keep"
-    if (mode === "x-token") return "enter save  ·  esc cancel"
-    return "j/k move  ·  l rename  ·  h back  ·  n new  ·  c cadence  ·  m mute  ·  space pause  ·  x remove  ·  -/+ delivery time  ·  w weekly day  ·  t X token  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
+    if (mode === "add-url") return [["enter", Tr.t("hints.lookUp")], ["esc", Tr.t("hints.cancel")]]
+    if (mode === "add-name" || mode === "rename" || mode === "x-token") return [["enter", Tr.t("hints.save")], ["esc", Tr.t("hints.cancel")]]
+    if (mode === "mute") return [["enter", Tr.t("hints.add")], ["tab/shift+tab", Tr.t("hints.pickRule")], ["esc", Tr.t("hints.close")]]
+    if (mode === "confirm") return [["y", Tr.t("hints.remove")], ["n", Tr.t("hints.keep")]]
+    return [["j/k", Tr.t("hints.move")], ["l", Tr.t("hints.rename")], ["h", Tr.t("hints.back")], ["n", Tr.t("hints.new")], ["c", Tr.t("hints.cadence")],
+      ["m", Tr.t("hints.mute")], ["space", Tr.t("hints.pause")], ["x", Tr.t("hints.remove")], ["-/+", Tr.t("hints.deliveryTime")],
+      ["w", Tr.t("hints.weeklyDay")], ["t", Tr.t("hints.xToken")]].concat(common)
   }
-  if (view === "notifications") return "j/k move  ·  l read  ·  / search  ·  f filter  ·  oo run action  ·  yy copy  ·  x remove  ·  X clear all  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
-  return "j/k move  ·  l read  ·  / search  ·  f filter  ·  z snooze  ·  m later  ·  yy copy link  ·  i media  ·  gg/G top/bottom  ·  o browser  ·  a mark read  ·  X clear read  ·  d do not disturb  ·  H/L feed/notifications  ·  1/2/3 views  ·  ? hide"
+  if (view === "notifications") return [["j/k", Tr.t("hints.move")], ["l", Tr.t("hints.read")], ["/", Tr.t("hints.search")],
+    ["f", Tr.t("hints.filter")], ["oo", Tr.t("hints.runAction")], ["yy", Tr.t("hints.copy")], ["x", Tr.t("hints.remove")], ["X", Tr.t("hints.clearAll")],
+    ["d", Tr.t("hints.doNotDisturb")]].concat(common)
+  return [["j/k", Tr.t("hints.move")], ["l", Tr.t("hints.read")], ["/", Tr.t("hints.search")], ["f", Tr.t("hints.filter")], ["z", Tr.t("hints.snooze")],
+    ["m", Tr.t("hints.later")], ["yy", Tr.t("hints.copyLink")], ["i", Tr.t("hints.media")], ["gg/G", Tr.t("hints.topBottom")], ["o", Tr.t("hints.browser")],
+    ["a", Tr.t("hints.markRead")], ["X", Tr.t("hints.clearRead")], ["d", Tr.t("hints.doNotDisturb")]].concat(common)
 }
 
-// Hint strings are "key label  ·  key label"; the key is the first word.
-function hintEntries(view, mode, reading) {
-  return hints(view, mode, reading).split("  ·  ").map(function(part) {
-    var space = part.indexOf(" ")
-    return space < 0 ? { key: part, label: "" } : { key: part.slice(0, space), label: part.slice(space + 1) }
-  })
+function hintEntries(view, mode, reading, Tr) {
+  return hintPairs(view, mode, reading, Tr).map(function(pair) { return { key: pair[0], label: pair[1] } })
 }
 
 // Qt rich text CSS: one selector per rule (grouped selectors are not reliable), colours as solid #rrggbb, sizes in px.
@@ -513,21 +532,92 @@ function repliesAvailable(item) {
     || /<a href="https:\/\/news\.ycombinator\.com\/item\?id=\d+">Discussion on Hacker News<\/a>/.test(String(item.html || "")))
 }
 
-// The post with its stored replies section (bin/omabox replies_markup) under it; while a fetch runs, a note
-// sits where that section starts.
-function withReplies(item, loading) {
-  if (!item || (!item.replies_html && !loading)) return item
+// The post with its stored replies section (bin/omabox replies_markup) under it, the CLI's own words in it
+// translated; while a fetch runs, a note sits where that section starts.
+function withReplies(item, loading, Tr) {
+  if (!item || item.note) return item
   var copy = {}
   for (var key in item) copy[key] = item[key]
-  copy.html = String(item.html || "")
-    + (loading ? "<p class=\"meta\">" + (item.replies_html ? "Refreshing comments…" : "Loading comments…") + "</p>" : "")
-    + (item.replies_html || "")
+  copy.html = localizeMarkup(String(item.html || "")
+    + (loading ? "<p class=\"meta\">" + escapeHtml(item.replies_html ? Tr.t("reader.refreshingComments") : Tr.t("reader.loadingComments"))
+      + "</p>" : "")
+    + (item.replies_html || ""), new Date(), Tr)
   return copy
 }
 
-function readingTime(item) {
+var EN_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+var STAMP = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2}(?: \\d{4})?, \\d\\d:\\d\\d"
+
+// bin/omabox local_stamp: "Sep 20, 14:05" in the year it was written, "Sep 20 2025, 14:05" for another year.
+function localStamp(text, now, Tr) {
+  var m = /^(\w{3}) (\d{1,2})(?: (\d{4}))?, (\d\d):(\d\d)$/.exec(text)
+  if (!m || EN_MONTHS.indexOf(m[1]) < 0) return text
+  var date = new Date(m[3] ? Number(m[3]) : now.getFullYear(), EN_MONTHS.indexOf(m[1]), Number(m[2]), Number(m[4]), Number(m[5]))
+  if (!m[3] && date.getTime() > now.getTime() + 86400000) date.setFullYear(date.getFullYear() - 1)
+  return escapeHtml(date.toLocaleString(Tr.locale, m[3] ? Tr.t("time.stampYear") : Tr.t("time.stamp")))
+}
+
+// The first line of each replies section (bin/omabox REPLIES_LINES), stored in English with the post.
+var REPLIES_LINES = {
+  "Top replies on X, the author's threads first": "reader.repliesX",
+  "No replies on X yet": "reader.noRepliesX",
+  "Top comments on Reddit, best first": "reader.repliesReddit",
+  "No comments on Reddit yet": "reader.noRepliesReddit",
+  "Top comments on Hacker News, the author's threads first": "reader.repliesHackerNews",
+  "No comments on Hacker News yet": "reader.noRepliesHackerNews",
+  "Replies on Bluesky, the author's threads and most liked first": "reader.repliesBluesky",
+  "No replies on Bluesky yet": "reader.noRepliesBluesky",
+  "Replies on Mastodon, the author's threads and most liked first": "reader.repliesMastodon",
+  "No replies on Mastodon yet": "reader.noRepliesMastodon"
+}
+
+function repliesLine(line, Tr) {
+  return Object.prototype.hasOwnProperty.call(REPLIES_LINES, line) ? Tr.t(REPLIES_LINES[line]) : null
+}
+
+// "Replying to @a, @b and 3 others" (bin/omabox replying_to): the names are markup and stay as they are.
+function replyingTo(names, Tr) {
+  var parts = names.split(" and ")
+  var last = parts.pop()
+  var head = parts.length > 0 ? parts.join(" and ").split(", ") : []
+  var others = /^(\d+) others$/.exec(last)
+  if (others) last = escapeHtml(Tr.tn("reader.others", Number(others[1])).arg(Tr.formatNumber(Number(others[1]))))
+  var list = head.length > 0 ? fill(escapeHtml(Tr.t("reader.listAnd")), [head.join(escapeHtml(Tr.t("reader.listComma"))), last]) : last
+  return fill(escapeHtml(Tr.t("reader.replyingTo")), [list])
+}
+
+// bin/omabox writes its own words into the post and comment markup in English: the comments heading and its first
+// line, AUTHOR badges, "Replying to", discussion links and comment times. They are swapped here for display only;
+// Model.repliesAvailable and the CLI keep matching the stored English.
+function localizeMarkup(html, now, Tr) {
+  return html
+    .replace(/<p class="section">Comments <span class="count">/g,
+      "<p class=\"section\">" + escapeHtml(Tr.t("reader.comments")) + " <span class=\"count\">")
+    .replace(new RegExp("<p class=\"meta\">([^<]*) · fetched (" + STAMP + ")</p>", "g"), function(match, line, stamp) {
+      var text = repliesLine(line, Tr)
+      return text === null ? match
+        : "<p class=\"meta\">" + fill(escapeHtml(Tr.t("reader.repliesFetched")), [escapeHtml(text), localStamp(stamp, now, Tr)]) + "</p>"
+    })
+    .replace(/<span class="badge">AUTHOR<\/span>/g, "<span class=\"badge\">" + escapeHtml(Tr.t("reader.authorBadge")) + "</span>")
+    .replace(/<p class="replyto">Replying to (.*?)<\/p>/g, function(match, names) {
+      return "<p class=\"replyto\">" + replyingTo(names, Tr) + "</p>"
+    })
+    .replace(new RegExp("<span class=\"meta\">((?:[^<]* · )?)(<a href=\"[^\"]*\">)?(" + STAMP + "|open|on X)(</a>)?</span>", "g"),
+      function(match, label, open, when, close) {
+        if (!open !== !close) return match
+        var text = when === "open" ? escapeHtml(Tr.t("reader.openComment")) : when === "on X" ? escapeHtml(Tr.t("reader.onX"))
+          : localStamp(when, now, Tr)
+        return "<span class=\"meta\">" + label + (open || "") + text + (close || "") + "</span>"
+      })
+    .replace(/(<a href="[^"]*">)Discussion on (Hacker News|Reddit)<\/a>/g, function(match, open, site) {
+      return open + fill(escapeHtml(Tr.t("reader.discussionOn")), [site]) + "</a>"
+    })
+    .replace(/>The quoted post is not available\.<\/p>/g, ">" + escapeHtml(Tr.t("reader.quoteUnavailable")) + "</p>")
+}
+
+function readingTime(item, Tr) {
   var minutes = item && item.minutes ? item.minutes : 0
-  return minutes > 0 ? minutes + " min read" : ""
+  return minutes > 0 ? Tr.tn("reader.minRead", minutes).arg(Tr.formatNumber(minutes)) : ""
 }
 
 // bin/omabox stores pictures as <img src="omabox-img:NAME" width height> refs into its cache, video posters the same
