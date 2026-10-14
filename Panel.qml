@@ -2213,7 +2213,8 @@ Panel {
           anchors.right: parent.right
           anchors.bottom: parent.bottom
           textFormat: Text.PlainText
-          wrapMode: Text.WordWrap
+          // Wrap, not WordWrap: a notification's command to confirm can be one long word and must show in full
+          wrapMode: Text.Wrap
           text: messageStrip.text
           color: root.busy || (root.message === "" && root.fetching) ? root.faint
             : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)

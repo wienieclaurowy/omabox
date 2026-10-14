@@ -132,19 +132,30 @@ function notificationArgv(row) {
   return parsed
 }
 
-// argv as a one-line shell command; arguments that need it are quoted JSON-style, so controls show as escapes.
-function commandLine(argv, limit) {
-  var text = argv.map(function(arg) { return /^[\w@%+=:,.\/-]+$/.test(arg) ? arg : JSON.stringify(arg) }).join(" ")
-  limit = limit || 120
-  return text.length <= limit ? text : text.slice(0, limit - 40) + " … " + text.slice(-37)
+// Invisible and direction-changing characters, which could make a quoted argument read as something else.
+var HIDDEN_CHARS = /[\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g
+
+// argv as a one-line shell command, in full; arguments that need it are quoted JSON-style, so controls and
+// invisible characters show as escapes.
+function commandLine(argv) {
+  return argv.map(function(arg) {
+    if (/^[\w@%+=:,.\/-]+$/.test(arg)) return arg
+    return JSON.stringify(arg).replace(HIDDEN_CHARS, function(c) { return "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4) })
+  }).join(" ")
 }
+
+// The confirmation shows the whole command; one too long for the message strip is not offered at all.
+var ACTION_SHOWN_MAX = 600
 
 // A stored notification's action runs on a second o while the status line still shows what the first one said it
 // would run, for the same notification: Omarchy keeps any app's argv for days. { run: argv or null, pending, message }
 function actionStep(row, pending, message) {
   var argv = notificationArgv(row)
   if (!argv) return { run: null, pending: "", message: "This notification has no action." }
-  var prompt = "o again to run: " + commandLine(argv)
+  var command = commandLine(argv)
+  if (command.length > ACTION_SHOWN_MAX)
+    return { run: null, pending: "", message: "This notification's action is too long to show in full (" + command.length + " characters), so it is not run." }
+  var prompt = "o again to run: " + command
   if (pending !== "" && pending === String(row.file || "") && message === prompt) return { run: argv, pending: "", message: "" }
   return { run: null, pending: String(row.file || ""), message: prompt }
 }
