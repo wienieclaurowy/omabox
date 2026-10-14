@@ -11,6 +11,7 @@ import json
 import os
 import re
 import socket
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -1373,6 +1374,60 @@ class PublicHostTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
         with mock.patch.object(omabox, "public_address", lambda address: True):
             self.assertEqual(omabox.download_limited(f"http://127.0.0.1:{server.server_port}/x.png", 100), b"png")
+
+
+    def connect_proxy(self):
+        """A proxy that records each CONNECT and the request sent through the tunnel, answering it 204."""
+        seen = []
+
+        class Proxy(socketserver.StreamRequestHandler):
+            def handle(self):
+                seen.append(self.rfile.readline().decode().strip())
+                while self.rfile.readline().strip():
+                    pass
+                self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                inner = [self.rfile.readline().decode().strip()]
+                while line := self.rfile.readline().strip():
+                    inner.append(line.decode())
+                seen.append(inner)
+                self.wfile.write(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Proxy)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        proxy = f"http://127.0.0.1:{server.server_address[1]}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                                             omabox.PublicOnlyRedirects, omabox.PublicHTTPHandler, omabox.PublicHTTPSHandler)
+        return opener, seen
+
+    def test_a_proxy_is_never_asked_for_a_local_target(self):
+        opener, seen = self.connect_proxy()
+        for url in ("http://10.0.0.1/admin/video.mp4", "https://10.0.0.1/admin/video.mp4", "https://192.168.1.1/",
+                    "http://intranet.invalid/feed"):
+            with self.assertRaisesRegex(OSError, "non-public address refused|Name or service not known|not known"):
+                opener.open(url, timeout=5)
+        self.assertEqual(seen, [])
+
+    def test_a_proxy_is_asked_for_the_address_checked_here(self):
+        opener, seen = self.connect_proxy()
+        answers = iter(["93.184.216.34", "10.0.0.5"])
+
+        def resolve(host, port, *args, **kwargs):
+            if host != "feeds.example":
+                return real(host, port, *args, **kwargs)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers), port or 0))]
+
+        real = socket.getaddrinfo
+        with mock.patch.object(omabox.socket, "getaddrinfo", resolve):
+            opener.open("http://feeds.example/rss?a=1", timeout=5).close()
+        self.assertEqual(seen[0], "CONNECT 93.184.216.34:80 HTTP/1.1")
+        self.assertEqual(seen[1][0], "GET /rss?a=1 HTTP/1.1")
+        self.assertIn("Host: feeds.example", seen[1])
+        connection = omabox.PinnedProxyHTTPSConnection("127.0.0.1", 9)
+        with mock.patch.object(omabox.socket, "getaddrinfo", resolve):
+            with self.assertRaisesRegex(OSError, "non-public address refused"):
+                connection.set_tunnel("feeds.example")
 
 
 RELEASE_HTML = (

@@ -288,14 +288,44 @@ def proxied(req):
     return req.has_proxy() or bool(req._tunnel_host)
 
 
+class PinnedTunnel:
+    """A CONNECT tunnel through a proxy to an address checked here, never to the name: the proxy would look the name
+    up again, and a short-TTL record can answer that second lookup with a LAN address."""
+
+    def set_tunnel(self, host, port=None, headers=None):
+        name, port = self._get_hostport(host, port)
+        infos = socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
+        if not infos or not all(public_address(info[4][0]) for info in infos):
+            raise OSError(f"non-public address refused: {name}")
+        self.server_name = name
+        super().set_tunnel(infos[0][4][0], port, headers)
+
+
+class PinnedProxyHTTPConnection(PinnedTunnel, http.client.HTTPConnection):
+    pass
+
+
+class PinnedProxyHTTPSConnection(PinnedTunnel, http.client.HTTPSConnection):
+    def connect(self):
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.server_name)
+
+
 class PublicHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(http.client.HTTPConnection if proxied(req) else PublicHTTPConnection, req)
+        if not proxied(req):
+            return self.do_open(PublicHTTPConnection, req)
+        # tunnelled like https, so the proxy gets an address and not a name to resolve
+        origin = urllib.parse.urlsplit(req.full_url)
+        host, port = origin.hostname or "", origin.port or 80
+        req._tunnel_host = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        req.selector = urllib.parse.urlunsplit(("", "", origin.path or "/", origin.query, ""))
+        return self.do_open(PinnedProxyHTTPConnection, req)
 
 
 class PublicHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        return self.do_open(http.client.HTTPSConnection if proxied(req) else PublicHTTPSConnection, req, context=self._context)
+        return self.do_open(PinnedProxyHTTPSConnection if proxied(req) else PublicHTTPSConnection, req, context=self._context)
 
 
 class WebRedirects(urllib.request.HTTPRedirectHandler):
