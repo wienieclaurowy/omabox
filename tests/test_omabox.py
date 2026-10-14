@@ -3286,6 +3286,12 @@ class ViewerTest(unittest.TestCase):
     PATHS = ["/c/a.png", "/c/b.jpg", "/c/c.gif"]
     URLS = ["https://video.twimg.com/a.mp4", "https://video.twimg.com/b.mp4"]
 
+    def setUp(self):
+        self.runtime = Path(tempfile.mkdtemp())
+        patcher = mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(self.runtime)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None, direct_players=None):
         """cmd_play against a fake player whose window shows after window_after looks and closes after
         window_gone_after (default: the next look); exits: poll() result."""
@@ -3365,7 +3371,8 @@ class ViewerTest(unittest.TestCase):
                           ["loadfile", "http://127.0.0.1:9/t0k3n/1.mp4", "append-play"]])
         with self.installed("mpv", "yt-dlp"):
             direct = omabox.direct_player_argv(["https://www.youtube.com/watch?v=Zq3vKe8TbWo"], 0, ipc=7)
-        self.assertEqual(direct, ["mpv", "--playlist-start=0", "--tls-verify=yes", "--idle=once", "--input-ipc-client=fd://7"])
+        self.assertEqual(direct, ["mpv", "--playlist-start=0", "--tls-verify=yes", f"--script-opts-append=ytdl_hook-ytdl_path="
+                                  f"{omabox.YTDL_WRAPPER}", "--idle=once", "--input-ipc-client=fd://7"])
 
     @unittest.skipUnless(omabox.shutil.which("mpv") and omabox.shutil.which("ffmpeg"), "needs mpv and ffmpeg")
     def test_mpv_starts_at_the_clicked_video_with_the_others_around_it(self):
@@ -3404,8 +3411,19 @@ class ViewerTest(unittest.TestCase):
 
     def test_youtube_videos_go_to_mpv_as_watch_pages_with_the_proxy_kept(self):
         urls = ["https://www.youtube.com/watch?v=Zq3vKe8TbWo", "https://www.youtube.com/shorts/Ab3vKe8TbW_"]
-        launched, out = self.play(urls, start=1, window_after=3)
-        self.assertEqual(launched[0], ["mpv", "--playlist-start=1", "--"] + urls)
+        seen = {}
+
+        def mpv(files, start, ipc=None):
+            seen.update({file: (self.runtime / "omabox-ytdl" / file[7:]).read_text() for file in files})
+            return ["mpv", f"--playlist-start={start}", "--"] + files
+
+        launched, out = self.play(urls, start=1, window_after=3, direct_players=mpv)
+        self.assertTrue(all(arg.startswith(("mpv", "--")) or re.fullmatch(r"ytdl://[\w-]{22}", arg) for arg in launched[0]),
+                        launched[0])
+        self.assertEqual(list(seen.values()), urls)
+        self.assertEqual(list(seen), launched[0][3:])
+        self.assertEqual(list((self.runtime / "omabox-ytdl").iterdir()), [])
+        self.assertEqual(self.env["OMABOX_YTDL_TOKENS"], str(self.runtime / "omabox-ytdl"))
         self.assertEqual(self.env["http_proxy"], "http://192.0.2.1:3128")
         with self.assertRaises(SystemExit) as caught:
             self.play(urls, direct_players=lambda urls, start, ipc=None: None)
@@ -3413,9 +3431,11 @@ class ViewerTest(unittest.TestCase):
         reddit = ["https://v.redd.it/ab12cd/DASHPlaylist.mpd"]
         with self.installed("mpv"):
             self.assertIsNone(omabox.direct_player_argv(urls, 0))
-            self.assertEqual(omabox.direct_player_argv(reddit, 0), ["mpv", "--playlist-start=0", "--tls-verify=yes", "--"] + reddit)
+            self.assertIsNone(omabox.direct_player_argv(["ytdl://b-_a7ghi6-upq3_Cr-gRpg"], 0))
+            self.assertEqual(omabox.direct_player_argv(reddit, 0)[-2:], ["--"] + reddit)
         with self.installed("mpv", "yt-dlp"):
-            self.assertEqual(omabox.direct_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--tls-verify=yes", "--"] + urls)
+            self.assertEqual(omabox.direct_player_argv(urls, 0)[:4], ["mpv", "--playlist-start=0", "--tls-verify=yes",
+                                                                     f"--script-opts-append=ytdl_hook-ytdl_path={omabox.YTDL_WRAPPER}"])
         self.assertTrue(omabox.direct_video(reddit[0]))
         self.assertTrue(omabox.direct_video("https://video.bsky.app/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
         self.assertFalse(omabox.direct_video("https://video.bsky.app.example/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
@@ -3439,6 +3459,30 @@ class ViewerTest(unittest.TestCase):
         with self.installed("vlc", "mpv"):
             argv = omabox.player_argv(["u0", "u1", "u2"], 1, self.desktop("vlc --started-from-file %U"))
         self.assertEqual(argv, ["vlc", "--started-from-file", "u1", "u2", "u0"])
+
+    def test_the_ytdl_wrapper_hands_yt_dlp_the_address_on_stdin_only(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "bin").mkdir()
+        fake = root / "bin" / "yt-dlp"
+        fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {root}/argv\ncat > {root}/stdin\necho "{{}}"\n')
+        fake.chmod(0o755)
+        files, made = omabox.ytdl_tokens(["https://www.youtube.com/watch?v=Zq3vKe8TbWo", "https://v.redd.it/ab/DASHPlaylist.mpd"],
+                                         root / "tokens")
+        self.assertEqual(files[1], "https://v.redd.it/ab/DASHPlaylist.mpd")
+        self.assertEqual((root / "tokens").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(made[0].stat().st_mode & 0o777, 0o600)
+        env = {"PATH": f"{root / 'bin'}:/usr/bin", "OMABOX_YTDL_TOKENS": str(root / "tokens")}
+        hook = [str(omabox.YTDL_WRAPPER), "--no-warnings", "-J", "--format", "best", "--no-playlist", "--"]
+        ran = subprocess.run(hook + [files[0][len("ytdl://"):]], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((ran.returncode, ran.stdout), (0, "{}\n"), ran.stderr)
+        self.assertEqual((root / "argv").read_text().split(), ["--no-warnings", "-J", "--format", "best", "--no-playlist",
+                                                               "--batch-file", "-"])
+        self.assertEqual((root / "stdin").read_text(), "https://www.youtube.com/watch?v=Zq3vKe8TbWo\n")
+        (root / "argv").unlink()
+        for last in (files[1], "ytdl://" + made[0].name, "A" * 22, "../tokens/" + made[0].name):
+            ran = subprocess.run(hook + [last], env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(ran.returncode, 0, last)
+        self.assertFalse((root / "argv").exists())
 
     def test_default_mpv_keeps_the_post_order(self):
         with self.installed("mpv"):

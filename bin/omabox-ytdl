@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""yt-dlp for Omabox's mpv, set as its ytdl_hook-ytdl_path. mpv's ytdl hook ends yt-dlp's arguments with the video's
+address, where every account on the computer can read it; Omabox gives mpv ytdl://TOKEN instead, and this looks the
+token up in OMABOX_YTDL_TOKENS (a private folder) and hands yt-dlp the address on stdin. Anything that is not such
+a token, as mpv's fallback for other addresses passes, exits without running yt-dlp."""
+
+import os
+import re
+import shutil
+import sys
+
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
+
+
+def main(argv):
+    folder = os.environ.get("OMABOX_YTDL_TOKENS", "")
+    if len(argv) < 3 or argv[-2] != "--" or not TOKEN_RE.fullmatch(argv[-1]) or not os.path.isabs(folder):
+        sys.exit("omabox-ytdl: not a video Omabox opened")
+    try:
+        with open(os.path.join(folder, argv[-1]), encoding="utf-8") as handle:
+            url = handle.read().strip()
+    except OSError:
+        sys.exit("omabox-ytdl: not a video Omabox opened")
+    ytdl = shutil.which("yt-dlp") or shutil.which("youtube-dl")
+    if not url.startswith("https://") or any(char.isspace() for char in url) or not ytdl:
+        sys.exit("omabox-ytdl: no yt-dlp, or not a web address")
+    # the address goes through a pipe that yt-dlp reads as its batch file; exec keeps mpv's kill reaching yt-dlp
+    read, write = os.pipe()
+    os.write(write, url.encode() + b"\n")
+    os.close(write)
+    os.dup2(read, 0)
+    os.close(read)
+    os.execv(ytdl, [ytdl, *argv[1:-2], "--batch-file", "-"])
+
+
+if __name__ == "__main__":
+    main(sys.argv)

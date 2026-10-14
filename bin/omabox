@@ -3360,12 +3360,42 @@ def player_argv(urls, start, desktop_file=default_desktop_file, ipc=None):
     return None
 
 
+# yt-dlp for Omabox's mpv: takes ytdl://TOKEN only (ytdl_tokens), so no address reaches yt-dlp's argv
+YTDL_WRAPPER = Path(__file__).resolve().parent / "omabox-ytdl"
+YTDL_TOKEN_SECONDS = 86400
+
+
 def direct_player_argv(urls, start, ipc=None):
-    """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them."""
-    if shutil.which("mpv") and (shutil.which("yt-dlp") or not any(youtube_video(url) for url in urls)):
+    """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them.
+    mpv's ytdl hook runs YTDL_WRAPPER, also when it falls back to yt-dlp for a Reddit or Bluesky address it cannot
+    open, which the wrapper then refuses."""
+    youtube = any(youtube_video(url) or url.startswith("ytdl://") for url in urls)
+    if shutil.which("mpv") and (shutil.which("yt-dlp") or not youtube):
         # mpv's own default is --tls-verify=no, which lets anyone on the path swap the video or its manifest
-        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes", *mpv_files(urls, ipc)]
+        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes",
+                f"--script-opts-append=ytdl_hook-ytdl_path={YTDL_WRAPPER}", *mpv_files(urls, ipc)]
     return None
+
+
+def ytdl_tokens(urls, folder):
+    """(urls with each YouTube one as ytdl://TOKEN, the token files). mpv's ytdl hook passes what follows ytdl:// to
+    yt-dlp as an argument, readable by every account, so the address waits in a 0600 file named by the token, which
+    YTDL_WRAPPER reads. Files a killed play left behind go after a day."""
+    private_dir(folder)
+    cutoff = time.time() - YTDL_TOKEN_SECONDS
+    for old in folder.iterdir():
+        with contextlib.suppress(OSError):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    files, made = [], []
+    for url in urls:
+        if youtube_video(url):
+            token = secrets.token_urlsafe(16)
+            write_private(folder / token, url.encode())
+            made.append(folder / token)
+            url = f"ytdl://{token}"
+        files.append(url)
+    return files, made
 
 
 def window_addresses(run=subprocess.run):
@@ -5041,48 +5071,54 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     start = min(max(args.start, 0), len(urls) - 1)
     # watch pages and playlists are no single media file for the relay to pass on; mpv fetches them itself
     direct = all(direct_video(url) for url in urls)
-    files = urls if direct else relay(urls)
-    ours, theirs = socket.socketpair()
-    argv = (direct_players if direct else players)(files, start, ipc=theirs.fileno())
-    ipc = argv is not None and f"--input-ipc-client=fd://{theirs.fileno()}" in argv
-    if argv is None:
-        print("no player", flush=True)
-        sys.exit("no video player: these videos need mpv (and yt-dlp for YouTube)" if direct else "no video player: install mpv")
-    # the player reaches only the loopback relay, which a proxy from the environment could not reach; for direct
-    # videos mpv goes out itself and keeps the proxy
-    env = dict(os.environ) if direct else {
-        key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
-    before = windows()
+    tokens = runtime_dir() / "omabox-ytdl"
+    files, made = ytdl_tokens(urls, tokens) if direct else (relay(urls), [])
     try:
-        player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-                     pass_fds=(theirs.fileno(),) if ipc else ())
-    except OSError as error:
-        sys.exit(f"cannot start {argv[0]}: {error}")
-    theirs.close()
-    if ipc:
-        mpv_playlist(ours, files)
-    else:
-        ours.close()
-    deadline = time.monotonic() + wait_seconds
-    window = None
-    while before is not None:
-        window = next(iter((windows() or before) - before), None)
+        ours, theirs = socket.socketpair()
+        argv = (direct_players if direct else players)(files, start, ipc=theirs.fileno())
+        ipc = argv is not None and f"--input-ipc-client=fd://{theirs.fileno()}" in argv
+        if argv is None:
+            print("no player", flush=True)
+            sys.exit("no video player: these videos need mpv (and yt-dlp for YouTube)" if direct else "no video player: install mpv")
+        # the player reaches only the loopback relay, which a proxy from the environment could not reach; for direct
+        # videos mpv goes out itself and keeps the proxy
+        env = {**os.environ, "OMABOX_YTDL_TOKENS": str(tokens)} if direct else {
+            key: value for key, value in os.environ.items() if key.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+        before = windows()
+        try:
+            player = run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                         pass_fds=(theirs.fileno(),) if ipc else ())
+        except OSError as error:
+            sys.exit(f"cannot start {argv[0]}: {error}")
+        theirs.close()
+        if ipc:
+            mpv_playlist(ours, files)
+        else:
+            ours.close()
+        deadline = time.monotonic() + wait_seconds
+        window = None
+        while before is not None:
+            window = next(iter((windows() or before) - before), None)
+            if window:
+                break
+            # exit 0 before a window is a single-instance player handing the videos to its running copy
+            if player.poll() not in (None, 0):
+                sys.exit(f"{argv[0]} could not play {urls[start]}")
+            if time.monotonic() > deadline:
+                player.terminate()
+                sys.exit(f"{argv[0]} opened no window")
+            time.sleep(poll_every)
+        print("opened", flush=True)
         if window:
-            break
-        # exit 0 before a window is a single-instance player handing the videos to its running copy
-        if player.poll() not in (None, 0):
-            sys.exit(f"{argv[0]} could not play {urls[start]}")
-        if time.monotonic() > deadline:
-            player.terminate()
-            sys.exit(f"{argv[0]} opened no window")
-        time.sleep(poll_every)
-    print("opened", flush=True)
-    if window:
-        focus(window)
-    player.wait()
-    ours.close()
-    while window and window in (windows() or set()):
-        time.sleep(poll_every)
+            focus(window)
+        player.wait()
+        ours.close()
+        while window and window in (windows() or set()):
+            time.sleep(poll_every)
+    finally:
+        # mpv reads a token's file when it reaches that video, so they go only once the player is gone
+        for path in made:
+            path.unlink(missing_ok=True)
 
 
 def cmd_unsnooze(args):
