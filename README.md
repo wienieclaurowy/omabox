@@ -34,8 +34,8 @@ If you want every post as soon as it appears, a regular feed reader will suit yo
 ## Features
 
 - **Once-a-day delivery.** New posts arrive at your delivery time (08:00 by default), with one notification
-  that names the sources. Sources can also be weekly or paused. A delivery missed while the computer was off
-  or asleep comes as soon as it is back.
+  that counts the new posts and their sources. Sources can also be weekly or paused. A delivery missed while
+  the computer was off or asleep comes as soon as it is back.
 - **Many kinds of sources.** Any RSS or Atom feed, plus web pages with a feed link, GitHub releases, YouTube
   channels, Bluesky, Mastodon, Reddit, Hacker News and, optionally, X profiles. Paste a page address and
   Omabox finds the feed.

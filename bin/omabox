@@ -3312,15 +3312,20 @@ def wait_for_network(hosts, seconds=60, resolve=socket.getaddrinfo, sleep=time.s
         sleep(2)
 
 
+def plural(count, word):
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
 def delivery_message(added_by_source):
+    """Counts only: notify-send gets the text as arguments, which every account on the computer can read, and the
+    source names say what the user reads."""
     total = sum(added_by_source.values())
-    names = ", ".join(name for name, count in added_by_source.items() if count)
-    return f"{total} new post{'s' if total != 1 else ''}", names
+    return f"{plural(total, 'new post')}", f"from {plural(sum(1 for count in added_by_source.values() if count), 'source')}"
 
 
 def send_notification(summary, body, view, glyph, run=subprocess.run):
     """Normal urgency: Omarchy's do-not-disturb silences it into history like any other. Clicking opens view.
-    body is plain text: notification servers read bodies as markup, and it names sources after feed titles."""
+    body is plain text: notification servers read bodies as markup."""
     open_view = json.dumps(["omarchy-shell", "omabox", "toggleView", view])
     try:
         run(["notify-send", "-a", "Omabox", "-u", "normal",
@@ -3350,8 +3355,8 @@ def token_notice(state, notify):
 
 
 def notify_token_rejected(waiting, send=send_notification):
-    send("X token rejected", "Paste a new one in Omabox: Sources, then t. "
-         f"Waiting: {', '.join(waiting)}", "sources", chr(GLYPHS["twitter"]))
+    send("X token rejected", f"Paste a new one in Omabox: Sources, then t. {plural(len(waiting), 'X source')} waiting.",
+         "sources", chr(GLYPHS["twitter"]))
 
 
 def prune(state, sources):

@@ -1941,19 +1941,20 @@ class TickPlanTest(unittest.TestCase):
 
 
 class DeliveryMessageTest(unittest.TestCase):
-    def test_counts_and_names_only_sources_with_posts(self):
-        self.assertEqual(omabox.delivery_message({"Omarchy": 2, "Rowan": 1, "Quiet": 0}), ("3 new posts", "Omarchy, Rowan"))
-        self.assertEqual(omabox.delivery_message({"Rowan": 1}), ("1 new post", "Rowan"))
+    def test_counts_posts_and_sources_with_posts(self):
+        self.assertEqual(omabox.delivery_message({"Omarchy": 2, "Rowan": 1, "Quiet": 0}), ("3 new posts", "from 2 sources"))
+        self.assertEqual(omabox.delivery_message({"Rowan": 1}), ("1 new post", "from 1 source"))
 
-    def test_source_names_go_into_notifications_as_text(self):
+    def test_source_names_stay_out_of_the_notification_command(self):
         sent = []
-        name = omabox.feed_title(b'<rss version="2.0"><channel><title>&lt;b&gt;Alert&lt;/b&gt; &lt;a href="https://'
-                                 b'login.example"&gt;sign in&lt;/a&gt; &amp; more</title></channel></rss>')
-        omabox.send_notification(*omabox.delivery_message({name: 2}), "feed", "x", run=lambda argv, **kw: sent.append(argv))
+        name = "Harbour Support Forum"
+        omabox.send_notification(*omabox.delivery_message({name: 2, "Tides": 1}), "feed", "x",
+                                 run=lambda argv, **kw: sent.append(argv))
         omabox.notify_token_rejected([name], send=lambda *args: omabox.send_notification(
             *args, run=lambda argv, **kw: sent.append(argv)))
-        self.assertEqual(sent[0][-1], '&lt;b&gt;Alert&lt;/b&gt; &lt;a href="https://login.example"&gt;sign in&lt;/a&gt; &amp; more')
-        self.assertNotIn("<", sent[1][-1])
+        self.assertEqual(sent[0][-2:], ["Omabox: 3 new posts", "from 2 sources"])
+        self.assertTrue(sent[1][-1].endswith("1 X source waiting."), sent[1])
+        self.assertFalse(any(name in arg for argv in sent for arg in argv), sent)
 
 
 class NotificationArchiveTest(unittest.TestCase):
@@ -2362,7 +2363,7 @@ class XTokenTest(unittest.TestCase):
         ((summary, body, view, _),) = sent
         self.assertEqual((summary, view), ("X token rejected", "sources"))
         self.assertIn("Sources, then t", body)
-        self.assertIn("A, B", body)
+        self.assertIn("2 X sources waiting.", body)
 
     def test_notification_argv_opens_the_sources_view(self):
         calls = []
