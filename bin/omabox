@@ -3565,7 +3565,7 @@ def cmd_rename(args):
 def cmd_opml_export(args):
     text = opml_export(load_sources())
     if args.file:
-        Path(args.file).write_text(text)
+        write_private(args.file, text.encode())
     else:
         sys.stdout.write(text)
 

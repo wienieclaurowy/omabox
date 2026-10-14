@@ -656,6 +656,13 @@ class PrivateFilesTest(unittest.TestCase):
         self.assertEqual(modes["omabox"], 0o700)
         self.assertEqual(modes["sources.toml"], 0o600)
 
+    def test_an_opml_export_is_private(self):
+        omabox.save_sources([{"name": "Private", "url": "https://a.example/feed?token=s3cret", "cadence": "daily"}])
+        target = self.root / "feeds.opml"
+        omabox.main(["opml", "export", str(target)])
+        self.assertIn("s3cret", target.read_text())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
     def test_an_older_install_is_tightened_on_the_next_write(self):
         omabox.CONFIG_PATH.parent.mkdir(parents=True, mode=0o755)
         omabox.CONFIG_PATH.write_text('[[source]]\nname = "a"\nurl = "https://a.example/feed"\n')
