@@ -375,7 +375,7 @@ class ImageFetcher:
         self.base_url = base_url
         self.fetch = fetch
         self.directory = Path(directory or IMAGE_DIR)
-        self.count = 0
+        self.count = self.avatars = 0
 
     def absolute(self, src):
         """src joined to the page's URL, or "" when it is not http(s)."""
@@ -407,10 +407,14 @@ class ImageFetcher:
         return f'<p><img src="omabox-img:{name}" width="{w}" height="{h}"></p>'
 
     def avatar(self, src):
-        """An account picture as an omabox-avatar: ref, "" when it does not download; not counted as a picture."""
+        """An account picture as an omabox-avatar: ref, "" when it does not download or the item has its
+        MAX_IMAGES_PER_ITEM; counted apart from pictures."""
         src = self.absolute(src)
+        if not src or self.avatars >= MAX_IMAGES_PER_ITEM:
+            return ""
+        self.avatars += 1
         try:
-            picture = cache_image(src, self.fetch, self.directory, MAX_ICON_BYTES) if src else None
+            picture = cache_avatar(src, self.fetch, self.directory)
         except Exception:
             picture = None
         return f'<img src="omabox-avatar:{picture[0]}" class="mini">' if picture else ""
@@ -447,25 +451,31 @@ MAX_PICTURE_WIDTH = 1600
 MAX_PICTURE_HEIGHT = 4096
 # what a picture that cannot be scaled down (animated, no magick) may hold: 64 MB once decoded, 12 per post
 MAX_PICTURE_PIXELS = 16_000_000
+PICTURE_BOX = (MAX_PICTURE_WIDTH, MAX_PICTURE_HEIGHT)
+# Account pictures show at most 40 px wide (2x on HiDPI) and a post's comments can carry dozens: cached at this size,
+# and refused past MAX_AVATAR_PIXELS when they cannot be scaled down.
+AVATAR_BOX = (128, 128)
+MAX_AVATAR_PIXELS = 512 * 512
+MAX_AVATARS_PER_ITEM = 60
 SHRINK_SECONDS = 20
 
 
-def oversized(width, height):
-    return width > MAX_PICTURE_WIDTH or height > MAX_PICTURE_HEIGHT
+def oversized(width, height, box=PICTURE_BOX):
+    return width > box[0] or height > box[1]
 
 
 def animated(data, ext):
     return ext == "gif" or (ext == "webp" and data[12:16] == b"VP8X" and bool(data[20] & 0x02))
 
 
-def shrink_picture(data, info, run=None, which=None):
-    """(bytes, image_info) of the picture scaled down to fit MAX_PICTURE_WIDTH x MAX_PICTURE_HEIGHT with
-    ImageMagick, or None to keep the original: small enough, animated, or magick missing, failing or too slow."""
+def shrink_picture(data, info, run=None, which=None, box=PICTURE_BOX):
+    """(bytes, image_info) of the picture scaled down to fit box (width, height) with ImageMagick, or None to keep
+    the original: small enough, animated, or magick missing, failing or too slow."""
     ext, width, height = info
-    if not oversized(width, height) or animated(data, ext) or not (which or shutil.which)("magick"):
+    if not oversized(width, height, box) or animated(data, ext) or not (which or shutil.which)("magick"):
         return None
     kind = "jpeg" if ext == "jpg" else ext
-    size = f"{MAX_PICTURE_WIDTH}x{MAX_PICTURE_HEIGHT}"
+    size = f"{box[0]}x{box[1]}"
     argv = ["magick", "-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB",
             "-define", f"jpeg:size={size}", f"{kind}:-", "-auto-orient", "-resize", f"{size}>", "-strip",
             *(["-quality", "85"] if ext in ("jpg", "webp") else []), f"{kind}:-"]
@@ -474,15 +484,15 @@ def shrink_picture(data, info, run=None, which=None):
     except (OSError, subprocess.SubprocessError):
         return None
     shrunk = image_info(result.stdout) if result.returncode == 0 else None
-    if not shrunk or shrunk[0] != ext or oversized(shrunk[1], shrunk[2]):
+    if not shrunk or shrunk[0] != ext or oversized(shrunk[1], shrunk[2], box):
         return None
     return result.stdout, shrunk
 
 
-def cache_image(src, fetch, directory, limit):
+def cache_image(src, fetch, directory, limit, box=PICTURE_BOX, max_pixels=MAX_PICTURE_PIXELS):
     """(file name, width, height) of the picture at src in the cache directory, downloaded the first time, or None
-    when the bytes are no PNG, JPEG, GIF or WebP. Large pictures are cached scaled down, or not at all past
-    MAX_PICTURE_PIXELS when they cannot be; tracking pixels not at all."""
+    when the bytes are no PNG, JPEG, GIF or WebP. Pictures larger than box are cached scaled down, or not at all past
+    max_pixels when they cannot be; tracking pixels not at all."""
     stem = hashlib.sha1(src.encode()).hexdigest()[:20]
     cached = next(iter(directory.glob(stem + ".*")), None) if directory.exists() else None
     if cached:
@@ -494,17 +504,21 @@ def cache_image(src, fetch, directory, limit):
     if info is None:
         return None
     if not cached and info[1] > TRACKING_PIXEL_MAX and info[2] > TRACKING_PIXEL_MAX:
-        data, info = shrink_picture(data, info) or (data, info)
-        if info[1] * info[2] > MAX_PICTURE_PIXELS:
+        data, info = shrink_picture(data, info, box=box) or (data, info)
+        if info[1] * info[2] > max_pixels:
             return None
         app_dir(directory)
         tmp = directory / f".{stem}.{os.getpid()}.{threading.get_ident()}"
         write_private(tmp, data)
         os.replace(tmp, directory / f"{stem}.{info[0]}")
     ext, width, height = info
-    if width * height > MAX_PICTURE_PIXELS:
+    if width * height > max_pixels:
         return None
     return f"{stem}.{ext}", width, height
+
+
+def cache_avatar(src, fetch, directory):
+    return cache_image(src, fetch, directory, MAX_ICON_BYTES, AVATAR_BOX, MAX_AVATAR_PIXELS)
 
 
 # Fetches, `omabox article` and `omabox replies` download pictures before taking the state lock to store their refs.
@@ -4257,19 +4271,20 @@ def thread_replies(replies, author, limit=MAX_REPLY_THREADS):
 
 
 def fetch_avatars(urls, fetch=download_limited, directory=None):
-    """Avatar URL -> file name in the image cache, for those that download as pictures. In parallel: a post's
-    replies come from dozens of accounts."""
+    """Avatar URL -> file name in the image cache, for those that download as pictures, the first
+    MAX_AVATARS_PER_ITEM accounts only. In parallel: a post's replies come from dozens of accounts."""
     directory = Path(directory or IMAGE_DIR)
 
     def one(url):
         try:
-            picture = cache_image(url, fetch, directory, MAX_ICON_BYTES)
+            picture = cache_avatar(url, fetch, directory)
         except Exception:
             picture = None
         return url, picture[0] if picture else None
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
-        return {url: name for url, name in pool.map(one, sorted(set(urls))) if name}
+        wanted = list(dict.fromkeys(urls))[:MAX_AVATARS_PER_ITEM]
+        return {url: name for url, name in pool.map(one, wanted) if name}
 
 
 def local_stamp(value):
@@ -4413,7 +4428,8 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     except Exception as error:
         raise ValueError(fetch_error(error, url)) from None
     shown = [reply for thread in threads for reply in thread]
-    avatars = fetch_avatars([reply["avatar"] for reply in shown if reply["avatar"]] + ([face] if face else []), image_fetch)
+    # the reposted author's face first: fetch_avatars keeps the first MAX_AVATARS_PER_ITEM
+    avatars = fetch_avatars(([face] if face else []) + [reply["avatar"] for reply in shown if reply["avatar"]], image_fetch)
     stamp = now_iso()
     fields = {"replies_html": replies_markup(threads, ref[0], stamp, ImageFetcher(item["link"], image_fetch), avatars),
               "replies_count": len(shown), "replies_fetched": stamp}

@@ -1151,6 +1151,19 @@ class ImageTest(unittest.TestCase):
         (self.dir / f"{stem}.png").write_bytes(png(1600, 40000))
         self.assertIsNone(omabox.cache_image("https://blog.example/tall.png", self.fetch, self.dir, omabox.MAX_IMAGE_BYTES))
 
+    def test_avatars_are_few_and_small(self):
+        sizes = {"https://a.example/small.png": png(400, 400), "https://a.example/tall.png": png(1600, 4000)}
+        fetch = lambda url, limit: sizes.get(url, png(48, 48))
+        with mock.patch.object(omabox.shutil, "which", lambda name: None):
+            self.assertIsNotNone(omabox.cache_avatar("https://a.example/small.png", fetch, self.dir))
+            self.assertIsNone(omabox.cache_avatar("https://a.example/tall.png", fetch, self.dir))
+            urls = [f"https://a.example/{n}.png" for n in range(omabox.MAX_AVATARS_PER_ITEM + 20)]
+            faces = omabox.fetch_avatars(urls[:1] + urls, fetch, self.dir)
+            self.assertEqual(list(faces), urls[:omabox.MAX_AVATARS_PER_ITEM])
+            fetcher = omabox.ImageFetcher("https://a.example/", fetch, self.dir)
+            minis = [fetcher.avatar(url) for url in urls[:omabox.MAX_IMAGES_PER_ITEM + 3]]
+            self.assertEqual(sum(bool(mini) for mini in minis), omabox.MAX_IMAGES_PER_ITEM)
+
     def test_skips_tracking_pixels_without_download_when_declared(self):
         body, _ = omabox.sanitize('<img src="https://t.example/p.gif" width="1" height="1">', self.fetcher())
         self.assertEqual(body, "")
@@ -2972,7 +2985,8 @@ class XFeedTest(unittest.TestCase):
         state = state or omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
         directory = Path(tempfile.mkdtemp())
         omabox.merge(state, self.SOURCE, entries, "2026-09-30T08:00:00Z",
-                     lambda entry: omabox.ImageFetcher(entry["link"], lambda url, limit: jpeg(800, 400), directory),
+                     lambda entry: omabox.ImageFetcher(entry["link"], lambda url, limit: jpeg(48, 48)
+                                                       if "/profile_images/" in url else jpeg(800, 400), directory),
                      mentions_base="https://x.com/", **options)
         return state, {item["id"]: item for item in state["items"]}
 
