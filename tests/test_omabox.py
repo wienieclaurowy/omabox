@@ -3204,7 +3204,7 @@ class ViewerTest(unittest.TestCase):
                             focus=lambda address: None)
         argv = received["argv"]
         self.assertFalse(any("127.0.0.1" in arg or "example" in arg for arg in argv), argv)
-        self.assertEqual(argv[:4], ["mpv", "--playlist-start=1", "--ytdl=no", "--access-references=no"])
+        self.assertEqual(argv[:5], ["mpv", "--playlist-start=1", "--tls-verify=yes", "--ytdl=no", "--access-references=no"])
         self.assertIn("--idle=once", argv)
         self.assertRegex(argv[-1], r"^--input-ipc-client=fd://\d+$")
         with socket.socket(fileno=received["fd"]) as sock:
@@ -3214,7 +3214,7 @@ class ViewerTest(unittest.TestCase):
                           ["loadfile", "http://127.0.0.1:9/t0k3n/1.mp4", "append-play"]])
         with self.installed("mpv", "yt-dlp"):
             direct = omabox.direct_player_argv(["https://www.youtube.com/watch?v=Zq3vKe8TbWo"], 0, ipc=7)
-        self.assertEqual(direct, ["mpv", "--playlist-start=0", "--idle=once", "--input-ipc-client=fd://7"])
+        self.assertEqual(direct, ["mpv", "--playlist-start=0", "--tls-verify=yes", "--idle=once", "--input-ipc-client=fd://7"])
 
     @unittest.skipUnless(omabox.shutil.which("mpv") and omabox.shutil.which("ffmpeg"), "needs mpv and ffmpeg")
     def test_mpv_starts_at_the_clicked_video_with_the_others_around_it(self):
@@ -3262,9 +3262,9 @@ class ViewerTest(unittest.TestCase):
         reddit = ["https://v.redd.it/ab12cd/DASHPlaylist.mpd"]
         with self.installed("mpv"):
             self.assertIsNone(omabox.direct_player_argv(urls, 0))
-            self.assertEqual(omabox.direct_player_argv(reddit, 0), ["mpv", "--playlist-start=0", "--"] + reddit)
+            self.assertEqual(omabox.direct_player_argv(reddit, 0), ["mpv", "--playlist-start=0", "--tls-verify=yes", "--"] + reddit)
         with self.installed("mpv", "yt-dlp"):
-            self.assertEqual(omabox.direct_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--"] + urls)
+            self.assertEqual(omabox.direct_player_argv(urls, 0), ["mpv", "--playlist-start=0", "--tls-verify=yes", "--"] + urls)
         self.assertTrue(omabox.direct_video(reddit[0]))
         self.assertTrue(omabox.direct_video("https://video.bsky.app/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
         self.assertFalse(omabox.direct_video("https://video.bsky.app.example/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
@@ -3292,7 +3292,8 @@ class ViewerTest(unittest.TestCase):
     def test_default_mpv_keeps_the_post_order(self):
         with self.installed("mpv"):
             argv = omabox.player_argv(["u0", "u1"], 1, self.desktop("mpv --player-operation-mode=pseudo-gui -- %U"))
-        self.assertEqual(argv, ["mpv", "--playlist-start=1", "--ytdl=no", "--access-references=no", "--", "u0", "u1"])
+        self.assertEqual(argv, ["mpv", "--playlist-start=1", "--tls-verify=yes", "--ytdl=no", "--access-references=no", "--",
+                                "u0", "u1"])
 
     def test_player_falls_back_to_mpv_then_none_when_the_default_app_is_gone(self):
         with self.installed("mpv"):

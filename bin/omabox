@@ -3182,14 +3182,16 @@ def player_argv(urls, start, desktop_file=default_desktop_file, ipc=None):
         return argv
     if shutil.which("mpv"):
         # no references: a file naming other files or addresses (a playlist, linked segments) plays nothing
-        return ["mpv", f"--playlist-start={start}", "--ytdl=no", "--access-references=no", *mpv_files(urls, ipc)]
+        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes", "--ytdl=no", "--access-references=no",
+                *mpv_files(urls, ipc)]
     return None
 
 
 def direct_player_argv(urls, start, ipc=None):
     """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them."""
     if shutil.which("mpv") and (shutil.which("yt-dlp") or not any(youtube_video(url) for url in urls)):
-        return ["mpv", f"--playlist-start={start}", *mpv_files(urls, ipc)]
+        # mpv's own default is --tls-verify=no, which lets anyone on the path swap the video or its manifest
+        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes", *mpv_files(urls, ipc)]
     return None
 
 
