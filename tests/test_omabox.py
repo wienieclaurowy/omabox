@@ -824,7 +824,7 @@ class OpmlTest(unittest.TestCase):
         text = omabox.opml_export(self.SOURCES)
         self.assertIn('xmlns:omabox="', text)
         self.assertIn('type="rss"', text)
-        sources, added, skipped = omabox.opml_import([], text.encode())
+        sources, added, skipped, _ = omabox.opml_import([], text.encode())
         self.assertEqual((added, skipped), (3, 0))
         expected = [{key: s[key] for key in ("name", "url", "cadence")} for s in self.SOURCES]
         self.assertEqual(sources, expected)
@@ -840,17 +840,33 @@ class OpmlTest(unittest.TestCase):
           <outline text="Again" xmlUrl="https://omarchy.org/feed.xml"/>
           <outline text="Local file" xmlUrl="file:///etc/passwd"/>
         </body></opml>"""
-        sources, added, skipped = omabox.opml_import(existing, opml)
+        sources, added, skipped, _ = omabox.opml_import(existing, opml)
         self.assertEqual((added, skipped), (1, 3))
         self.assertEqual(sources[1], {"name": "Omarchy (2)", "url": "https://omarchy.org/feed.xml", "cadence": "daily"})
         self.assertEqual(existing[1:], [])
+
+    def test_local_addresses_and_other_rsshub_routes_are_not_imported(self):
+        base = omabox.RSSHUB_BASE
+        opml = f"""<opml version="2.0"><body>
+          <outline text="Router" xmlUrl="http://192.168.1.1/cgi-bin/reboot"/>
+          <outline text="Here" xmlUrl="http://127.0.0.1:8080/admin/delete?all=1"/>
+          <outline text="Nas" xmlUrl="http://nas:8080/feed"/>
+          <outline text="Transform" xmlUrl="{base}/rsshub/transform/html/http%3A%2F%2F192.168.1.1%2F/item=a"/>
+          <outline text="Odd X" xmlUrl="{base}/twitter/user/..%2F..%2Frsshub"/>
+          <outline text="Odd params" xmlUrl="{base}/twitter/user/rowanvale/filter=x"/>
+          <outline text="Rowan" xmlUrl="{base}/twitter/user/rowanvale/includeRts=false"/>
+          <outline text="Blog" xmlUrl="https://blog.example/feed"/>
+        </body></opml>""".encode()
+        sources, added, skipped, refused = omabox.opml_import([], opml)
+        self.assertEqual((added, skipped, refused), (2, 0, 6))
+        self.assertEqual([s["name"] for s in sources], ["Rowan", "Blog"])
 
     def test_names_never_start_with_a_dash(self):
         opml = b"""<opml version="2.0"><body>
           <outline text="--help" xmlUrl="https://a.example/feed"/>
           <outline text="  -  " xmlUrl="https://b.example/feed"/>
         </body></opml>"""
-        sources, added, _ = omabox.opml_import([], opml)
+        sources, added, *_ = omabox.opml_import([], opml)
         self.assertEqual([s["name"] for s in sources], ["help", "b.example"])
         self.assertEqual(omabox.source_name("- Tide  report"), "Tide report")
 
@@ -865,7 +881,7 @@ class OpmlTest(unittest.TestCase):
           </outline>
           <outline text="" xmlUrl="https://blog.example/rss"/>
         </body></opml>"""
-        sources, added, skipped = omabox.opml_import([], opml, cadence="weekly")
+        sources, added, skipped, _ = omabox.opml_import([], opml, cadence="weekly")
         self.assertEqual((added, skipped), (3, 0))
         self.assertEqual([s["name"] for s in sources], ["Arch news", "Hyprland releases", "blog.example"])
         self.assertEqual({s["cadence"] for s in sources}, {"weekly"})

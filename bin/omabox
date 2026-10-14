@@ -2222,19 +2222,24 @@ def opml_feeds(data):
 
 
 def opml_import(sources, data, cadence=None):
-    """sources plus the document's feeds not subscribed yet, and how many were added and skipped. No network."""
+    """sources plus the document's feeds not subscribed yet, and how many were added, skipped as known or not web
+    addresses, and refused as local: a file does not choose what Omabox fetches on this computer or the local network
+    (local_url), nor which RSSHub routes run with the X token beyond X user timelines. No network."""
     sources = list(sources)
     urls = {s["url"] for s in sources}
-    added = skipped = 0
+    added = skipped = refused = 0
     for name, url, own_cadence in opml_feeds(data):
         if url in urls or not url.startswith(("https://", "http://")):
             skipped += 1
+            continue
+        if not plain_x_route(url) if needs_rsshub(url) else local_url(url):
+            refused += 1
             continue
         name = unique_name(sources, name or urllib.parse.urlparse(url).hostname or url)
         sources.append({"name": name, "url": url, "cadence": cadence or (own_cadence if own_cadence in CADENCES else "daily")})
         urls.add(url)
         added += 1
-    return sources, added, skipped
+    return sources, added, skipped, refused
 
 
 HELD_LOCKS = set()
@@ -2839,6 +2844,17 @@ def x_route(url):
         return None
     raw = match.group(2) or ""
     return match.group(1), dict(urllib.parse.parse_qsl(X_ROUTE_ALIASES.get(raw, raw)))
+
+
+def plain_x_route(url):
+    """Whether url is an X user timeline route as Omabox writes it: a valid handle and reposts/replies switches only."""
+    found = x_route(url)
+    if not found:
+        return False
+    route, params = found
+    handle = route.rsplit("/", 1)[1]
+    return (route == f"{RSSHUB_BASE}/twitter/user/{handle}" and re.fullmatch(r"\w{1,15}", handle) is not None
+            and set(params) <= {"includeRts", "includeReplies"})
 
 
 def x_hidden(url):
@@ -3746,12 +3762,14 @@ def cmd_opml_export(args):
 def cmd_opml_import(args):
     sources = load_sources() if CONFIG_PATH.exists() else []
     try:
-        sources, added, skipped = opml_import(sources, Path(args.file).read_bytes(), args.cadence)
+        sources, added, skipped, refused = opml_import(sources, Path(args.file).read_bytes(), args.cadence)
     except (OSError, ET.ParseError, ValueError) as error:
         sys.exit(f"cannot import {args.file}: {error}")
     if added:
         save_sources(sources)
     print(f"added {added}, skipped {skipped}")
+    if refused:
+        print(f"not imported: {refused} on this computer or the local network; add those with omabox add")
 
 
 def cmd_cadence(args):
