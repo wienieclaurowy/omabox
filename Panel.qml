@@ -3,6 +3,7 @@ import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -16,7 +17,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   // Secondary text, solid: dim is for text read as text (excerpts, read titles), faint for small meta and hints.
   // Targets sit above WCAG's 4.5 and 3 because antialiased thin text renders lighter than its colour.
   readonly property color dim: Model.readableShade(fg, opaqueCard, 0.6, 4.9)
@@ -25,11 +26,11 @@ Panel {
   readonly property color selectedDim: Model.readableShade(fg, selectedCard, 0.6, 4.9)
   readonly property color selectedFaint: Model.readableShade(fg, selectedCard, 0.4, 3.4)
   readonly property color opaqueCard: Qt.rgba(cardColor.r, cardColor.g, cardColor.b, 1)
-  readonly property color selectedCard: Qt.tint(opaqueCard, Style.selectedFillFor(fg, Color.accent))
+  readonly property color selectedCard: Qt.tint(opaqueCard, Style.selectedFillFor(fg, Commons.Color.accent))
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // ttf-ia-writer tags every Quattro file as weight 80, so Qt picks Bold unless the style is named explicitly.
   readonly property string readingFont: setting("readingFont", "iA Writer Quattro S")
-  readonly property color cardColor: Color.popups.background
+  readonly property color cardColor: Commons.Color.popups.background
   // Reader width follows the measure (characters per line), not pixels, so theme font sizes keep ~70ch lines.
   readonly property int readingMeasure: Math.max(45, Math.min(100, Number(setting("readingMeasure", 70)) || 70))
   readonly property real readingCharWidth: readingMetrics.advanceWidth / readingMetrics.text.length
@@ -143,7 +144,7 @@ Panel {
   readonly property var scroller: reading ? reader.flick : list
   readonly property string readerCss: Model.readerCss({
     gap: Style.space(10),
-    accent: "" + Color.accent,
+    accent: "" + Commons.Color.accent,
     fg: "" + fg,
     faint: "" + faint,
     codeBg: "" + Qt.tint(cardColor, Util.alpha(fg, 0.09)),
@@ -153,7 +154,7 @@ Panel {
     heading: Style.font.heading + Style.space(4),
     mono: fontFamily,
     line: "" + Qt.tint(cardColor, Util.alpha(fg, 0.2)),
-    opBg: "" + Qt.tint(cardColor, Util.alpha(Color.accent, 0.12)),
+    opBg: "" + Qt.tint(cardColor, Util.alpha(Commons.Color.accent, 0.12)),
     pad: commentFaces.pad
   })
   readonly property var commentFaces: ({ avatar: Style.space(30), gap: Style.space(10), pad: Style.space(8), mini: Style.space(22) })
@@ -1538,7 +1539,7 @@ Panel {
               : root.view === "sources" && root.sourcesLoaded
                 ? root.sources.length + (root.sources.length === 1 ? " source" : " sources")
               : ""
-            color: failed ? Color.urgent : root.faint
+            color: failed ? Commons.Color.urgent : root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -1554,7 +1555,7 @@ Panel {
               visible: root.view !== "sources"
               iconText: "󰍉"
               tooltipText: "Search (/)"
-              foreground: root.query !== "" ? Color.accent : root.fg
+              foreground: root.query !== "" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.startSearch()
             }
@@ -1566,7 +1567,7 @@ Panel {
                 ? "Next filter: " + (Model.filterLabel(root.view === "feed" ? Model.nextFilter(root.filter, root.allItems)
                   : Model.nextNoteFilter(root.filter, root.notifications)) || "all").toLowerCase() + " (f)"
                 : root.view === "feed" ? "Filter by source (f)" : "Filter by app (f)"
-              foreground: root.filter !== "" ? Color.accent : root.fg
+              foreground: root.filter !== "" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.cycleFilter()
             }
@@ -1575,7 +1576,7 @@ Panel {
               visible: root.view !== "sources"
               iconText: root.dnd ? "󰂛" : "󰂚"
               tooltipText: root.dnd ? "Do not disturb is on (d)" : "Do not disturb is off (d)"
-              foreground: root.dnd ? Color.accent : root.fg
+              foreground: root.dnd ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.toggleDnd()
             }
@@ -1585,7 +1586,7 @@ Panel {
               enabled: root.view === "feed" ? Model.clearableIds(root.items).length > 0 : root.notifications.length > 0
               iconText: "󰎟"
               tooltipText: root.view === "feed" ? "Clear read posts (X)" : "Clear history (X)"
-              foreground: root.mode === "confirm-clear" ? Color.urgent : root.fg
+              foreground: root.mode === "confirm-clear" ? Commons.Color.urgent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.mode === "confirm-clear" ? root.confirmClear(false) : root.askClear()
             }
@@ -1602,7 +1603,7 @@ Panel {
             PanelActionButton {
               iconText: "󰌌"
               tooltipText: root.hintsVisible ? "Hide keybinds (?)" : "Show keybinds (?)"
-              foreground: root.hintsVisible ? Color.accent : root.fg
+              foreground: root.hintsVisible ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.toggleHints()
             }
@@ -1610,7 +1611,7 @@ Panel {
             PanelActionButton {
               iconText: "󰒓"
               tooltipText: root.view === "sources" ? "Back to feed (esc)" : "Sources (s)"
-              foreground: root.view === "sources" ? Color.accent : root.fg
+              foreground: root.view === "sources" ? Commons.Color.accent : root.fg
               fontFamily: root.fontFamily
               onClicked: root.showView(root.view === "sources" ? "feed" : "sources")
             }
@@ -1633,7 +1634,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: "󰈲  " + Model.filterLabel(root.filter)
-            color: Color.accent
+            color: Commons.Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -1645,7 +1646,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: "/ " + root.query
-            color: Color.accent
+            color: Commons.Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: true
@@ -1981,9 +1982,9 @@ Panel {
                 width: ruleRow.implicitWidth + Style.space(16)
                 height: ruleRow.implicitHeight + Style.space(6)
                 radius: height / 2
-                color: ruleMouse.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                color: ruleMouse.containsMouse ? Style.hoverFillFor(root.fg, Commons.Color.accent) : "transparent"
                 border.width: 1
-                border.color: picked ? Color.accent : Util.alpha(root.fg, 0.25)
+                border.color: picked ? Commons.Color.accent : Util.alpha(root.fg, 0.25)
 
                 MouseArea {
                   id: ruleMouse
@@ -2004,7 +2005,7 @@ Panel {
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     text: ruleChip.modelData
-                    color: ruleChip.picked ? Color.accent : root.fg
+                    color: ruleChip.picked ? Commons.Color.accent : root.fg
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -2013,7 +2014,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
                     text: "󰅖"
-                    color: removeRuleMouse.containsMouse ? Color.urgent : root.faint
+                    color: removeRuleMouse.containsMouse ? Commons.Color.urgent : root.faint
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
 
@@ -2139,7 +2140,7 @@ Panel {
           Button {
             text: root.mode === "confirm-clear" ? "Clear" : "Remove"
             bordered: true
-            foreground: Color.urgent
+            foreground: Commons.Color.urgent
             fontFamily: root.fontFamily
             onClicked: root.mode === "confirm-clear" ? root.confirmClear(true) : root.confirmRemove(true)
           }
@@ -2169,7 +2170,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 text: modelData.key
-                color: Color.accent
+                color: Commons.Color.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -2217,7 +2218,7 @@ Panel {
           wrapMode: Text.Wrap
           text: messageStrip.text
           color: root.busy || (root.message === "" && root.fetching) ? root.faint
-            : root.message !== "" ? (root.messageError ? Color.urgent : root.dim)
+            : root.message !== "" ? (root.messageError ? Commons.Color.urgent : root.dim)
             : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -2247,7 +2248,7 @@ Panel {
           // Opaque even when the theme's popups are see-through, so the guide reads cleanly over the blur.
           color: Qt.rgba(root.cardColor.r, root.cardColor.g, root.cardColor.b, 1)
           border.width: 1
-          border.color: Util.alpha(Color.accent, 0.45)
+          border.color: Util.alpha(Commons.Color.accent, 0.45)
 
           Column {
             id: overlayColumn
@@ -2310,7 +2311,7 @@ Panel {
                   Button {
                     text: "Start reading"
                     bordered: true
-                    foreground: Color.accent
+                    foreground: Commons.Color.accent
                     fontFamily: root.fontFamily
                     onClicked: root.dismissWelcome("")
                   }
@@ -2347,7 +2348,7 @@ Panel {
                 text: "Read this first. X has no public feeds, so Omabox reads X with your login. The token below is that login: "
                   + "whoever has it can use the account as you. X's rules do not allow reading this way and X can lock the account, "
                   + "so use a spare account, not your main one."
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }
@@ -2428,7 +2429,7 @@ Panel {
                 visible: root.xTokenSaved
                 text: "Remove the saved token"
                 bordered: true
-                foreground: Color.urgent
+                foreground: Commons.Color.urgent
                 fontFamily: root.fontFamily
                 onClicked: root.removeXToken()
               }
@@ -2441,7 +2442,7 @@ Panel {
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
               text: root.message
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -2469,8 +2470,8 @@ Panel {
       height: rowColumn.implicitHeight + Style.space(16) + (rowSnooze.visible ? rowSnooze.height + Style.space(8) : 0)
       radius: Style.cornerRadius
       color: current
-        ? Style.selectedFillFor(root.fg, Color.accent)
-        : (rowHover.hovered ? Style.hoverFillFor(root.fg, Color.accent) : "transparent")
+        ? Style.selectedFillFor(root.fg, Commons.Color.accent)
+        : (rowHover.hovered ? Style.hoverFillFor(root.fg, Commons.Color.accent) : "transparent")
 
       HoverHandler {
         id: rowHover
@@ -2516,7 +2517,7 @@ Panel {
         PanelActionButton {
           iconText: row.item.later === true ? "󰃀" : "󰃃"
           tooltipText: row.item.later === true ? "Remove from read later (m)" : "Read later (m)"
-          foreground: row.item.later === true ? Color.accent : root.fg
+          foreground: row.item.later === true ? Commons.Color.accent : root.fg
           fontFamily: root.fontFamily
           onClicked: root.toggleLaterCurrent(row.item)
         }
@@ -2533,7 +2534,7 @@ Panel {
           visible: row.tag === "newer"
           iconText: "󰚰"
           tooltipText: "Update Omarchy (U)"
-          foreground: Color.accent
+          foreground: Commons.Color.accent
           fontFamily: root.fontFamily
           onClicked: root.runUpdate(row.item)
         }
@@ -2586,7 +2587,7 @@ Panel {
             width: Style.space(6)
             height: width
             radius: width / 2
-            color: Color.accent
+            color: Commons.Color.accent
           }
 
           SourceIcon {
@@ -2643,7 +2644,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: "·  " + (row.tag === "newer" ? "NEWER THAN YOURS" : "INSTALLED")
-            color: row.tag === "newer" ? Color.accent : row.metaColor
+            color: row.tag === "newer" ? Commons.Color.accent : row.metaColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -2655,7 +2656,7 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: "·  󰃀 LATER"
-            color: Color.accent
+            color: Commons.Color.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.letterSpacing: 1
@@ -2706,8 +2707,8 @@ Panel {
       height: noteColumn.implicitHeight + Style.space(16)
       radius: Style.cornerRadius
       color: index === root.cursor
-        ? Style.selectedFillFor(root.fg, Color.accent)
-        : (noteHover.hovered ? Style.hoverFillFor(root.fg, Color.accent) : "transparent")
+        ? Style.selectedFillFor(root.fg, Commons.Color.accent)
+        : (noteHover.hovered ? Style.hoverFillFor(root.fg, Commons.Color.accent) : "transparent")
 
       // HoverHandler, not noteMouse.containsMouse: the copy button's own MouseArea takes hover from noteMouse.
       HoverHandler { id: noteHover }
@@ -2823,8 +2824,8 @@ Panel {
       height: sourceColumn.implicitHeight + Style.space(16)
       radius: Style.cornerRadius
       color: current
-        ? Style.selectedFillFor(root.fg, Color.accent)
-        : (sourceHover.hovered ? Style.hoverFillFor(root.fg, Color.accent) : "transparent")
+        ? Style.selectedFillFor(root.fg, Commons.Color.accent)
+        : (sourceHover.hovered ? Style.hoverFillFor(root.fg, Commons.Color.accent) : "transparent")
 
       HoverHandler { id: sourceHover }
 
@@ -2874,7 +2875,7 @@ Panel {
         PanelActionButton {
           iconText: "󰆴"
           tooltipText: "Remove (x)"
-          foreground: Color.urgent
+          foreground: Commons.Color.urgent
           fontFamily: root.fontFamily
           onClicked: { root.selectSource(source.index); root.askRemove() }
         }
@@ -2966,7 +2967,7 @@ Panel {
           elide: full ? Text.ElideNone : Text.ElideRight
           text: Model.sourceStatus(source.modelData, root.now) + "  ·  " + source.modelData.items + " posts"
             + Model.muteSummary(source.modelData)
-          color: source.modelData.error ? Color.urgent : source.faintColor
+          color: source.modelData.error ? Commons.Color.urgent : source.faintColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -2977,7 +2978,7 @@ Panel {
           textFormat: Text.PlainText
           elide: Text.ElideRight
           text: Model.staleLabel(source.modelData.stale).toUpperCase()
-          color: source.modelData.stale && source.modelData.stale.kind === "failing" ? Color.urgent : source.dimColor
+          color: source.modelData.stale && source.modelData.stale.kind === "failing" ? Commons.Color.urgent : source.dimColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           font.letterSpacing: 1

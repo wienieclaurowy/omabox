@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -29,7 +30,7 @@ Column {
     && Model.articleAvailable(item, panel.feedState.profiles)
   readonly property bool loadingArticle: isPost && panel !== null && panel.articleLoadingId === item.id
   readonly property bool showingFull: isPost && item.showingFull === true
-  readonly property color buttonColor: panel ? panel.fg : Color.foreground
+  readonly property color buttonColor: panel ? panel.fg : Commons.Color.foreground
   readonly property string buttonFont: panel ? panel.fontFamily : Style.font.family
   readonly property real progress: flick.contentHeight > flick.height
     ? Math.max(0, Math.min(1, flick.contentY / (flick.contentHeight - flick.height))) : 1
@@ -108,7 +109,7 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: root.item && root.item.note ? "‹  NOTIFICATIONS" : "‹  FEED"
-      color: backMouse.containsMouse ? Color.accent : (root.panel ? root.panel.dim : Color.foreground)
+      color: backMouse.containsMouse ? Commons.Color.accent : (root.panel ? root.panel.dim : Commons.Color.foreground)
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
       font.letterSpacing: 1.2
@@ -130,7 +131,7 @@ Column {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       foreground: root.buttonColor
-      dim: root.panel ? root.panel.faint : Color.foreground
+      dim: root.panel ? root.panel.faint : Commons.Color.foreground
       fontFamily: root.buttonFont
       onPicked: function(choice) { root.panel.snoozeItem(root.item, choice) }
       onCancelled: root.panel.closeSnooze()
@@ -146,7 +147,7 @@ Column {
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
         text: root.panel ? (root.panel.cursor + 1) + " / " + root.panel.rows.length : ""
-        color: root.panel ? root.panel.faint : Color.foreground
+        color: root.panel ? root.panel.faint : Commons.Color.foreground
         font.family: root.panel ? root.panel.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
       }
@@ -185,7 +186,7 @@ Column {
         enabled: !root.loadingArticle
         iconText: String.fromCodePoint(root.loadingArticle ? 0xF051F : 0xF0395)
         tooltipText: root.loadingArticle ? "Fetching the full article…" : root.showingFull ? "Feed version (r)" : "Full article (r)"
-        foreground: root.showingFull ? Color.accent : root.buttonColor
+        foreground: root.showingFull ? Commons.Color.accent : root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.toggleArticle()
       }
@@ -194,7 +195,7 @@ Column {
         visible: root.isPost
         iconText: root.isPost && root.item.later === true ? "󰃀" : "󰃃"
         tooltipText: root.isPost && root.item.later === true ? "Remove from read later (m)" : "Read later (m)"
-        foreground: root.isPost && root.item.later === true ? Color.accent : root.buttonColor
+        foreground: root.isPost && root.item.later === true ? Commons.Color.accent : root.buttonColor
         fontFamily: root.buttonFont
         onClicked: root.panel.toggleLaterCurrent()
       }
@@ -212,7 +213,7 @@ Column {
         visible: root.tag === "newer"
         iconText: "󰚰"
         tooltipText: "Update Omarchy (U)"
-        foreground: Color.accent
+        foreground: Commons.Color.accent
         fontFamily: root.buttonFont
         onClicked: root.panel.runUpdate()
       }
@@ -254,7 +255,7 @@ Column {
     leftPadding: Style.space(50)
     textFormat: Text.PlainText
     text: root.repost ? "󰑖  " + root.profile.name + " reposted" : ""
-    color: root.panel ? root.panel.dim : Color.foreground
+    color: root.panel ? root.panel.dim : Commons.Color.foreground
     font.family: root.panel ? root.panel.fontFamily : Style.font.family
     font.pixelSize: Style.font.caption
   }
@@ -312,7 +313,7 @@ Column {
       Text {
         textFormat: Text.PlainText
         text: root.repost ? root.repost.name : root.profile ? root.profile.name : ""
-        color: root.panel ? root.panel.fg : Color.foreground
+        color: root.panel ? root.panel.fg : Commons.Color.foreground
         font.family: root.panel ? root.panel.readingFont : Style.font.family
         font.styleName: "Bold"
         font.pixelSize: Style.font.title
@@ -325,7 +326,7 @@ Column {
               Qt.formatDateTime(new Date(root.item.published), "MMM d yyyy, HH:mm")]
             .filter(function(part) { return part !== "" }).join("  ·  ")
           : ""
-        color: root.panel ? root.panel.dim : Color.foreground
+        color: root.panel ? root.panel.dim : Commons.Color.foreground
         font.family: root.panel ? root.panel.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
       }
@@ -352,7 +353,7 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       icon: root.item && root.item.icon ? root.item.icon
         : (root.item && root.panel && root.panel.feedState.icons ? (root.panel.feedState.icons[root.item.source] || {}) : ({}))
-      color: root.panel ? root.panel.dim : Color.foreground
+      color: root.panel ? root.panel.dim : Commons.Color.foreground
       fontFamily: root.panel ? root.panel.fontFamily : Style.font.family
       size: Style.font.body
     }
@@ -364,7 +365,7 @@ Column {
       textFormat: Text.PlainText
       elide: Text.ElideRight
       text: root.item ? String(root.item.source || "").toUpperCase() : ""
-      color: root.panel ? root.panel.dim : Color.foreground
+      color: root.panel ? root.panel.dim : Commons.Color.foreground
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
       font.letterSpacing: 1
@@ -379,7 +380,7 @@ Column {
             Model.readingTime(root.item)]
           .filter(function(part) { return part !== "" }).map(function(part) { return "·  " + part }).join("  ").toUpperCase()
         : ""
-      color: root.panel ? root.panel.dim : Color.foreground
+      color: root.panel ? root.panel.dim : Commons.Color.foreground
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
       font.letterSpacing: 1
@@ -391,7 +392,7 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: "·  " + (root.tag === "newer" ? "NEWER THAN YOURS" : "INSTALLED")
-      color: root.tag === "newer" ? Color.accent : (root.panel ? root.panel.dim : Color.foreground)
+      color: root.tag === "newer" ? Commons.Color.accent : (root.panel ? root.panel.dim : Commons.Color.foreground)
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
       font.letterSpacing: 1
@@ -403,7 +404,7 @@ Column {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: "·  FULL ARTICLE"
-      color: Color.accent
+      color: Commons.Color.accent
       font.family: root.panel ? root.panel.fontFamily : Style.font.family
       font.pixelSize: Style.font.caption
       font.letterSpacing: 1
@@ -418,7 +419,7 @@ Column {
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     text: root.item ? root.item.title : ""
-    color: root.panel ? root.panel.fg : Color.foreground
+    color: root.panel ? root.panel.fg : Commons.Color.foreground
     font.family: root.panel ? root.panel.readingFont : Style.font.family
     font.styleName: "Bold"
     font.pixelSize: Style.font.display
@@ -431,7 +432,7 @@ Column {
     textFormat: Text.PlainText
     wrapMode: Text.WordWrap
     text: root.item ? root.item.summary || "" : ""
-    color: root.panel ? root.panel.dim : Color.foreground
+    color: root.panel ? root.panel.dim : Commons.Color.foreground
     font.family: root.panel ? root.panel.fontFamily : Style.font.family
     font.pixelSize: Style.font.caption
     font.letterSpacing: 0.5
@@ -448,14 +449,14 @@ Column {
 
     Rectangle {
       anchors.fill: parent
-      color: root.panel ? root.panel.fg : Color.foreground
+      color: root.panel ? root.panel.fg : Commons.Color.foreground
       opacity: 0.12
     }
 
     Rectangle {
       width: Math.round(parent.width * root.progress)
       height: parent.height
-      color: Color.accent
+      color: Commons.Color.accent
 
       Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
     }
@@ -486,7 +487,7 @@ Column {
       text: root.item && root.panel && (root.visible || root.panel.viewingMedia)
         ? root.panel.readerCss + Model.renderHtml(root.item.html, root.panel.imageDir, width, root.panel.commentFaces)
         : ""
-      color: root.panel ? root.panel.fg : Color.foreground
+      color: root.panel ? root.panel.fg : Commons.Color.foreground
       font.family: root.panel ? root.panel.readingFont : Style.font.family
       font.styleName: "Regular"
       font.pixelSize: root.panel ? root.panel.readerFontSize : Style.font.title
@@ -527,7 +528,7 @@ Column {
         width: Style.space(52)
         height: width
         radius: width / 2
-        color: Util.alpha(root.panel ? root.panel.cardColor : Color.popups.background, 0.92)
+        color: Util.alpha(root.panel ? root.panel.cardColor : Commons.Color.popups.background, 0.92)
 
         HoverHandler { id: badgeHover }
 
@@ -537,7 +538,7 @@ Column {
           anchors.horizontalCenterOffset: parent.opening ? 0 : Style.space(2)
           textFormat: Text.PlainText
           text: String.fromCodePoint(parent.opening ? 0xF051F : 0xF040A)
-          color: badgeHover.hovered || parent.opening ? Color.accent : (root.panel ? root.panel.fg : Color.foreground)
+          color: badgeHover.hovered || parent.opening ? Commons.Color.accent : (root.panel ? root.panel.fg : Commons.Color.foreground)
           font.family: root.panel ? root.panel.fontFamily : Style.font.family
           font.pixelSize: Math.round(parent.width * 0.55)
         }

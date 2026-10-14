@@ -5,6 +5,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 ShellRoot {
@@ -57,7 +58,7 @@ ShellRoot {
     screen: rig.target
     anchors { top: true; bottom: true; left: true; right: true }
     exclusionMode: ExclusionMode.Ignore
-    color: Color.background
+    color: Commons.Color.background
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.namespace: "omabox-shots-backdrop"
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
@@ -77,7 +78,7 @@ ShellRoot {
     anchors { top: true; left: true; right: true }
     implicitHeight: Style.bar.sizeHorizontal
     exclusionMode: ExclusionMode.Ignore
-    color: Color.bar.background
+    color: Commons.Color.bar.background
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.namespace: "omabox-shots-bar"
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
@@ -87,10 +88,10 @@ ShellRoot {
       id: api
       pluginId: "io.github.wienieclaurowy.omabox"
       moduleName: "io.github.wienieclaurowy.omabox"
-      foreground: Color.bar.text
-      barForeground: Color.bar.text
-      background: Color.bar.background
-      urgent: Color.bar.active
+      foreground: Commons.Color.bar.text
+      barForeground: Commons.Color.bar.text
+      background: Commons.Color.bar.background
+      urgent: Commons.Color.bar.active
       fontFamily: Style.font.family
       barSize: Style.bar.sizeHorizontal
     }

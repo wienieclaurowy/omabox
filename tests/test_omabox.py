@@ -4406,6 +4406,18 @@ class ModelJsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class QmlImportTest(unittest.TestCase):
+    def test_theme_colours_use_the_qualified_import(self):
+        # QtQuick 6.12 exports its own Color, which shadows the shell's: a bare Color.accent is undefined there.
+        root = Path(__file__).resolve().parents[1]
+        for path in sorted(root.glob("*.qml")) + sorted(root.glob("tools/**/*.qml")):
+            with self.subTest(path.name):
+                text = path.read_text()
+                self.assertIsNone(re.search(r"(?<![\w.])Color\.", text))
+                if "Commons.Color." in text:
+                    self.assertIn("import qs.Commons as Commons\n", text)
+
+
 class TerminalOutputTest(unittest.TestCase):
     EVIL = "a post \x1b]52;c;ZWNobyBwd25lZA==\x07 with \x9b2J words"
 

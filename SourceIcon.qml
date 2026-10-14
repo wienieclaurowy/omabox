@@ -1,13 +1,14 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 
 // A source's glyph, or its favicon recoloured to the theme like symbolic tray icons.
 Item {
   id: root
 
   property var icon: ({})
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
   property string fontFamily: Style.font.family
   property real size: Style.font.body
 

@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -369,7 +370,7 @@ BarWidget {
       width: Style.space(6)
       height: width
       radius: width / 2
-      color: Color.accent
+      color: Commons.Color.accent
       x: button.width / 2 + Style.space(5)
       y: button.height / 2 - Style.space(9)
     }
