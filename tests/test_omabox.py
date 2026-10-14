@@ -3414,6 +3414,20 @@ class ViewerTest(unittest.TestCase):
         typed = omabox.start_relay([self.upstream(media["mp4"] + bytes(400), "audio/x-mpegurl") + "/v.mp4"], opener=plain)
         self.assertEqual(self.fetch(typed[0])[0], 415)
 
+    def test_relay_paths_keep_media_suffixes_only(self):
+        local = omabox.start_relay(["https://cdn.example/a.MP4", "https://cdn.example/b.m3u", "https://cdn.example/c.pls?x=.mp4",
+                                    "https://cdn.example/d"])
+        self.assertEqual([url.rsplit("/", 1)[1] for url in local], ["0.mp4", "1", "2", "3"])
+
+    def test_media_heads_need_real_headers(self):
+        mpeg = b"\xff\xfb\x90\x64" + bytes(600)
+        for head in (b"ID3\x03\x00\x00\x00\x00\x10\x7f", mpeg, b"\xff\xf1\x50\x80", b"\x00\x00\x00\x18ftypisom",
+                     (b"\x47" + bytes(187)) * 3):
+            self.assertTrue(omabox.media_head(head + bytes(600)), head[:12])
+        for head in (b"ID3\n#\nhttp://192.0.2.10/admin\n", b"ID3\x03\x00\x00\x00\x00\x80\x00", b"\xff\xff\xff\xff",
+                     b"\xff\xfb\xf0\x00", b"\xff\xe9\x90\x00", b"\x00\x00\x00\x02ftyp", (b"G" + b"a" * 187) * 2 + b"x" * 200):
+            self.assertFalse(omabox.media_head(head + b"\nhttp://192.0.2.10/admin\n"), head[:12])
+
     def test_relay_refuses_videos_on_the_lan(self):
         local = omabox.start_relay([self.upstream(b"secret") + "/v.mp4"])
         self.assertEqual(self.fetch(local[0]), (502, mock.ANY, b""))
