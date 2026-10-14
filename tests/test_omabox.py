@@ -3580,6 +3580,15 @@ class ViewerTest(unittest.TestCase):
                      b"\xff\xfb\xf0\x00", b"\xff\xe9\x90\x00", b"\x00\x00\x00\x02ftyp", (b"G" + b"a" * 187) * 2 + b"x" * 200):
             self.assertFalse(omabox.media_head(head + b"\nhttp://192.0.2.10/admin\n"), head[:12])
 
+    def test_relay_serves_this_account_only(self):
+        plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        local = omabox.start_relay([self.upstream(b"\x00\x00\x00\x18ftypisom" + bytes(400)) + "/v.mp4"], opener=plain)
+        self.assertEqual(self.fetch(local[0])[0], 200)
+        other = os.getuid() + 4242
+        with mock.patch.object(omabox.os, "getuid", lambda: other):
+            self.assertEqual(self.fetch(local[0])[0], 403)
+            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[0], 403)
+
     def test_relay_refuses_videos_on_the_lan(self):
         local = omabox.start_relay([self.upstream(b"secret") + "/v.mp4"])
         self.assertEqual(self.fetch(local[0]), (502, mock.ANY, b""))

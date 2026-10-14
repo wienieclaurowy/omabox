@@ -4931,7 +4931,8 @@ def read_head(response, size=MEDIA_HEAD_BYTES):
 class VideoRelay(http.server.BaseHTTPRequestHandler):
     """Serves each video of a post on loopback, fetched through PUBLIC_OPENER: whichever player plays it never
     dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking.
-    Only single media files pass (by type and by their first bytes), never a playlist naming other addresses."""
+    Only single media files pass (by type and by their first bytes), never a playlist naming other addresses, and only
+    to this account's programs: a player other than mpv gets the address, token and all, in its argv."""
 
     def do_GET(self):
         self.relay(body=True)
@@ -4940,6 +4941,9 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
         self.relay(body=False)
 
     def relay(self, body):
+        if peer_uid(self.connection) != os.getuid():
+            self.send_error(403)
+            return
         url = self.server.videos.get(self.path)
         if url is None:
             self.send_error(404)
