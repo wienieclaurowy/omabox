@@ -275,6 +275,18 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(omabox.feed_title(latin), "Fjord caf\u00e9")
         self.assertEqual(omabox.feed_title(codecs.BOM_UTF16_LE + '<rss><channel><title>Tern</title></channel></rss>'.encode("utf-16-le")), "Tern")
 
+    def test_only_text_encodings_decode(self):
+        for name in ("punycode", "idna", "zlib_codec", "utf-7", "unicode_escape", "rot13", "no-such-codec"):
+            feed = f'<?xml version="1.0" encoding="{name}"?><rss version="2.0"><channel><title>Tern +AGE-</title></channel></rss>'
+            self.assertEqual(omabox.feed_title(feed.encode()), "Tern +AGE-", name)
+            self.assertEqual(omabox.decode_page(b"+AGE- caf\xc3\xa9", f"text/html; charset={name}"), "+AGE- caf\u00e9")
+        self.assertEqual(omabox.text_codec("Windows-1250"), "cp1250")
+        self.assertEqual(omabox.decode_page("\u017c\u00f3\u0142w".encode("iso-8859-2"), "text/html; charset=ISO-8859-2"), "\u017c\u00f3\u0142w")
+        started = time.monotonic()
+        with self.assertRaises(omabox.ET.ParseError):
+            list(omabox.parse_feed(b'<?xml version="1.0" encoding="punycode"?>' + b"a" * 400_000 + b"-" + b"b" * 400_000))
+        self.assertLess(time.monotonic() - started, 2)
+
     def test_tolerant_parse_stays_safe(self):
         bomb = (b'<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY a "aaaaaaaaaa">'
                 + b"".join(b'<!ENTITY %s "%s">' % (bytes([ord("b") + n]), (b"&" + bytes([ord("a") + n]) + b";") * 10)

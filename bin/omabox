@@ -899,10 +899,7 @@ def decode_page(data, content_type=""):
     match = re.search(r"charset=[\"']?([\w-]+)", content_type, re.I) or PAGE_CHARSET_RE.search(data[:4096])
     charset = match.group(1) if match else "utf-8"
     charset = charset.decode("ascii", "replace") if isinstance(charset, bytes) else charset
-    try:
-        return data.decode(charset, "replace")
-    except LookupError:
-        return data.decode("utf-8", "replace")
+    return data.decode(text_codec(charset), "replace")
 
 
 def extract_article(page, base_url, title=""):
@@ -1021,6 +1018,24 @@ def feed_body(data, headers):
     return body
 
 
+# Encodings a page or feed may name; bytes.decode would also take any codec Python has, punycode among them, whose
+# decoding time is quadratic in the input.
+TEXT_ENCODINGS = {codecs.lookup(name).name for name in (
+    "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "ascii", "latin-1", "cp866", "koi8-r", "koi8-u",
+    "mac-roman", "mac-cyrillic", "gbk", "gb2312", "gb18030", "big5", "big5hkscs", "euc-jp", "iso-2022-jp", "shift_jis",
+    "cp932", "euc-kr", "cp949", *(f"iso-8859-{n}" for n in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16)),
+    *(f"windows-{n}" for n in (874, 1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258)))}
+
+
+def text_codec(name):
+    """The codec for an encoding a document names, utf-8 when it names none or one not in TEXT_ENCODINGS."""
+    try:
+        codec = codecs.lookup(name).name
+    except (LookupError, ValueError):
+        return "utf-8"
+    return codec if codec in TEXT_ENCODINGS else "utf-8"
+
+
 def xml_text(data):
     """The document decoded by its byte order mark, else its XML declaration, else the HTTP charset, else UTF-8."""
     if isinstance(data, str):
@@ -1028,11 +1043,8 @@ def xml_text(data):
     encoding = next((name for bom, name in BOMS if data.startswith(bom)), None)
     if encoding is None:
         declared = XML_ENCODING_RE.match(data.lstrip())
-        encoding = declared.group(1).decode() if declared else getattr(data, "charset", "") or "utf-8"
-    try:
-        text = bytes(data).decode(encoding, "replace")
-    except LookupError:
-        text = bytes(data).decode("utf-8", "replace")
+        encoding = text_codec(declared.group(1).decode() if declared else getattr(data, "charset", "") or "utf-8")
+    text = bytes(data).decode(encoding, "replace")
     return text.lstrip("\ufeff \t\r\n")
 
 
