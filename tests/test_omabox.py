@@ -741,6 +741,12 @@ class SourcesFileTest(unittest.TestCase):
         omabox.save_sources(sources, path)
         self.assertEqual(omabox.load_sources(path), sources)
 
+    def test_control_characters_in_a_name_keep_the_file_readable(self):
+        path = Path(tempfile.mkdtemp()) / "sources.toml"
+        sources = [{"name": "Daily\x7f News\x01\x1f\x9f", "url": "https://news.example/feed", "cadence": "daily"}]
+        omabox.save_sources(sources, path)
+        self.assertEqual(omabox.load_sources(path), sources)
+
     def test_rejects_unknown_cadence(self):
         path = Path(tempfile.mkdtemp()) / "sources.toml"
         path.write_text('[[source]]\nname = "x"\nurl = "https://x"\ncadence = "hourly"\n')

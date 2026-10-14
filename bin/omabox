@@ -2027,8 +2027,8 @@ def load_sources(path=None):
 
 
 def toml_string(value):
-    # JSON string escapes are a subset of TOML basic-string escapes.
-    return json.dumps(str(value), ensure_ascii=False)
+    # JSON string escapes are a subset of TOML basic-string escapes; JSON leaves DEL raw, which TOML refuses.
+    return json.dumps(str(value), ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def save_sources(sources, path=None):
