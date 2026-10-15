@@ -2077,7 +2077,7 @@ class I18nTest(unittest.TestCase):
 
     def test_catalog_matches_the_code(self):
         result = subprocess.run([sys.executable, "-I", str(self.ROOT / "tests" / "i18n_check.py"), str(self.ROOT / "i18n"),
-                                 "--sources", str(self.ROOT), "--en-only"], capture_output=True, text=True, timeout=60)
+                                 "--sources", str(self.ROOT)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_language_is_read_for_each_message(self):
