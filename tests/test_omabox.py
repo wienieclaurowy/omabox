@@ -4553,32 +4553,35 @@ class SearchPickTest(unittest.TestCase):
         self.assertEqual(omabox.menu_text("x" * 50, 10), "xxxxxxxxx…")
 
     def menu(self, answer):
-        """A fake omarchy-shell: the summon answers like the menu (writes the selection, touches done), openPost
-        records the id."""
+        """A fake shell: the summon (over the shell's socket, call) answers like the menu (writes the selection,
+        touches done); openPost (omarchy-shell, run) records the id."""
         calls = []
+
+        def call(target, function, *args):
+            calls.append([target, function, *args])
+            self.assertEqual([target, function, args[0]], ["shell", "summon", "omarchy.menu"])
+            payload = json.loads(args[1])
+            self.assertEqual(payload["mode"], "select")
+            self.assertTrue(payload["selectionFile"].startswith(str(self.runtime)))
+            if answer is not None:
+                picked = answer(payload["options"])
+                if picked is not None:
+                    Path(payload["selectionFile"]).write_text(picked + "\n")
+                Path(payload["doneFile"]).touch()
+            return "ok"
 
         def run(argv, **kwargs):
             calls.append(argv)
-            if argv[:4] == ["omarchy-shell", "shell", "summon", "omarchy.menu"]:
-                payload = json.loads(argv[4])
-                self.assertEqual(payload["mode"], "select")
-                self.assertTrue(payload["selectionFile"].startswith(str(self.runtime)))
-                if answer is not None:
-                    picked = answer(payload["options"])
-                    if picked is not None:
-                        Path(payload["selectionFile"]).write_text(picked + "\n")
-                    Path(payload["doneFile"]).touch()
-                return type("Done", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
             return type("Done", (), {"returncode": 0, "stdout": "reading\n", "stderr": ""})()
 
-        return run, calls
+        return call, run, calls
 
     def pick(self, answer, query="", **kwargs):
         self.runtime = Path(tempfile.mkdtemp())
-        run, calls = self.menu(answer)
+        call, run, calls = self.menu(answer)
 
-        def select(options, prompt, run, timeout):
-            return omabox.menu_select(options, prompt, run, sleep=lambda s: None, timeout=timeout,
+        def select(options, prompt, timeout):
+            return omabox.menu_select(options, prompt, call, sleep=lambda s: None, timeout=timeout,
                                       runtime_dir=self.runtime, **kwargs)
 
         picked = omabox.pick_post(query, run, select, state={"items": self.items()}, now=self.NOW)
@@ -4589,7 +4592,9 @@ class SearchPickTest(unittest.TestCase):
         picked, calls = self.pick(lambda options: options[1].split("\t", 1)[1], "omarchy")
         self.assertEqual(picked, "mid")
         self.assertEqual(calls[-1], ["omarchy-shell", "omabox", "openPost", "mid"])
-        self.assertEqual(json.loads(calls[0][4])["prompt"], "Omabox: omarchy")
+        self.assertEqual(json.loads(calls[0][3])["prompt"], "Omabox: omarchy")
+        # titles and sources travel over the socket only; the one command run carries the post id alone
+        self.assertEqual([argv for argv in calls if argv[0] == "omarchy-shell"], [calls[-1]])
 
     def test_cancel_and_timeout_open_nothing(self):
         picked, calls = self.pick(lambda options: None)
@@ -4604,10 +4609,10 @@ class SearchPickTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             omabox.pick_post("nothing like this", state={"items": self.items()})
 
-        def down(argv, **kwargs):
-            return type("Done", (), {"returncode": 1, "stdout": "", "stderr": "shell not running"})()
+        def down(*args):
+            raise ValueError("omarchy-shell is not running")
 
-        with self.assertRaisesRegex(ValueError, "shell not running"):
+        with self.assertRaisesRegex(ValueError, "Omarchy menu unavailable: omarchy-shell is not running"):
             omabox.menu_select(["x"], "p", down, runtime_dir=Path(tempfile.mkdtemp()))
 
 
@@ -4891,6 +4896,137 @@ class TerminalErrorTest(unittest.TestCase):
             with mock.patch.object(omabox, loader, fail), contextlib.redirect_stdout(out):
                 command(argparse.Namespace(id="0123456789abcdef", refresh=False, json=True, forget=False))
             self.assertEqual(json.loads(out.getvalue())["error"], self.EVIL)
+
+
+class ShellCallTest(unittest.TestCase):
+    """omabox pick reaches the shell over its sockets, never with the menu in a command line. Fake shells here; a
+    real isolated Quickshell below when qs is installed."""
+
+    def setUp(self):
+        # short: a Unix socket path must fit in 108 bytes
+        self.runtime = Path(tempfile.mkdtemp(prefix="obx"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(self.runtime)])
+        self.omarchy = self.runtime / "omarchy"
+        (self.omarchy / "shell").mkdir(parents=True)
+        (self.runtime / "wayland-test").touch()
+        env = {"XDG_RUNTIME_DIR": str(self.runtime), "OMARCHY_PATH": str(self.omarchy), "WAYLAND_DISPLAY": "wayland-test"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def serve(self, path, answer):
+        """A Unix socket that hands each request to answer and sends back what it returns; the requests."""
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen()
+        self.addCleanup(server.close)
+        seen = []
+
+        def loop():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                with conn:
+                    data = b""
+                    while not data.endswith(b"\x1e") and (chunk := conn.recv(1 << 20)):
+                        data += chunk
+                        if data[:1] == b"\x03" and answer is not None and self.complete(data):
+                            break
+                    seen.append(data)
+                    conn.sendall(answer(data) if answer else b"SKIP\x1e")
+
+        threading.Thread(target=loop, daemon=True).start()
+        return seen
+
+    @staticmethod
+    def complete(data):
+        try:
+            stream = omabox.QtStream(data[1:])
+            stream.string(), stream.string()
+            [stream.string() for _ in range(stream.number(4))]
+            return stream.at == len(data) - 1
+        except ValueError:
+            return False
+
+    def quickshell(self, display="wayland/wayland-test", pid=None):
+        """A Quickshell instance's runtime layout for OMARCHY_PATH/shell, as Quickshell 0.3 writes it."""
+        config = f"{self.omarchy}/shell/shell.qml"
+        path_id = omabox.hashlib.md5(config.encode()).hexdigest()
+        folder = self.runtime / "quickshell" / "by-id" / "ab12cd34ef"
+        folder.mkdir(parents=True)
+        (self.runtime / "quickshell" / "by-path" / path_id).mkdir(parents=True)
+        (self.runtime / "quickshell" / "by-path" / path_id / "ab12cd34ef").symlink_to(folder)
+        q = omabox.qt_string
+        (folder / "instance.lock").write_bytes(q("ab12cd34ef") + q(config) + q(path_id) + q("org.quickshell")
+                                               + (2461329).to_bytes(8, "big") + (1000).to_bytes(4, "big") + b"\0"
+                                               + (pid or os.getpid()).to_bytes(4, "big") + q(display))
+        return folder / "ipc.sock"
+
+    @staticmethod
+    def parse_call(data):
+        stream = omabox.QtStream(data[1:])
+        return [stream.string(), stream.string(), *[stream.string() for _ in range(stream.number(4))]]
+
+    def test_quickshell_socket_carries_the_call(self):
+        seen = self.serve(self.quickshell(), lambda data: b"\x05\x00" + omabox.qt_string("ok"))
+        payload = json.dumps({"options": ["●\tPrivate title \U0001f600\tSecret source"]}, ensure_ascii=False)
+        self.assertEqual(omabox.shell_call("shell", "summon", "omarchy.menu", payload), "ok")
+        self.assertEqual(self.parse_call(seen[0]), ["shell", "summon", "omarchy.menu", payload])
+
+    def test_edge_socket_goes_first_and_skip_falls_back(self):
+        name = omabox.hashlib.md5(f"{self.omarchy}/shell\nwayland-test".encode()).hexdigest()[:16]
+        edge = self.serve(self.runtime / f"omarchy-shell-{name}.sock", lambda data: b"OK\x1fok\x1e")
+        self.assertEqual(omabox.shell_call("shell", "summon", "omarchy.menu", "{}"), "ok")
+        self.assertEqual(edge, [b"shell\x1fsummon\x1fomarchy.menu\x1f{}\x1e"])
+        (self.runtime / f"omarchy-shell-{name}.sock").unlink()
+        self.serve(self.runtime / f"omarchy-shell-{name}.sock", None)
+        seen = self.serve(self.quickshell(), lambda data: b"\x05\x00" + omabox.qt_string("ok"))
+        self.assertEqual(omabox.shell_call("shell", "summon", "omarchy.menu", "{}"), "ok")
+        self.assertEqual(len(seen), 1)
+
+    def test_failures_and_other_displays(self):
+        self.serve(self.quickshell(display="wayland/wayland-9"), lambda data: b"\x05\x00" + omabox.qt_string("ok"))
+        with self.assertRaisesRegex(ValueError, "not running"):
+            omabox.shell_call("shell", "summon", "omarchy.menu", "{}")
+        subprocess.run(["rm", "-rf", "--", str(self.runtime / "quickshell")])
+        self.serve(self.quickshell(), lambda data: b"\x03")
+        with self.assertRaisesRegex(ValueError, "Function not found"):
+            omabox.shell_call("shell", "summon", "omarchy.menu", "{}")
+
+    @unittest.skipUnless(omabox.shutil.which("qs"), "needs Quickshell")
+    def test_a_real_quickshell_answers(self):
+        (self.omarchy / "shell" / "shell.qml").write_text("""import Quickshell
+import Quickshell.Io
+ShellRoot {
+  IpcHandler {
+    target: "shell"
+    function summon(id: string, payloadJson: string): string { return id === "omarchy.menu" ? "ok" : "unknown" }
+    function nothing(): void {}
+  }
+}
+""")
+        home = self.runtime / "home"
+        env = {**os.environ, "HOME": str(home), "XDG_CACHE_HOME": str(home / "c"), "XDG_STATE_HOME": str(home / "s"),
+               "XDG_DATA_HOME": str(home / "d"), "XDG_CONFIG_HOME": str(home / "f"), "QT_QPA_PLATFORM": "offscreen"}
+        shell = subprocess.Popen(["qs", "-p", str(self.omarchy / "shell")], env=env, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        self.addCleanup(shell.wait)
+        self.addCleanup(shell.kill)
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                answer = omabox.shell_call("shell", "summon", "omarchy.menu", '{"options": ["ä \U0001f600"]}')
+                break
+            except ValueError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.1)
+        self.assertEqual(answer, "ok")
+        self.assertEqual(omabox.shell_call("shell", "nothing"), "")
+        with self.assertRaisesRegex(ValueError, "Function not found"):
+            omabox.shell_call("shell", "missing")
 
 
 if __name__ == "__main__":

@@ -4356,7 +4356,165 @@ def pick_selection(text, ids):
     return ids.get(text.rstrip("\n"))
 
 
-def menu_select(options, prompt, run=subprocess.run, sleep=time.sleep, clock=time.monotonic, timeout=PICK_TIMEOUT,
+def shell_display(runtime):
+    """WAYLAND_DISPLAY as omarchy-shell recovers it: a caller outside the session (or one left with a display whose
+    socket is gone) takes the newest compositor socket."""
+    display = os.environ.get("WAYLAND_DISPLAY", "")
+    if display and (Path(display) if display.startswith("/") else runtime / display).exists():
+        return display
+    sockets = [path for path in runtime.glob("wayland-[0-9]*") if not path.name.endswith(".lock")]
+    with contextlib.suppress(OSError):
+        return max(sockets, key=lambda path: path.stat().st_mtime).name if sockets else display
+    return display
+
+
+def omarchy_shell_socket(omarchy, runtime, display):
+    """The socket Omarchy Edge's shell serves and omarchy-shell tries first, named from the same two values; None
+    on stable, which has none."""
+    name = hashlib.md5(f"{omarchy}/shell\n{display}".encode(), usedforsecurity=False).hexdigest()[:16]
+    path = runtime / f"omarchy-shell-{name}.sock"
+    return path if path.is_socket() else None
+
+
+def qt_string(text):
+    data = text.encode("utf-16-be", "surrogatepass")
+    return len(data).to_bytes(4, "big") + data
+
+
+class QtStream:
+    """Reads the QDataStream values Quickshell's IPC uses: big-endian integers and UTF-16 strings."""
+
+    def __init__(self, data):
+        self.data, self.at = data, 0
+
+    def take(self, size):
+        if self.at + size > len(self.data):
+            raise ValueError("short read")
+        self.at += size
+        return self.data[self.at - size:self.at]
+
+    def number(self, size):
+        return int.from_bytes(self.take(size), "big")
+
+    def string(self):
+        size = self.number(4)
+        return "" if size == 0xFFFFFFFF else self.take(size).decode("utf-16-be", "replace")
+
+
+def quickshell_sockets(config, runtime, display):
+    """IPC sockets of the live Quickshell instances running config on display, newest first: what `qs ipc -n -p`
+    picks. Layout and lock format checked with Quickshell 0.3.1 (Omarchy stable) and 0.3.2."""
+    root = runtime / "quickshell"
+    path_id = hashlib.md5(config.encode(), usedforsecurity=False).hexdigest()
+    found = []
+    with contextlib.suppress(OSError):
+        for entry in (root / "by-path" / path_id).iterdir():
+            folder = root / "by-id" / entry.name
+            try:
+                lock = QtStream((folder / "instance.lock").read_bytes())
+                lock.string(), lock.string(), lock.string(), lock.string()
+                day, msecs, spec = lock.number(8), lock.number(4), lock.number(1)
+                lock.take({0: 0, 1: 0, 2: 4}[spec])
+                pid, where = lock.number(4), lock.string()
+            except (OSError, ValueError, KeyError):
+                continue
+            if where == f"wayland/{display}" and Path(f"/proc/{pid}").exists() and (folder / "ipc.sock").is_socket():
+                found.append(((day, msecs), folder / "ipc.sock"))
+    return [path for _, path in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+QS_REPLIES = {2: "Target not found.", 3: "Function not found.", 4: "wrong number of arguments"}
+
+
+def quickshell_call(path, target, function, args, timeout=2):
+    """One `qs ipc call` over the instance's socket, so the arguments stay out of every command line. Its string
+    answer, None when no connection was made; ValueError when the call failed or went unanswered."""
+    request = bytes([3]) + qt_string(target) + qt_string(function) + len(args).to_bytes(4, "big")
+    request += b"".join(qt_string(arg) for arg in args)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(path))
+        except OSError:
+            return None
+        reply = b""
+        try:
+            sock.sendall(request)
+            while not quickshell_reply_done(reply) and (chunk := sock.recv(65536)):
+                reply += chunk
+        except OSError:
+            raise ValueError("omarchy-shell is not responding") from None
+    if reply[:1] == b"\x05":
+        with contextlib.suppress(ValueError):
+            return QtStream(reply[2:]).string()
+    raise ValueError(QS_REPLIES.get(reply[0] if reply else None, "omarchy-shell is not responding"))
+
+
+def quickshell_reply_done(reply):
+    """A whole reply: one error byte, or 5, the return kind (0 string, 1 void) and a string."""
+    if reply[:1] != b"\x05":
+        return bool(reply)
+    size = int.from_bytes(reply[2:6], "big") if len(reply) >= 6 else None
+    return size is not None and (size == 0xFFFFFFFF or len(reply) >= 6 + size)
+
+
+def shell_socket_call(path, fields, timeout=2):
+    """One call over Edge's shell socket: fields split by unit separators, ended by a record separator. Its output,
+    or None when nothing ran (no connection, or "SKIP"); ValueError once the request went out unanswered."""
+    if any("\x1e" in field or "\x1f" in field for field in fields):
+        return None
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(path))
+        except OSError:
+            return None
+        reply = b""
+        try:
+            sock.sendall(("\x1f".join(fields) + "\x1e").encode())
+            while b"\x1e" not in reply and len(reply) < 65536 and (chunk := sock.recv(4096)):
+                reply += chunk
+        except OSError:
+            raise ValueError("omarchy-shell is not responding") from None
+    text = reply.decode("utf-8", "replace")
+    if text.startswith("OK\x1f") and "\x1e" in text:
+        return text[3:text.rindex("\x1e")]
+    if text.startswith("SKIP\x1e"):
+        return None
+    raise ValueError("omarchy-shell is not responding")
+
+
+def shell_call(target, function, *args):
+    """omarchy-shell's IPC call without its argv, where every account could read the arguments: Edge's shell socket
+    first, as omarchy-shell does, then Quickshell's own IPC socket, which `qs ipc` uses. ValueError when the shell
+    cannot be reached or the call fails."""
+    omarchy = os.environ.get("OMARCHY_PATH", "")
+    if not omarchy:
+        raise ValueError("OMARCHY_PATH is not set")
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    display = shell_display(runtime)
+    edge = omarchy_shell_socket(omarchy, runtime, display)
+    answer = shell_socket_call(edge, [target, function, *args]) if edge else None
+    if answer is not None:
+        return answer
+    config = os.path.normpath(os.path.join(os.path.abspath(omarchy), "shell", "shell.qml"))
+    for path in quickshell_sockets(config, runtime, display):
+        answer = quickshell_call(path, target, function, list(args))
+        if answer is not None:
+            return answer
+    raise ValueError("omarchy-shell is not running")
+
+
+def summon_menu(payload, call):
+    try:
+        answer = call("shell", "summon", "omarchy.menu", payload)
+    except ValueError as error:
+        raise ValueError(f"Omarchy menu unavailable: {error}") from None
+    if answer.strip() != "ok":
+        raise ValueError(f"Omarchy menu unavailable: {answer.strip() or 'no answer'}")
+
+
+def menu_select(options, prompt, call=shell_call, sleep=time.sleep, clock=time.monotonic, timeout=PICK_TIMEOUT,
                 runtime_dir=None):
     """The option the user picked in the Omarchy menu's select mode, without its glyph; None when the menu was
     closed or nothing came back within timeout seconds. ValueError when the menu cannot be shown."""
@@ -4366,15 +4524,9 @@ def menu_select(options, prompt, run=subprocess.run, sleep=time.sleep, clock=tim
     selection, done = folder / "selection", folder / "done"
     try:
         selection.touch()
-        payload = {"mode": "select", "prompt": prompt, "options": options, "selectionFile": str(selection),
-                   "doneFile": str(done), "width": PICK_WIDTH}
-        try:
-            result = run(["omarchy-shell", "shell", "summon", "omarchy.menu", json.dumps(payload, ensure_ascii=False)],
-                         capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError) as error:
-            raise ValueError(f"Omarchy menu unavailable: {error}") from None
-        if result.returncode != 0 or result.stdout.strip() != "ok":
-            raise ValueError(f"Omarchy menu unavailable: {(result.stderr or result.stdout).strip() or 'no answer'}")
+        payload = json.dumps({"mode": "select", "prompt": prompt, "options": options, "selectionFile": str(selection),
+                              "doneFile": str(done), "width": PICK_WIDTH}, ensure_ascii=False)
+        summon_menu(payload, call)
         deadline = clock() + timeout
         while not done.exists():
             if clock() > deadline:
@@ -4404,7 +4556,7 @@ def pick_post(query="", run=subprocess.run, select=menu_select, timeout=PICK_TIM
         raise ValueError(f"no posts match {query!r}" if query.strip() else "no posts yet")
     options, ids = pick_options(items, now)
     prompt = tr("pick.promptQuery", menu_text(query, 40)) if query.strip() else tr("pick.prompt")
-    picked = select(options, prompt, run=run, timeout=timeout)
+    picked = select(options, prompt, timeout=timeout)
     post_id = pick_selection(picked, ids) if picked else None
     if post_id:
         open_in_reader(post_id, run)
