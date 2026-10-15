@@ -4665,5 +4665,54 @@ class LoopbackOpenerTest(unittest.TestCase):
         self.assertEqual(asked, ["/twitter/user/rowanvale", "/"])
 
 
+class CopyScriptTest(unittest.TestCase):
+    """The panel's wl-copy script, run against a stand-in wl-copy that records its argv and stdin."""
+
+    def setUp(self):
+        text = (BIN.parent.parent / "Panel.qml").read_text()
+        self.command = json.loads(re.search(r"id: copyProc.*?command: (\[.*?\])\n", text, re.S).group(1))
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(self.dir)])
+
+    def copy(self, text, mode="sensitive", supports_sensitive=True, fails=False):
+        flag = "--sensitive" if supports_sensitive else "--nothing"
+        (self.dir / "wl-copy").write_text(f"""#!/bin/sh
+if [ "$1" = --help ]; then echo "  {flag}  hint"; exit 0; fi
+for a in "$@"; do [ "$a" = --sensitive ] && [ {flag} != --sensitive ] && exit 1; done
+{"exit 1" if fails else ""}
+printf '%s\\n' "$@" > "{self.dir}/args"; cat > "{self.dir}/text"
+""")
+        (self.dir / "wl-copy").chmod(0o700)
+        for name in ("args", "text"):
+            (self.dir / name).unlink(missing_ok=True)
+        env = {"PATH": f"{self.dir}:/usr/bin:/bin", "OMABOX_COPY": mode}
+        code = subprocess.run(self.command, input=text.encode(), env=env, timeout=10).returncode
+        args = (self.dir / "args").read_text().split("\n") if (self.dir / "args").exists() else None
+        copied = (self.dir / "text").read_text() if (self.dir / "text").exists() else None
+        return code, args, copied
+
+    def test_notification_copy_is_sensitive_and_off_argv(self):
+        code, args, copied = self.copy("Your sign-in code is 482913\n\n")
+        self.assertEqual(code, 0)
+        self.assertIn("--sensitive", args)
+        self.assertEqual(copied, "Your sign-in code is 482913\n\n")
+        self.assertFalse(any("482913" in a for a in args))
+
+    def test_link_copy_stays_plain(self):
+        code, args, copied = self.copy("https://example.com/p", mode="plain")
+        self.assertEqual((code, copied), (0, "https://example.com/p"))
+        self.assertNotIn("--sensitive", args)
+
+    def test_old_wl_copy_without_the_flag_still_copies(self):
+        code, args, copied = self.copy("code 482913", supports_sensitive=False)
+        self.assertEqual((code, copied), (0, "code 482913"))
+        self.assertNotIn("--sensitive", args)
+
+    def test_a_failing_wl_copy_is_not_retried_unmarked(self):
+        code, args, copied = self.copy("code 482913", fails=True)
+        self.assertNotEqual(code, 0)
+        self.assertIsNone(copied)
+
+
 if __name__ == "__main__":
     unittest.main()
