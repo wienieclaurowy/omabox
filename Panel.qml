@@ -2225,6 +2225,8 @@ Panel {
           onCountChanged: Qt.callLater(measureCap)
           onContentHeightChanged: Qt.callLater(measureCap)
           onHeightChanged: Qt.callLater(measureCap)
+          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's.
+          cacheBuffer: Math.ceil(Style.space(560))
           width: parent.width
           height: visible ? root.listHeight(feedList) : 0
           clip: true
@@ -2252,6 +2254,8 @@ Panel {
           onCountChanged: Qt.callLater(measureCap)
           onContentHeightChanged: Qt.callLater(measureCap)
           onHeightChanged: Qt.callLater(measureCap)
+          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's.
+          cacheBuffer: Math.ceil(Style.space(560))
           width: parent.width
           height: visible ? root.listHeight(notificationList) : 0
           clip: true
