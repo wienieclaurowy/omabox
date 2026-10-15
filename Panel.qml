@@ -184,6 +184,30 @@ Panel {
     return Math.min(cap, list.contentHeight, fit)
   }
 
+  onViewChanged: if (view === "sources") { feedList.measureCap(); notificationList.measureCap() }
+
+  // Whole rows that fit the room Fit gives the list; -1 when a row it needs is not built (scrolled away, or past a cap).
+  // A hidden list uses the room it had when last shown; notifications not shown yet get the feed's room plus its
+  // unread slot, the only feed-only row above the lists.
+  function fittingRows(list) {
+    if (list.visible) {
+      list.shownRoom = Math.min(Style.space(560), Math.max(Style.space(120), bodyMaxHeight - list.y - tailHeight))
+      if (list === feedList) feedList.unreadAbove = unreadSlot.visible
+    }
+    var room = list.shownRoom
+    if (room <= 0 && list === notificationList && feedList.shownRoom > 0)
+      room = Math.min(Style.space(560), feedList.shownRoom + (feedList.unreadAbove ? unreadSlot.height + body.spacing : 0))
+    if (room <= 0) return -1
+    var first = list.itemAtIndex(0)
+    if (!first) return -1
+    for (var i = 0; i < list.count; i++) {
+      var item = list.itemAtIndex(i)
+      if (!item) return -1
+      if (item.y + item.height - first.y > room) return i
+    }
+    return list.count
+  }
+
   onItemsChanged: keepPlace(feedList, items, "id")
   onReadingIndexChanged: {
     if (readingIndex >= 0) root.cursor = readingIndex
@@ -816,10 +840,21 @@ Panel {
     })
   }
 
-  // Fit, then 3 to 50 rows; saved once the stepping stops.
-  function stepRows(kind, delta) {
+  // Rows shown now, counting Fit as the rows that fit (0 while not measured yet).
+  function shownRows(kind) {
     var current = kind === "feed" ? root.feedRows : root.notificationRows
-    var next = delta > 0 ? (current === 0 ? 3 : Math.min(50, current + 1)) : (current <= 3 ? 0 : current - 1)
+    var fit = (kind === "feed" ? feedList : notificationList).fitRows
+    return current > 0 && (fit <= 0 || current < fit) ? current : fit
+  }
+
+  // 3 rows up to the rows that fit, where it turns back into Fit; saved once the stepping stops.
+  function stepRows(kind, delta) {
+    var list = kind === "feed" ? feedList : notificationList
+    var current = kind === "feed" ? root.feedRows : root.notificationRows
+    var shown = shownRows(kind)
+    var next = shown > 0 ? shown + delta : delta < 0 ? Math.min(50, list.count - 1) : 0
+    if (next < 3) return
+    if (next > 50 || (list.fitRows > 0 && next >= list.fitRows)) next = 0
     if (next === current) return
     if (kind === "feed") root.feedRows = next
     else root.notificationRows = next
@@ -1725,6 +1760,7 @@ Panel {
         // One fixed-height slot for the unread count and the mark-read choices, gone once nothing is unread.
         // What the choices cover is in the status line.
         Item {
+          id: unreadSlot
           visible: root.view === "feed" && !root.reading && root.allItems.length > 0
                    && (Model.unreadCount(root.items) > 0 || root.catchupOpen)
           width: parent.width
@@ -1893,7 +1929,7 @@ Panel {
           Item {
             id: rowsSetting
             required property string modelData
-            readonly property int rows: modelData === "feed" ? root.feedRows : root.notificationRows
+            readonly property int rows: root.shownRows(modelData)
             width: parent.width
             height: rowsControls.height
 
@@ -2211,9 +2247,14 @@ Panel {
           readonly property int rowCap: root.feedRows
           property real capHeight: 0
           property int measuredFor: 0
+          property int fitRows: 0
+          property real shownRoom: 0
+          property bool unreadAbove: false
           // Height of the first rowCap rows. Rows scrolled out of the cache cannot be measured; the last height stays
           // then, so the list does not resize while scrolling.
           function measureCap() {
+            var fits = root.fittingRows(feedList)
+            if (fits >= 0) fitRows = fits
             var first = itemAtIndex(0), last = itemAtIndex(rowCap - 1)
             if (rowCap <= 0 || count <= rowCap) capHeight = 0
             else if (first && last) capHeight = last.y + last.height - first.y
@@ -2225,7 +2266,9 @@ Panel {
           onCountChanged: Qt.callLater(measureCap)
           onContentHeightChanged: Qt.callLater(measureCap)
           onHeightChanged: Qt.callLater(measureCap)
-          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's.
+          onVisibleChanged: Qt.callLater(measureCap)
+          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's,
+          // and fittingRows can count them from the Sources view.
           cacheBuffer: Math.ceil(Style.space(560))
           width: parent.width
           height: visible ? root.listHeight(feedList) : 0
@@ -2242,7 +2285,11 @@ Panel {
           readonly property int rowCap: root.notificationRows
           property real capHeight: 0
           property int measuredFor: 0
+          property int fitRows: 0
+          property real shownRoom: 0
           function measureCap() {
+            var fits = root.fittingRows(notificationList)
+            if (fits >= 0) fitRows = fits
             var first = itemAtIndex(0), last = itemAtIndex(rowCap - 1)
             if (rowCap <= 0 || count <= rowCap) capHeight = 0
             else if (first && last) capHeight = last.y + last.height - first.y
@@ -2254,7 +2301,9 @@ Panel {
           onCountChanged: Qt.callLater(measureCap)
           onContentHeightChanged: Qt.callLater(measureCap)
           onHeightChanged: Qt.callLater(measureCap)
-          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's.
+          onVisibleChanged: Qt.callLater(measureCap)
+          // Keeps the capped rows built while the list is hidden, so it comes back at its cap height, not Fit's,
+          // and fittingRows can count them from the Sources view.
           cacheBuffer: Math.ceil(Style.space(560))
           width: parent.width
           height: visible ? root.listHeight(notificationList) : 0
