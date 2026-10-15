@@ -9,6 +9,7 @@ import io
 import ipaddress
 import json
 import os
+import random
 import re
 import socket
 import socketserver
@@ -4800,6 +4801,31 @@ class SanitizeDepthTest(unittest.TestCase):
         cost(1000)
         small, big = min(cost(5000) for _ in range(3)), cost(40000)
         self.assertLess(big / small, 20, (small, big))
+
+
+class ArticleDepthTest(unittest.TestCase):
+    def test_text_sizes_match_text_size_on_every_node(self):
+        pick = random.Random(7)
+        bits = ["<p>", "</p>", "<div>", "</div>", "<a href='/x'>", "</a>", " ", "  word ", "text", "\n", "<br>",
+                "<blockquote>", "</blockquote>", "\u00a0", "<span>", "</span>", "ipsum dolor sit "]
+        for _ in range(200):
+            tree = omabox.PageTree()
+            tree.feed("".join(pick.choice(bits) for _ in range(pick.randint(1, 300))))
+            tree.close()
+            sizes, links = omabox.text_sizes(tree.root)
+            for node in [tree.root, *omabox.walk(tree.root)]:
+                self.assertEqual(sizes[id(node)], omabox.text_size(node))
+                self.assertEqual(links[id(node)], sum(omabox.text_size(a) for a in omabox.walk(node) if a.tag == "a"))
+
+    def test_deep_nesting_costs_linear_time(self):
+        def cost(depth):
+            page = "<html><body>" + "<blockquote>x " * depth + "<a>y " * depth + "word " * 40000 + "</body></html>"
+            started = time.perf_counter()
+            omabox.extract_article(page, "https://example.com/")
+            return time.perf_counter() - started
+        cost(30)
+        small, big = min(cost(30) for _ in range(3)), cost(240)
+        self.assertLess(big / small, 8, (small, big))
 
 
 if __name__ == "__main__":

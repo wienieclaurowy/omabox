@@ -984,10 +984,12 @@ def clean_tree(node, strict):
 
 
 def walk(node):
-    for child in node.children:
-        if not isinstance(child, str):
-            yield child
-            yield from walk(child)
+    """Descendant elements in document order; a stack, not nested generators, whose cost grows with depth."""
+    stack = [child for child in reversed(node.children) if not isinstance(child, str)]
+    while stack:
+        child = stack.pop()
+        yield child
+        stack.extend(grandchild for grandchild in reversed(child.children) if not isinstance(grandchild, str))
 
 
 def node_text(node):
@@ -998,14 +1000,58 @@ def text_size(node):
     return len(" ".join(node_text(node).split()))
 
 
+def text_shape(text):
+    """(has a word, word characters, gaps between words, starts with space, ends with space) of a text, which
+    text_shapes joins so a node's text_size comes from its children's shapes."""
+    words = text.split()
+    if not words:
+        return False, 0, 0, bool(text), bool(text)
+    return True, sum(map(len, words)), len(words) - 1, text[0].isspace(), text[-1].isspace()
+
+
+def joined_shape(left, right):
+    if not left[0] or not right[0]:
+        word, other = (right, left) if right[0] else (left, right)
+        if not word[0]:
+            return False, 0, 0, left[3] or right[3], left[3] or right[3]
+        if word is right:
+            return True, right[1], right[2], left[3] or right[3], right[4]
+        return True, left[1], left[2], left[3], left[4] or right[3]
+    gap = 1 if left[4] or right[3] else 0
+    return True, left[1] + right[1], left[2] + right[2] + gap, left[3], right[4]
+
+
+def text_sizes(root):
+    """({id: text_size}, {id: text_size of the <a> elements inside}) for every element under root, in one pass: per
+    node calls of text_size cost depth times the page's text."""
+    sizes, links = {}, {}
+
+    def visit(node):
+        shape, linked = (False, 0, 0, False, False), 0
+        for child in node.children:
+            if isinstance(child, str):
+                part = text_shape(child)
+            else:
+                part = visit(child)
+                linked += links[id(child)] + (sizes[id(child)] if child.tag == "a" else 0)
+            shape = joined_shape(shape, part)
+        sizes[id(node)] = shape[1] + shape[2] if shape[0] else 0
+        links[id(node)] = linked
+        return shape
+
+    visit(root)
+    return sizes, links
+
+
 def content_node(root):
     """<article> with the most text, else <main> / role=main, else the element whose paragraphs hold the most
     non-link text (half of it also counts for the grandparent, so a wrapper of several blocks can win)."""
+    sizes, links = text_sizes(root)
     articles = [node for node in walk(root) if node.tag == "article"]
     mains = [node for node in walk(root) if node.tag == "main" or node.attrs.get("role", "").lower() == "main"]
     for group in (articles, mains):
-        best = max(group, key=text_size, default=None)
-        if best is not None and text_size(best) >= MIN_ARTICLE_CHARS:
+        best = max(group, key=lambda node: sizes[id(node)], default=None)
+        if best is not None and sizes[id(best)] >= MIN_ARTICLE_CHARS:
             return best
     scores, parents = {}, {}
     for node in walk(root):
@@ -1014,7 +1060,7 @@ def content_node(root):
                 parents[id(child)] = node
     for node in walk(root):
         if node.tag in PARAGRAPH_TAGS:
-            size = text_size(node) - sum(text_size(link) for link in walk(node) if link.tag == "a")
+            size = sizes[id(node)] - links[id(node)]
             target = parents.get(id(node)) if size >= 25 else None
         else:
             # text straight in a <div> between <br>s, no <p>: the element is its own paragraph container
