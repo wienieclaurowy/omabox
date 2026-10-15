@@ -121,6 +121,9 @@ Set these in the widget's entry in `~/.config/omarchy/shell.json`:
 | `readerFontDelta` | `0` | Reader text size, relative to the theme (`+`/`-` in the reader change it) |
 | `hints` | `false` | Show the key hints line (`?` toggles it) |
 
+In the Sources view, **Feed rows** and **Notification rows** set how many rows each list shows before it
+scrolls. **Fit** uses the height of the screen. The same from a terminal: `omabox rows --feed 6 --notifications 0`.
+
 ## X sources
 
 X has no public feeds, so Omabox can only read X with an X login. It is optional: everything else works

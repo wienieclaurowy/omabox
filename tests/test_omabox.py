@@ -4604,5 +4604,35 @@ class SearchPickTest(unittest.TestCase):
             omabox.menu_select(["x"], "p", down, runtime_dir=Path(tempfile.mkdtemp()))
 
 
+class RowsTest(unittest.TestCase):
+    def setUp(self):
+        saved = omabox.STATE_PATH
+        self.addCleanup(setattr, omabox, "STATE_PATH", saved)
+        omabox.STATE_PATH = Path(tempfile.mkdtemp()) / "items.json"
+
+    def run_cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            omabox.main(list(argv))
+        return out.getvalue()
+
+    def test_rows_are_saved_reported_and_dropped_at_zero(self):
+        self.assertEqual(json.loads(self.run_cli("rows", "--json")), {"feed": 0, "notifications": 0})
+        self.run_cli("rows", "--feed", "6")
+        self.run_cli("rows", "--notifications", "4")
+        self.assertEqual(omabox.load_state()["rows"], {"feed": 6, "notifications": 4})
+        self.assertEqual(json.loads(self.run_cli("delivery", "--json"))["rows"], {"feed": 6, "notifications": 4})
+        self.run_cli("rows", "--feed", "0", "--notifications", "0")
+        self.assertNotIn("rows", omabox.load_state())
+
+    def test_rows_outside_the_range_are_refused_and_ignored_in_state(self):
+        for bad in ("51", "-1", "x"):
+            with self.subTest(bad), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli("rows", "--feed", bad)
+        state = omabox.load_state()
+        state["rows"] = {"feed": 999, "notifications": "7"}
+        self.assertEqual(omabox.panel_rows(state), {"feed": 0, "notifications": 0})
+
+
 if __name__ == "__main__":
     unittest.main()

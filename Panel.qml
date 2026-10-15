@@ -93,6 +93,9 @@ Panel {
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")) + "/omabox"
   readonly property string stateDirLabel: stateDir.indexOf(home + "/") === 0 ? "~" + stateDir.slice(home.length) : stateDir
   property string weeklyDay: "mon"
+  // Rows the feed and notification lists show before they scroll (`omabox rows`); 0 fits them to the screen.
+  property int feedRows: 0
+  property int notificationRows: 0
   property var cliDone: null
   // The welcome card shows on the feed until it is dismissed once; dismissing saves `welcomed` in shell.json.
   readonly property bool welcomed: setting("welcomed", false) === true
@@ -176,7 +179,9 @@ Panel {
     .reduce(function(sum, item) { return sum + (item.visible ? item.height + body.spacing : 0) }, 0)
 
   function listHeight(list) {
-    return Math.min(Style.space(560), list.contentHeight, Math.max(Style.space(120), bodyMaxHeight - list.y - tailHeight))
+    var fit = Math.max(Style.space(120), bodyMaxHeight - list.y - tailHeight)
+    var cap = list.rowCap <= 0 ? Style.space(560) : list.count > list.rowCap ? (list.capHeight || fit) : list.contentHeight
+    return Math.min(cap, list.contentHeight, fit)
   }
 
   onItemsChanged: keepPlace(feedList, items, "id")
@@ -771,6 +776,10 @@ Panel {
       if (code !== 0 || !result || !result.time) return
       if (!deliveryApply.running) root.deliveryTime = result.time
       root.weeklyDay = result.weekly_day || "mon"
+      if (result.rows && !rowsApply.running) {
+        root.feedRows = result.rows.feed || 0
+        root.notificationRows = result.rows.notifications || 0
+      }
       root.deliveryStatus(result)
     })
   }
@@ -803,6 +812,26 @@ Panel {
         loadDelivery()
       }
     })
+  }
+
+  // Fit, then 3 to 50 rows; saved once the stepping stops.
+  function stepRows(kind, delta) {
+    var current = kind === "feed" ? root.feedRows : root.notificationRows
+    var next = delta > 0 ? (current === 0 ? 3 : Math.min(50, current + 1)) : (current <= 3 ? 0 : current - 1)
+    if (next === current) return
+    if (kind === "feed") root.feedRows = next
+    else root.notificationRows = next
+    rowsApply.restart()
+  }
+
+  function saveRows() {
+    runCli(["rows", "--feed", String(root.feedRows), "--notifications", String(root.notificationRows), "--json"],
+      function(code, text) {
+        if (code === 0) return
+        root.messageError = true
+        root.message = Model.fill(Tr.t("sources.rowsNotSaved"), [text])
+        loadDelivery()
+      })
   }
 
   function saveDelivery() {
@@ -1238,6 +1267,12 @@ Panel {
     id: deliveryApply
     interval: 900
     onTriggered: root.saveDelivery()
+  }
+
+  Timer {
+    id: rowsApply
+    interval: 900
+    onTriggered: root.saveRows()
   }
 
   // J/K through posts restarts it, so only a post that stays open fetches its replies or article.
@@ -1847,6 +1882,74 @@ Panel {
           }
         }
 
+        Repeater {
+          model: root.view === "sources" ? ["feed", "notifications"] : []
+
+          Item {
+            id: rowsSetting
+            required property string modelData
+            readonly property int rows: modelData === "feed" ? root.feedRows : root.notificationRows
+            width: parent.width
+            height: rowsControls.height
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - rowsControls.width - Style.space(10)
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              text: Tr.t(rowsSetting.modelData === "feed" ? "sources.feedRows" : "sources.notificationRows")
+              color: root.faint
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              id: rowsControls
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+
+              PanelActionButton {
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰍴"
+                tooltipText: Tr.t("sources.fewerRows")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                onClicked: root.stepRows(rowsSetting.modelData, -1)
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.max(implicitWidth, Math.ceil(fitWidth.advanceWidth))
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: rowsSetting.rows > 0 ? Tr.formatNumber(rowsSetting.rows) : Tr.t("sources.rowsFit")
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+
+                TextMetrics {
+                  id: fitWidth
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  text: Tr.t("sources.rowsFit")
+                }
+              }
+
+              PanelActionButton {
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "󰐕"
+                tooltipText: Tr.t("sources.moreRows")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                onClicked: root.stepRows(rowsSetting.modelData, 1)
+              }
+            }
+          }
+        }
+
         PanelSeparator {
           visible: root.view === "sources"
           width: parent.width
@@ -2100,6 +2203,23 @@ Panel {
         ListView {
           id: feedList
           visible: root.view === "feed" && !root.reading && count > 0
+          readonly property int rowCap: root.feedRows
+          property real capHeight: 0
+          property int measuredFor: 0
+          // Height of the first rowCap rows. Rows scrolled out of the cache cannot be measured; the last height stays
+          // then, so the list does not resize while scrolling.
+          function measureCap() {
+            var first = itemAtIndex(0), last = itemAtIndex(rowCap - 1)
+            if (rowCap <= 0 || count <= rowCap) capHeight = 0
+            else if (first && last) capHeight = last.y + last.height - first.y
+            else if (measuredFor !== rowCap) capHeight = 0
+            else return
+            measuredFor = rowCap
+          }
+          onRowCapChanged: Qt.callLater(measureCap)
+          onCountChanged: Qt.callLater(measureCap)
+          onContentHeightChanged: Qt.callLater(measureCap)
+          onHeightChanged: Qt.callLater(measureCap)
           width: parent.width
           height: visible ? root.listHeight(feedList) : 0
           clip: true
@@ -2112,6 +2232,21 @@ Panel {
         ListView {
           id: notificationList
           visible: root.view === "notifications" && !root.reading && count > 0
+          readonly property int rowCap: root.notificationRows
+          property real capHeight: 0
+          property int measuredFor: 0
+          function measureCap() {
+            var first = itemAtIndex(0), last = itemAtIndex(rowCap - 1)
+            if (rowCap <= 0 || count <= rowCap) capHeight = 0
+            else if (first && last) capHeight = last.y + last.height - first.y
+            else if (measuredFor !== rowCap) capHeight = 0
+            else return
+            measuredFor = rowCap
+          }
+          onRowCapChanged: Qt.callLater(measureCap)
+          onCountChanged: Qt.callLater(measureCap)
+          onContentHeightChanged: Qt.callLater(measureCap)
+          onHeightChanged: Qt.callLater(measureCap)
           width: parent.width
           height: visible ? root.listHeight(notificationList) : 0
           clip: true
@@ -2124,6 +2259,8 @@ Panel {
         ListView {
           id: sourceList
           visible: root.view === "sources" && count > 0
+          readonly property int rowCap: 0
+          readonly property real capHeight: 0
           width: parent.width
           height: visible ? root.listHeight(sourceList) : 0
           clip: true

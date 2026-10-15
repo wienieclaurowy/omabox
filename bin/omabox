@@ -4937,9 +4937,47 @@ def cmd_delivery(args):
     upcoming = moment.strftime("%a %H:%M")
     if args.json:
         print(json.dumps({"time": at, "weekly_day": WEEKDAYS[day], "next": upcoming, "next_at": moment.isoformat(),
-                          "recovered": recovered_file(state), "fetching": fetching()}))
+                          "recovered": recovered_file(state), "fetching": fetching(), "rows": panel_rows(state)}))
         return
     print(f"daily delivery at {at}, weekly sources on {WEEKDAY_NAMES[day]}, next {upcoming}")
+
+
+# Rows the panel's feed and notification lists show before they scroll; 0 fits them to the screen.
+ROW_KINDS = ("feed", "notifications")
+MAX_ROWS = 50
+
+
+def panel_rows(state):
+    saved = state.get("rows") if isinstance(state.get("rows"), dict) else {}
+    return {kind: saved[kind] if type(saved.get(kind)) is int and 0 <= saved[kind] <= MAX_ROWS else 0
+            for kind in ROW_KINDS}
+
+
+def row_count(text):
+    count = int(text)
+    if not 0 <= count <= MAX_ROWS:
+        raise argparse.ArgumentTypeError(f"rows go from 0 (fit the screen) to {MAX_ROWS}")
+    return count
+
+
+def cmd_rows(args):
+    wanted = {"feed": args.feed, "notifications": args.notifications}
+    if any(count is not None for count in wanted.values()):
+        with locked():
+            state = load_state()
+            rows = {**panel_rows(state), **{kind: count for kind, count in wanted.items() if count is not None}}
+            if any(rows.values()):
+                state["rows"] = {kind: count for kind, count in rows.items() if count}
+            else:
+                state.pop("rows", None)
+            save_state(state)
+    else:
+        state = load_state()
+    rows = panel_rows(state)
+    if args.json:
+        print(json.dumps(rows))
+        return
+    print(", ".join(f"{kind}: {count or 'fit the screen'}" for kind, count in rows.items()))
 
 
 def update_items(ids, change):
@@ -5421,6 +5459,12 @@ def main(argv=None):
                           help="the day weekly sources come in (default mon)")
     delivery.add_argument("--json", action="store_true")
     delivery.set_defaults(func=cmd_delivery)
+    rows = sub.add_parser("rows", help="rows the panel shows before scrolling: rows --feed 6 --notifications 0 "
+                                       "(0 fits the screen)")
+    rows.add_argument("--feed", type=row_count)
+    rows.add_argument("--notifications", type=row_count)
+    rows.add_argument("--json", action="store_true")
+    rows.set_defaults(func=cmd_rows)
     pause = sub.add_parser("pause", help="hold deliveries: pause 3d | pause 12h | pause off")
     pause.add_argument("duration", nargs="?")
     pause.set_defaults(func=cmd_pause)
