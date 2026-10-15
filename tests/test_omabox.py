@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -4682,7 +4683,7 @@ class CopyScriptTest(unittest.TestCase):
         text = (BIN.parent.parent / "Panel.qml").read_text()
         self.command = json.loads(re.search(r"id: copyProc.*?command: (\[.*?\])\n", text, re.S).group(1))
         self.dir = Path(tempfile.mkdtemp())
-        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(self.dir)])
+        self.addCleanup(shutil.rmtree, self.dir, True)
 
     def copy(self, text, mode="sensitive", supports_sensitive=True, fails=False):
         flag = "--sensitive" if supports_sensitive else "--nothing"
@@ -4729,7 +4730,7 @@ class YtdlHookTest(unittest.TestCase):
 
     def mpv(self, files, extra=()):
         root = Path(tempfile.mkdtemp())
-        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(root)])
+        self.addCleanup(shutil.rmtree, root, True)
         (root / "recorder").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> "{root}/seen"\nexit 1\n')
         (root / "recorder").chmod(0o700)
         with mock.patch.object(omabox, "YTDL_WRAPPER", root / "recorder"), \
@@ -4777,7 +4778,7 @@ class MediaHeadTest(unittest.TestCase):
     @unittest.skipUnless(omabox.shutil.which("ffmpeg"), "needs ffmpeg")
     def test_real_media_heads_pass(self):
         root = Path(tempfile.mkdtemp())
-        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(root)])
+        self.addCleanup(shutil.rmtree, root, True)
         video = ["-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=5", "-pix_fmt", "yuv420p"]
         audio = ["-f", "lavfi", "-i", "sine=duration=1"]
         cases = {"a.mp4": video, "b.mp4": video + ["-movflags", "+faststart"], "c.mov": video, "d.webm": video,
@@ -4873,7 +4874,7 @@ class LoneSurrogateTest(unittest.TestCase):
 
     def test_save_state_survives_a_lone_surrogate(self):
         path = Path(tempfile.mkdtemp()) / "items.json"
-        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(path.parent)])
+        self.addCleanup(shutil.rmtree, path.parent, True)
         omabox.save_state({"items": [{"title": "cut \ud83d emoji"}], "delivered": "2026-01-02T00:00:00Z"}, path)
         saved = json.loads(path.read_bytes())
         self.assertEqual(saved["delivered"], "2026-01-02T00:00:00Z")
@@ -4905,7 +4906,7 @@ class ShellCallTest(unittest.TestCase):
     def setUp(self):
         # short: a Unix socket path must fit in 108 bytes
         self.runtime = Path(tempfile.mkdtemp(prefix="obx"))
-        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(self.runtime)])
+        self.addCleanup(shutil.rmtree, self.runtime, True)
         self.omarchy = self.runtime / "omarchy"
         (self.omarchy / "shell").mkdir(parents=True)
         (self.runtime / "wayland-test").touch()
@@ -4990,7 +4991,7 @@ class ShellCallTest(unittest.TestCase):
         self.serve(self.quickshell(display="wayland/wayland-9"), lambda data: b"\x05\x00" + omabox.qt_string("ok"))
         with self.assertRaisesRegex(ValueError, "not running"):
             omabox.shell_call("shell", "summon", "omarchy.menu", "{}")
-        subprocess.run(["rm", "-rf", "--", str(self.runtime / "quickshell")])
+        shutil.rmtree(self.runtime / "quickshell")
         self.serve(self.quickshell(), lambda data: b"\x03")
         with self.assertRaisesRegex(ValueError, "Function not found"):
             omabox.shell_call("shell", "summon", "omarchy.menu", "{}")
