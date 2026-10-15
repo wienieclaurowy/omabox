@@ -4639,7 +4639,7 @@ class RowsTest(unittest.TestCase):
         self.assertNotIn("rows", omabox.load_state())
 
     def test_rows_outside_the_range_are_refused_and_ignored_in_state(self):
-        for bad in ("51", "-1", "x"):
+        for bad in ("11", "-1", "x"):
             with self.subTest(bad), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 self.run_cli("rows", "--feed", bad)
         state = omabox.load_state()

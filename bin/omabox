@@ -5233,7 +5233,7 @@ def cmd_delivery(args):
 
 # Rows the panel's feed and notification lists show before they scroll; 0 fits them to the screen.
 ROW_KINDS = ("feed", "notifications")
-MAX_ROWS = 50
+MAX_ROWS = 10
 
 
 def panel_rows(state):

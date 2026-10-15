@@ -122,8 +122,8 @@ Set these in the widget's entry in `~/.config/omarchy/shell.json`:
 | `hints` | `false` | Show the key hints line (`?` toggles it) |
 
 In the Sources view, **Feed rows** and **Notification rows** set how many rows each list shows before it
-scrolls. Each starts at the number of whole rows that fit the screen; **−** shows fewer, and **+** goes back up to that
-number. The same from a terminal: `omabox rows --feed 6 --notifications 0` (0 fits the screen).
+scrolls, from 1 to 10. Each starts at the number of whole rows that fit; **−** shows fewer, and **+** shows more
+while the screen has room. The same from a terminal: `omabox rows --feed 6 --notifications 0` (0 fits the screen).
 
 ## X sources
 
