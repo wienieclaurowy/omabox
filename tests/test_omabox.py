@@ -4784,5 +4784,23 @@ class MediaHeadTest(unittest.TestCase):
             self.assertTrue(omabox.media_head(head), (name, head[:16]))
 
 
+class SanitizeDepthTest(unittest.TestCase):
+    def test_nesting_is_capped_and_the_output_balanced(self):
+        body, text = omabox.sanitize("<b>" * 500 + "deep" + "</i>" * 500 + '<a href="https://example.com/">l</a>')
+        self.assertEqual(body.count("<b>"), omabox.MAX_OPEN_TAGS)
+        self.assertEqual(body.count("<b>"), body.count("</b>"))
+        self.assertEqual(text, "deepl")
+        self.assertEqual(omabox.sanitize("<p><b>x</b> <i>y</i></p>")[0], "<p><b>x</b> <i>y</i></p>")
+
+    def test_unclosed_tags_cost_linear_time(self):
+        def cost(n):
+            started = time.perf_counter()
+            omabox.sanitize("<b>" * n + "</i>" * n)
+            return time.perf_counter() - started
+        cost(1000)
+        small, big = min(cost(5000) for _ in range(3)), cost(40000)
+        self.assertLess(big / small, 20, (small, big))
+
+
 if __name__ == "__main__":
     unittest.main()

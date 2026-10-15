@@ -68,6 +68,9 @@ SKIP_CONTENT_TAGS = {"script", "style", "iframe", "svg", "noscript"}
 VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source", "wbr"}
 
 
+MAX_OPEN_TAGS = 64
+
+
 class Sanitizer(HTMLParser):
     # Output feeds a QML Text in RichText mode, which fetches <img> sources itself: remote images never pass,
     # only what `images` returns (local cache refs). Links kept only for http(s), headings flattened to bold.
@@ -95,8 +98,7 @@ class Sanitizer(HTMLParser):
         if tag == "video":
             self.video = dict(attrs)
         elif tag in HEADING_TAGS:
-            self.out.append('<p class="h">' if tag in ("h1", "h2") else '<p class="sub">')
-            self.open_tags.append(tag)
+            self.open(tag, '<p class="h">' if tag in ("h1", "h2") else '<p class="sub">')
         elif tag == "img":
             if self.images:
                 self.out.append(self.images(dict(attrs)))
@@ -106,15 +108,19 @@ class Sanitizer(HTMLParser):
         elif tag == "a":
             href = dict(attrs).get("href") or ""
             if href.startswith(("https://", "http://")):
-                self.out.append(f'<a href="{html.escape(href, quote=True)}">')
-                self.open_tags.append("a")
+                self.open("a", f'<a href="{html.escape(href, quote=True)}">')
             else:
-                self.open_tags.append("a-dropped")
+                self.open("a-dropped", "")
         elif tag in BLOCK_TAGS or tag in INLINE_TAGS:
-            self.out.append(f"<{tag}>")
-            self.open_tags.append(tag)
+            self.open(tag, f"<{tag}>")
         if tag in BLOCK_TAGS:
             self.text.append(" ")
+
+    def open(self, tag, markup):
+        # past the cap a tag is dropped: end tags scan open_tags, so an unbounded stack makes sanitize quadratic
+        if len(self.open_tags) < MAX_OPEN_TAGS:
+            self.out.append(markup)
+            self.open_tags.append(tag)
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
