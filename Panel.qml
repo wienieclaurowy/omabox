@@ -25,6 +25,8 @@ Panel {
   // The same two on the cursor row's fill.
   readonly property color selectedDim: Model.readableShade(fg, selectedCard, 0.6, 4.9)
   readonly property color selectedFaint: Model.readableShade(fg, selectedCard, 0.4, 3.4)
+  readonly property color readText: Model.readShade(fg, opaqueCard)
+  readonly property color selectedReadText: Model.readShade(fg, selectedCard)
   readonly property color opaqueCard: Qt.rgba(cardColor.r, cardColor.g, cardColor.b, 1)
   readonly property color selectedCard: Qt.tint(opaqueCard, Style.selectedFillFor(fg, Commons.Color.accent))
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -2466,7 +2468,8 @@ Panel {
       readonly property bool current: index === root.cursor
       // Read posts recede by colour only: a lighter weight would rewrap the title and change the row's height.
       readonly property color dimColor: current ? root.selectedDim : root.dim
-      readonly property color metaColor: item.read ? (current ? root.selectedFaint : root.faint) : dimColor
+      readonly property color readColor: current ? root.selectedReadText : root.readText
+      readonly property color metaColor: item.read ? readColor : dimColor
 
       width: ListView.view.width
       height: rowColumn.implicitHeight + Style.space(16) + (rowSnooze.visible ? rowSnooze.height + Style.space(8) : 0)
@@ -2672,7 +2675,7 @@ Panel {
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           text: row.item.title
-          color: row.item.read ? row.dimColor : root.fg
+          color: row.item.read ? row.readColor : root.fg
           font.family: root.readingFont
           font.styleName: "Bold"
           font.pixelSize: Style.font.title
@@ -2687,7 +2690,7 @@ Panel {
           maximumLineCount: 2
           elide: Text.ElideRight
           text: row.item.summary || row.item.excerpt || ""
-          color: row.dimColor
+          color: row.item.read ? row.readColor : row.dimColor
           font.family: row.item.summary ? root.fontFamily : root.readingFont
           font.styleName: row.item.summary ? "" : "Regular"
           font.pixelSize: row.item.summary ? Style.font.caption : Style.font.body

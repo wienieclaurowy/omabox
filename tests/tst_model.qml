@@ -109,4 +109,13 @@ TestCase {
     compare(Model.weekdayOptions(english)[6].tooltip, "Sunday (w cycles)")
     compare(Model.hintEntries("feed", "list", false, english)[0], { key: "j/k", label: "move" })
   }
+
+  function test_read_posts_recede_on_every_theme() {
+    var card = Qt.rgba(0.96, 0.9, 0.83, 1)
+    var lowFg = Qt.rgba(0.62, 0.31, 0.36, 1)
+    var low = Model.contrastRatio(Model.readShade(lowFg, card), card)
+    verify(low >= 2.4 && low < Model.contrastRatio(lowFg, card) - 1, low)
+    var high = Model.contrastRatio(Model.readShade(Qt.rgba(0, 0, 0, 1), Qt.rgba(1, 1, 1, 1)), Qt.rgba(1, 1, 1, 1))
+    verify(high >= 4.5 && high < 4.7, high)
+  }
 }

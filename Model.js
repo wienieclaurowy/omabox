@@ -702,3 +702,9 @@ function readableShade(fg, bg, alpha, minRatio) {
   for (var a = alpha; a < 1; a += 0.01) if (contrastRatio(mix(a), bg) >= minRatio) return mix(a)
   return mix(1)
 }
+
+// Read posts: a share of fg's own contrast, so they recede on low-contrast themes too, where a fixed floor lands
+// on fg itself. 2.4 keeps the large bold titles legible; 4.5 stops high-contrast themes fading too little.
+function readShade(fg, bg) {
+  return readableShade(fg, bg, 0, Math.min(4.5, Math.max(2.4, contrastRatio(fg, bg) * 0.55)))
+}
