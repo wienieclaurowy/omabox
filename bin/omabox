@@ -460,9 +460,22 @@ class OwnedLoopbackHandler(urllib.request.HTTPHandler):
         return self.do_open(OwnedLoopbackConnection, req)
 
 
-# Omabox's RSSHub on loopback: never through a proxy from the environment, which would see each route, and only to a
-# listener of this account or root.
-LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), WebRedirects, OwnedLoopbackHandler)
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError(f"redirect from Omabox's RSSHub refused: {newurl}")
+
+
+def loopback_opener():
+    """Omabox's RSSHub on loopback: no proxy from the environment (it would see each route), no https, no redirect,
+    so OwnedLoopbackConnection is the only thing it can dial."""
+    opener = urllib.request.OpenerDirector()
+    for handler in (urllib.request.UnknownHandler(), urllib.request.HTTPDefaultErrorHandler(),
+                    urllib.request.HTTPErrorProcessor(), NoRedirects(), OwnedLoopbackHandler()):
+        opener.add_handler(handler)
+    return opener
+
+
+LOOPBACK_OPENER = loopback_opener()
 
 
 DOWNLOAD_SECONDS = 30

@@ -2783,7 +2783,7 @@ class DowngradeTest(unittest.TestCase):
     def test_no_opener_follows_https_down_to_http(self):
         request = urllib.request.Request("https://img.example/v.mp4")
         with mock.patch.object(omabox, "public_host", lambda url: True):
-            for opener in (omabox.PUBLIC_OPENER, omabox.LAN_OPENER, omabox.LOOPBACK_OPENER):
+            for opener in (omabox.PUBLIC_OPENER, omabox.LAN_OPENER):
                 (handler,) = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
                 self.assertIsInstance(handler, omabox.WebRedirects)
                 with self.assertRaises(ValueError):
@@ -4634,6 +4634,35 @@ class RowsTest(unittest.TestCase):
         state = omabox.load_state()
         state["rows"] = {"feed": 999, "notifications": "7"}
         self.assertEqual(omabox.panel_rows(state), {"feed": 0, "notifications": 0})
+
+
+class LoopbackOpenerTest(unittest.TestCase):
+    def test_rsshub_opener_refuses_redirects_and_https(self):
+        elsewhere = socket.socket()
+        self.addCleanup(elsewhere.close)
+        elsewhere.bind(("127.0.0.1", 0))
+        elsewhere.listen()
+        elsewhere.settimeout(0.3)
+        other = elsewhere.getsockname()[1]
+        for target in (f"https://127.0.0.1:{other}/", f"http://127.0.0.1:{other}/"):
+            port, asked = recording_server(self, status=302, headers={"Location": target})
+            with self.assertRaises(ValueError):
+                omabox.LOOPBACK_OPENER.open(f"http://127.0.0.1:{port}/twitter/user/rowanvale", timeout=5)
+            self.assertEqual(asked, ["/twitter/user/rowanvale"])
+        with self.assertRaises(urllib.error.URLError):
+            omabox.LOOPBACK_OPENER.open(f"https://127.0.0.1:{other}/", timeout=5)
+        with self.assertRaises(socket.timeout):
+            elsewhere.accept()
+        self.assertFalse(any(isinstance(h, urllib.request.HTTPSHandler) for h in omabox.LOOPBACK_OPENER.handlers))
+
+    def test_rsshub_opener_still_reads_a_plain_answer(self):
+        port, asked = recording_server(self, body=b'{"items": []}')
+        with omabox.LOOPBACK_OPENER.open(f"http://127.0.0.1:{port}/twitter/user/rowanvale", timeout=5) as response:
+            self.assertEqual(response.read(), b'{"items": []}')
+        with mock.patch.dict(os.environ, {"http_proxy": "http://192.0.2.1:3128"}):
+            with omabox.LOOPBACK_OPENER.open(f"http://127.0.0.1:{port}/", timeout=5):
+                pass
+        self.assertEqual(asked, ["/twitter/user/rowanvale", "/"])
 
 
 if __name__ == "__main__":
