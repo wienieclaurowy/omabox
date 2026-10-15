@@ -2244,7 +2244,8 @@ Panel {
         ListView {
           id: feedList
           visible: root.view === "feed" && !root.reading && count > 0
-          readonly property int rowCap: root.feedRows
+          // Fit and caps past the screen stop at the last whole row that fits.
+          readonly property int rowCap: fitRows > 0 && (root.feedRows <= 0 || root.feedRows > fitRows) ? fitRows : root.feedRows
           property real capHeight: 0
           property int measuredFor: 0
           property int fitRows: 0
@@ -2282,7 +2283,8 @@ Panel {
         ListView {
           id: notificationList
           visible: root.view === "notifications" && !root.reading && count > 0
-          readonly property int rowCap: root.notificationRows
+          // Fit and caps past the screen stop at the last whole row that fits.
+          readonly property int rowCap: fitRows > 0 && (root.notificationRows <= 0 || root.notificationRows > fitRows) ? fitRows : root.notificationRows
           property real capHeight: 0
           property int measuredFor: 0
           property int fitRows: 0
