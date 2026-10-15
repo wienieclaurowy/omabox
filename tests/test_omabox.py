@@ -3333,10 +3333,6 @@ class XFeedTest(unittest.TestCase):
         self.assertEqual(state["profiles"][self.SOURCE]["handle"], "rowanvale")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ViewerTest(unittest.TestCase):
     PATHS = ["/c/a.png", "/c/b.jpg", "/c/c.gif"]
     URLS = ["https://video.twimg.com/a.mp4", "https://video.twimg.com/b.mp4"]
@@ -4607,3 +4603,6 @@ class SearchPickTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shell not running"):
             omabox.menu_select(["x"], "p", down, runtime_dir=Path(tempfile.mkdtemp()))
 
+
+if __name__ == "__main__":
+    unittest.main()
