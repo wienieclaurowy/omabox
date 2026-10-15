@@ -3209,8 +3209,8 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
     try:
         with os.fdopen(descriptor, "w") as handle:
             handle.write("".join(f"{name}={value}\n" for name, value in env.items()))
-        # Locked down: no writes, no capabilities, no root, capped memory and processes. jsdelivr is blocked so the
-        # X query ids come from the pinned image, not from a third-party file fetched at start.
+        # Locked down: no writes, no capabilities, no root, no logs (they name every route), capped memory and processes.
+        # jsdelivr is blocked so the X query ids come from the pinned image, not a third-party file fetched at start.
         lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
         user = container_user(run, engine)
         # a port taken between free_port() and the start makes the engine fail to publish it; another port is tried
@@ -3219,7 +3219,7 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
             started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
                            "-p", f"127.0.0.1:{port}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
                            "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m",
-                           "--user", user, "--add-host", "cdn.jsdelivr.net:127.0.0.1",
+                           "--log-driver=none", "--user", user, "--add-host", "cdn.jsdelivr.net:127.0.0.1",
                            "--env-file", str(env_file), RSSHUB_IMAGE],
                           capture_output=True, text=True, timeout=300)
             if started.returncode == 0 or not re.search(r"address already in use|port is already allocated",

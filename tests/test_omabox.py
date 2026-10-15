@@ -2271,6 +2271,8 @@ class RsshubTest(unittest.TestCase):
         self.assertIn("TWITTER_AUTH_TOKEN=secret-token", env["text"])
         self.assertFalse(env["path"].exists())
         self.assertTrue(all("secret-token" not in " ".join(argv) for argv in calls))
+        started = next(argv for argv in calls if argv[:2] == ["podman", "run"])
+        self.assertIn("--log-driver=none", started)
         self.assertEqual(calls[-1][:2], ["podman", "stop"])
         self.assertEqual((env["marker"], env["marker_after"]), (True, False))
 
