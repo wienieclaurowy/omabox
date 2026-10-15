@@ -3423,9 +3423,10 @@ class ViewerTest(unittest.TestCase):
                          [["loadfile", "http://127.0.0.1:9/t0k3n/0.mp4", "append"],
                           ["loadfile", "http://127.0.0.1:9/t0k3n/1.mp4", "append-play"]])
         with self.installed("mpv", "yt-dlp"):
-            direct = omabox.direct_player_argv(["https://www.youtube.com/watch?v=Zq3vKe8TbWo"], 0, ipc=7)
+            direct = omabox.direct_player_argv(["ytdl://b-_a7ghi6-upq3_Cr-gRpg"], 0, ipc=7)
         self.assertEqual(direct, ["mpv", "--playlist-start=0", "--tls-verify=yes", f"--script-opts-append=ytdl_hook-ytdl_path="
-                                  f"{omabox.YTDL_WRAPPER}", "--idle=once", "--input-ipc-client=fd://7"])
+                                  f"{omabox.YTDL_WRAPPER}", "--script-opts-append=ytdl_hook-try_ytdl_first=no",
+                                  "--script-opts-append=ytdl_hook-exclude=.", "--idle=once", "--input-ipc-client=fd://7"])
 
     @unittest.skipUnless(omabox.shutil.which("mpv") and omabox.shutil.which("ffmpeg"), "needs mpv and ffmpeg")
     def test_mpv_starts_at_the_clicked_video_with_the_others_around_it(self):
@@ -3485,10 +3486,13 @@ class ViewerTest(unittest.TestCase):
         with self.installed("mpv"):
             self.assertIsNone(omabox.direct_player_argv(urls, 0))
             self.assertIsNone(omabox.direct_player_argv(["ytdl://b-_a7ghi6-upq3_Cr-gRpg"], 0))
-            self.assertEqual(omabox.direct_player_argv(reddit, 0)[-2:], ["--"] + reddit)
+            self.assertEqual(omabox.direct_player_argv(reddit, 0), ["mpv", "--playlist-start=0", "--tls-verify=yes",
+                                                                    "--ytdl=no", "--"] + reddit)
         with self.installed("mpv", "yt-dlp"):
-            self.assertEqual(omabox.direct_player_argv(urls, 0)[:4], ["mpv", "--playlist-start=0", "--tls-verify=yes",
-                                                                     f"--script-opts-append=ytdl_hook-ytdl_path={omabox.YTDL_WRAPPER}"])
+            self.assertEqual(omabox.direct_player_argv(["ytdl://b-_a7ghi6-upq3_Cr-gRpg"], 0)[:4],
+                             ["mpv", "--playlist-start=0", "--tls-verify=yes",
+                              f"--script-opts-append=ytdl_hook-ytdl_path={omabox.YTDL_WRAPPER}"])
+            self.assertIn("--ytdl=no", omabox.direct_player_argv(urls, 0))
         self.assertTrue(omabox.direct_video(reddit[0]))
         self.assertTrue(omabox.direct_video("https://video.bsky.app/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
         self.assertFalse(omabox.direct_video("https://video.bsky.app.example/watch/did%3Aplc%3Aab12/bafkre1/playlist.m3u8"))
@@ -4712,6 +4716,34 @@ printf '%s\\n' "$@" > "{self.dir}/args"; cat > "{self.dir}/text"
         code, args, copied = self.copy("code 482913", fails=True)
         self.assertNotEqual(code, 0)
         self.assertIsNone(copied)
+
+
+class YtdlHookTest(unittest.TestCase):
+    """Real mpv with Omabox's flags, a recorder standing in for omabox-ytdl, and addresses on a closed port."""
+
+    def mpv(self, files, extra=()):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(root)])
+        (root / "recorder").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> "{root}/seen"\nexit 1\n')
+        (root / "recorder").chmod(0o700)
+        with mock.patch.object(omabox, "YTDL_WRAPPER", root / "recorder"), \
+                mock.patch.object(omabox.shutil, "which", lambda name: "/usr/bin/" + name):
+            argv = omabox.direct_player_argv(files, 0)
+        flags = argv[1:argv.index("--")]
+        env = {"PATH": os.environ.get("PATH", "/usr/bin"), "HOME": str(root), "XDG_CONFIG_HOME": str(root / "c")}
+        subprocess.run(["mpv", "--no-config", "--vo=null", "--ao=null", "--idle=no", *extra, *flags, "--", *files],
+                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        return (root / "seen").read_text().splitlines() if (root / "seen").exists() else []
+
+    @unittest.skipUnless(omabox.shutil.which("mpv"), "needs mpv")
+    def test_only_tokens_reach_the_wrapper(self):
+        failing = "http://127.0.0.1:9/ab12cd/DASHPlaylist.mpd"
+        self.assertEqual(self.mpv([failing]), [])
+        self.assertEqual(self.mpv([failing], extra=["--script-opts-append=ytdl_hook-try_ytdl_first=yes"]), [])
+        token = "ytdl://b-_a7ghi6-upq3_Cr-gRpg"
+        seen = self.mpv([token, failing], extra=["--script-opts-append=ytdl_hook-try_ytdl_first=yes"])
+        self.assertIn("b-_a7ghi6-upq3_Cr-gRpg", seen)
+        self.assertFalse(any("127.0.0.1" in arg for arg in seen), seen)
 
 
 if __name__ == "__main__":

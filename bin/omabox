@@ -3381,13 +3381,16 @@ YTDL_TOKEN_SECONDS = 86400
 
 def direct_player_argv(urls, start, ipc=None):
     """mpv for direct_video URLs; None without it, or without yt-dlp for YouTube. Other players cannot open them.
-    mpv's ytdl hook runs YTDL_WRAPPER, also when it falls back to yt-dlp for a Reddit or Bluesky address it cannot
-    open, which the wrapper then refuses."""
-    youtube = any(youtube_video(url) or url.startswith("ytdl://") for url in urls)
+    mpv's ytdl hook runs YTDL_WRAPPER for ytdl://TOKEN entries only: it is off without one, and with one every web
+    address is excluded, so mpv's fallback for a Reddit or Bluesky address it cannot open (or try_ytdl_first in the
+    user's mpv config) never puts that address in the wrapper's argv."""
+    tokens = any(url.startswith("ytdl://") for url in urls)
+    youtube = tokens or any(youtube_video(url) for url in urls)
     if shutil.which("mpv") and (shutil.which("yt-dlp") or not youtube):
+        ytdl = [f"--script-opts-append=ytdl_hook-ytdl_path={YTDL_WRAPPER}", "--script-opts-append=ytdl_hook-try_ytdl_first=no",
+                "--script-opts-append=ytdl_hook-exclude=."] if tokens else ["--ytdl=no"]
         # mpv's own default is --tls-verify=no, which lets anyone on the path swap the video or its manifest
-        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes",
-                f"--script-opts-append=ytdl_hook-ytdl_path={YTDL_WRAPPER}", *mpv_files(urls, ipc)]
+        return ["mpv", f"--playlist-start={start}", "--tls-verify=yes", *ytdl, *mpv_files(urls, ipc)]
     return None
 
 
