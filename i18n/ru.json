@@ -59,7 +59,6 @@
     "many": "НЕПРОЧИТАНО: %1",
     "other": "НЕПРОЧИТАНО: %1"
   },
-  "feed.allRead": "ВСЁ ПРОЧИТАНО",
   "feed.markRead": "Отметить прочитанным",
   "feed.markReadHeading": "ОТМЕТИТЬ ПРОЧИТАННЫМ",
   "feed.markedRead": {

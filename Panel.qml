@@ -1700,7 +1700,8 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: unreadRow.unread > 0 ? Tr.tn("feed.unread", unreadRow.unread).arg(Tr.formatNumber(unreadRow.unread)) : Tr.t("feed.allRead")
+              visible: unreadRow.unread > 0
+              text: Tr.tn("feed.unread", unreadRow.unread).arg(Tr.formatNumber(unreadRow.unread))
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

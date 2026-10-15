@@ -53,7 +53,6 @@
   "feed.unread": {
     "other": "未読 %1 件"
   },
-  "feed.allRead": "すべて既読",
   "feed.markRead": "既読にする",
   "feed.markReadHeading": "既読にする",
   "feed.markedRead": {

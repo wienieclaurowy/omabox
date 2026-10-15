@@ -57,7 +57,6 @@
     "many": "%1 DE NON LUS",
     "other": "%1 NON LUS"
   },
-  "feed.allRead": "TOUT LU",
   "feed.markRead": "Marquer comme lu",
   "feed.markReadHeading": "MARQUER COMME LU",
   "feed.markedRead": {

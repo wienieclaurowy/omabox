@@ -55,7 +55,6 @@
     "one": "%1 UNREAD",
     "other": "%1 UNREAD"
   },
-  "feed.allRead": "ALL READ",
   "feed.markRead": "Mark read",
   "feed.markReadHeading": "MARK READ",
   "feed.markedRead": {
