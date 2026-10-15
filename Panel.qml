@@ -1682,10 +1682,11 @@ Panel {
           }
         }
 
-        // One fixed-height slot for the unread count and the mark-read choices; it stays when the last post is read,
-        // so the list under it does not jump. What the choices cover is in the status line.
+        // One fixed-height slot for the unread count and the mark-read choices, gone once nothing is unread.
+        // What the choices cover is in the status line.
         Item {
           visible: root.view === "feed" && !root.reading && root.allItems.length > 0
+                   && (Model.unreadCount(root.items) > 0 || root.catchupOpen)
           width: parent.width
           height: Math.max(markReadButton.implicitHeight, catchupPicker.implicitHeight)
 
@@ -1700,7 +1701,6 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              visible: unreadRow.unread > 0
               text: Tr.tn("feed.unread", unreadRow.unread).arg(Tr.formatNumber(unreadRow.unread))
               color: root.dim
               font.family: root.fontFamily
