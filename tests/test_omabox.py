@@ -4746,5 +4746,43 @@ class YtdlHookTest(unittest.TestCase):
         self.assertFalse(any("127.0.0.1" in arg for arg in seen), seen)
 
 
+class MediaHeadTest(unittest.TestCase):
+    MPD = (b'<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static">'
+           b'<Period><AdaptationSet><Representation id="1" bandwidth="1"><BaseURL>http://192.0.2.10/admin</BaseURL>'
+           b'</Representation></AdaptationSet></Period></MPD>')
+
+    def test_manifests_dressed_as_boxes_are_refused(self):
+        id3 = b"ID3\x03\x00\x00\x00\x00\x10\x7f"
+        for head in (b"<!--free-->\n" + self.MPD, b"<?a moov ?>" + self.MPD, b"    free" + self.MPD,
+                     b"<!--free" + b"-" * 700 + b"-->" + self.MPD, b"\x00\x00\x00\x10free" + b"<!-- x -->" + self.MPD,
+                     id3 + b"#EXTM3U\nhttp://192.0.2.10/a.ts\n", id3 + b"[playlist]\nFile1=http://192.0.2.10/a\n",
+                     b"\x00\x00\x00\x18ftypisom" + bytes(16) + b"<?xml version='1.0'?>" + self.MPD,
+                     b"OggS" + bytes(30) + b"<smil><body/></smil>", b"\x00\x00\x00\x08wide" + b"<?a mdat?>" + self.MPD,
+                     b"\x00\x00\x00\x14ftyp\x00\x01\x02\x03" + bytes(600), b"\x00\x00\x00\x00moov" + bytes(600)):
+            self.assertFalse(omabox.media_head(head[:omabox.MEDIA_HEAD_BYTES]), head[:24])
+        # no marker in reach: the text box header alone gives them away
+        for head in (b"<?a moov ?>", b"    free", b"\x00\x00\x00\x08wide<?a mdat?>", b"\x00\x00\x00\x08free\n\n\n\nmoov",
+                     b"\x00\x01\x00\x00free", b"\x00\x00\x00\x01free\x00\x00\x00\x00\x00\x01\x00\x00",
+                     b"\x00\x01\x00\x00moov", b"\x00\x01\x00\x00mdat", b"\x00\x00\x00\x01mdat\x00\x00\x00\x01\x00\x00\x00\x00"):
+            self.assertFalse(omabox.media_head(head + b"x" * 600), head)
+        self.assertTrue(omabox.media_head(b"\x00\x01\x00\x00moov\x00\x00\x00\x6cmvhd" + bytes(600)))
+        self.assertTrue(omabox.media_head(b"\x00\x00\x00\x08wide\x00\x01\x00\x00mdat" + bytes(range(256)) * 2))
+
+    @unittest.skipUnless(omabox.shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_real_media_heads_pass(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(root)])
+        video = ["-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=5", "-pix_fmt", "yuv420p"]
+        audio = ["-f", "lavfi", "-i", "sine=duration=1"]
+        cases = {"a.mp4": video, "b.mp4": video + ["-movflags", "+faststart"], "c.mov": video, "d.webm": video,
+                 "e.mkv": video, "f.ts": video, "g.mp4": video + ["-movflags", "+frag_keyframe+empty_moov"],
+                 "h.mp3": audio + ["-metadata", "title=Some <title>"], "i.aac": audio, "j.ogg": audio, "k.opus": audio,
+                 "l.flac": audio, "m.wav": audio, "n.m4a": audio, "o.avi": video, "p.flv": video}
+        for name, inputs in cases.items():
+            subprocess.run(["ffmpeg", "-loglevel", "error", *inputs, str(root / name)], check=True, timeout=60)
+            head = (root / name).read_bytes()[:omabox.MEDIA_HEAD_BYTES]
+            self.assertTrue(omabox.media_head(head), (name, head[:16]))
+
+
 if __name__ == "__main__":
     unittest.main()
