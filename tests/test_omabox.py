@@ -4875,5 +4875,23 @@ class LoneSurrogateTest(unittest.TestCase):
         self.assertEqual(saved["items"][0]["title"], "cut ? emoji")
 
 
+class TerminalErrorTest(unittest.TestCase):
+    EVIL = "HTTP Error 404: \x1b]52;c;cm0gLXJmIH4K\x07 not a web page (text/html\x9b2J)"
+
+    def test_remote_error_text_reaches_the_terminal_without_controls(self):
+        def fail(*args, **kwargs):
+            raise ValueError(self.EVIL)
+
+        for command, loader in ((omabox.cmd_article, "load_article"), (omabox.cmd_replies, "load_replies")):
+            with mock.patch.object(omabox, loader, fail), self.assertRaises(SystemExit) as caught:
+                command(argparse.Namespace(id="0123456789abcdef", refresh=False, json=False, forget=False))
+            self.assertIn("]52;c;cm0gLXJmIH4K", str(caught.exception.code))
+            self.assertIsNone(re.search(r"[\x00-\x1f\x7f-\x9f]", str(caught.exception.code)))
+            out = io.StringIO()
+            with mock.patch.object(omabox, loader, fail), contextlib.redirect_stdout(out):
+                command(argparse.Namespace(id="0123456789abcdef", refresh=False, json=True, forget=False))
+            self.assertEqual(json.loads(out.getvalue())["error"], self.EVIL)
+
+
 if __name__ == "__main__":
     unittest.main()

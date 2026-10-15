@@ -4062,7 +4062,7 @@ def cmd_opml_import(args):
     try:
         sources, added, skipped, refused = opml_import(sources, Path(args.file).read_bytes(), args.cadence)
     except (OSError, ET.ParseError, ValueError) as error:
-        sys.exit(f"cannot import {args.file}: {error}")
+        sys.exit(shown(f"cannot import {args.file}: {error}"))
     if added:
         save_sources(sources)
     print(f"added {added}, skipped {skipped}")
@@ -4080,7 +4080,7 @@ def cmd_cadence(args):
 def x_flags(source, args):
     """(reposts, replies) asked for on the command line, or exits when the source is not an X one."""
     if (args.reposts or args.replies) and not x_route(source["url"]):
-        sys.exit(f"{source['name']} is not an X source: --reposts and --replies only apply to X user timelines")
+        sys.exit(shown(f"{source['name']} is not an X source: --reposts and --replies only apply to X user timelines"))
     return args.reposts, args.replies
 
 
@@ -4092,7 +4092,7 @@ def x_status(url):
 def print_mute(source):
     rules = source.get("mute", [])
     if not rules:
-        print(f"no mute rules for {source['name']}")
+        print(shown(f"no mute rules for {source['name']}"))
     for rule in rules:
         try:
             mute_matcher(rule)
@@ -4126,7 +4126,7 @@ def cmd_mute(args):
     for rule in added:
         count = mutes_all(stored, args.name, mute_filter([rule]))
         if count:
-            sys.exit(f"mute rule {rule} matches all {count} stored posts of {args.name}: not added")
+            sys.exit(shown(f"mute rule {rule} matches all {count} stored posts of {args.name}: not added"))
     old_url = source["url"]
     if added:
         source["mute"] = rules + added
@@ -4162,7 +4162,7 @@ def cmd_unmute(args):
     gone = {pattern.strip() for pattern in args.patterns}
     missing = sorted(gone - set(rules))
     if missing:
-        sys.exit(f"{args.name} has no mute rule {missing[0]!r}")
+        sys.exit(shown(f"{args.name} has no mute rule {missing[0]!r}"))
     source["mute"] = [rule for rule in rules if rule not in gone]
     if reposts or replies:
         source["url"] = x_route_url(source["url"], reposts=False if reposts else None, replies=False if replies else None)
@@ -4185,7 +4185,7 @@ def cmd_fulltext(args):
         print(f"{args.name}: full text {'on' if source.get('full_text') else 'off'}")
         return
     if args.state == "on" and needs_rsshub(source["url"]):
-        sys.exit(f"{args.name} is an X source: its posts have no article page")
+        sys.exit(shown(f"{args.name} is an X source: its posts have no article page"))
     if args.state == "on":
         source["full_text"] = True
     else:
@@ -4415,7 +4415,7 @@ def cmd_pick(args):
     try:
         pick_post(" ".join(args.query), timeout=args.timeout)
     except ValueError as error:
-        sys.exit(str(error))
+        sys.exit(shown(error))
 
 
 def cmd_open(args):
@@ -4486,7 +4486,7 @@ def cmd_article(args):
         if args.json:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
             return
-        sys.exit(str(error))
+        sys.exit(shown(error))
     if args.json:
         print(json.dumps({"id": args.id, **fields, "cached": cached}, ensure_ascii=False))
         return
@@ -4922,7 +4922,7 @@ def cmd_replies(args):
         if args.json:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
             return
-        sys.exit(str(error))
+        sys.exit(shown(error))
     if args.json:
         print(json.dumps({"id": args.id, **fields, "cached": cached}, ensure_ascii=False))
         return
@@ -5383,7 +5383,7 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
                 break
             # exit 0 before a window is a single-instance player handing the videos to its running copy
             if player.poll() not in (None, 0):
-                sys.exit(f"{argv[0]} could not play {urls[start]}")
+                sys.exit(shown(f"{argv[0]} could not play {urls[start]}"))
             if time.monotonic() > deadline:
                 player.terminate()
                 sys.exit(f"{argv[0]} opened no window")
