@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
+import xml.parsers.expat
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 from html.parser import HTMLParser
@@ -1305,10 +1306,41 @@ def xml_raw_split(text):
     yield False, text[start:]
 
 
+class EntityDeclared(Exception):
+    pass
+
+
+class PrologEnd(Exception):
+    pass
+
+
+def declares_entities(text):
+    """Whether the DOCTYPE declares entities. Expat lets text grow ~100x through them before its bomb guard trips,
+    and feeds never need them. Parsing stops at the first element, so only the prolog is read."""
+    parser = xml.parsers.expat.ParserCreate()
+
+    def entity(*args):
+        raise EntityDeclared
+
+    def element(*args):
+        raise PrologEnd
+
+    parser.EntityDeclHandler, parser.StartElementHandler = entity, element
+    try:
+        parser.Parse(text, True)
+    except EntityDeclared:
+        return True
+    except (PrologEnd, xml.parsers.expat.ExpatError):
+        pass
+    return False
+
+
 def parse_xml(data):
     """A feed or OPML document, forgiving whitespace before the declaration, HTML entities and stray &. Expat never
-    loads external entities and refuses entity expansion bombs; repaired text cannot declare new expansions."""
+    loads external entities; a DOCTYPE declaring any is refused, and repaired text cannot declare new ones."""
     text = xml_text(data)
+    if declares_entities(text):
+        raise ET.ParseError("entity declarations refused")
     try:
         return ET.fromstring(text)
     except ET.ParseError as error:
@@ -2037,13 +2069,25 @@ def stored_posts(state, source, entries):
     return known
 
 
+MAX_ENTRY_TITLE = 1000
+MAX_ENTRY_HTML = 1_000_000
+
+
+def capped_entry(entry):
+    """The entry with its title and html (a quoted post's too) cut to what items.json, which the shell parses, keeps."""
+    entry = {**entry, "title": (entry.get("title") or "")[:MAX_ENTRY_TITLE], "html": (entry.get("html") or "")[:MAX_ENTRY_HTML]}
+    if entry.get("quote"):
+        entry["quote"] = {**entry["quote"], "html": (entry["quote"].get("html") or "")[:MAX_ENTRY_HTML]}
+    return entry
+
+
 def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base="", cards=False, muted=None,
                   article=None):
     """merge's network half, which only reads state: builds the posts not stored yet or stored by an older
     MEDIA_VERSION, downloading their pictures, cards and articles. Returns store(state) -> added, which puts them
     into the state as it is by then; a fetch runs this outside the state lock and store under it."""
     first_fetch = not any(item["source"] == source for item in state["items"])
-    entries = sorted(entries, key=lambda e: e["published"], reverse=True)
+    entries = sorted(map(capped_entry, entries), key=lambda e: e["published"], reverse=True)
     if muted:
         # plain sanitize: the image hook would download pictures of posts about to be dropped
         entries = [entry for entry in entries

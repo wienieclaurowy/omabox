@@ -4828,5 +4828,33 @@ class ArticleDepthTest(unittest.TestCase):
         self.assertLess(big / small, 8, (small, big))
 
 
+class FeedEntityTest(unittest.TestCase):
+    def test_entity_declarations_are_refused(self):
+        for subset in ('<!ENTITY a "' + "A" * 270 + '">', '<!ENTITY % p "x">', '<!ENTITY e SYSTEM "file:///etc/passwd">'):
+            doc = ("<?xml version=\"1.0\"?><!DOCTYPE rss [" + subset + "]><rss><channel><item><guid>g</guid>"
+                   "<title>&a;</title></item></channel></rss>").encode()
+            with self.assertRaises(omabox.ET.ParseError):
+                list(omabox.parse_feed(doc))
+
+    def test_doctypes_without_entities_and_cdata_still_parse(self):
+        legacy = (b'<?xml version="1.0"?><!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN" '
+                  b'"http://my.netscape.com/publish/formats/rss-0.91.dtd"><rss version="0.91"><channel><item>'
+                  b"<title>Old &amp; fine</title><link>https://example.com/p</link><description><![CDATA[<p>About "
+                  b'<!ENTITY a "x"> in XML</p>]]></description></item></channel></rss>')
+        (entry,) = omabox.parse_feed(legacy)
+        self.assertEqual(entry["title"], "Old & fine")
+        self.assertIn("<!ENTITY", entry["html"])
+
+    def test_stored_title_and_html_are_capped(self):
+        doc = ("<rss><channel><item><guid>g</guid><title>" + "T" * 50000 + "</title><link>https://example.com/p</link>"
+               "<description>" + "&lt;p&gt;" + "w " * 800000 + "&lt;/p&gt;</description></item></channel></rss>").encode()
+        state = {"items": []}
+        omabox.merge(state, "S", list(omabox.parse_feed(doc)), "2026-01-01T00:00:00Z")
+        (item,) = state["items"]
+        self.assertLessEqual(len(item["title"]), omabox.MAX_ENTRY_TITLE)
+        self.assertLessEqual(len(item["html"]), 2 * omabox.MAX_ENTRY_HTML)
+        self.assertGreater(len(item["html"]), omabox.MAX_ENTRY_HTML // 2)
+
+
 if __name__ == "__main__":
     unittest.main()
