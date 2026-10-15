@@ -1496,7 +1496,7 @@ def parse_x_feed(data):
     post (_extra.links, one link: repost, else quote, else reply); RSS has the reposter's name and link alone.
     A repost links to the original post, repost holds its author; a quoted post is cut out of html into quote.
     reply_to: the accounts a reply answers. A quoted post carries no reply mark, so its leading @names count."""
-    for entry in json.loads(data).get("items") or []:
+    for entry in remote_json(data).get("items") or []:
         own = str(entry.get("url") or "").strip()
         link, body = own, str(entry.get("content_html") or "")
         title = html.unescape(str(entry.get("title") or "")).strip()
@@ -1645,7 +1645,7 @@ def bluesky_quote(record):
 def parse_bluesky(data):
     """Bluesky's public getAuthorFeed as parse_x_feed entries plus card: the pictures, videos, link cards and quoted
     posts that Bluesky's own RSS leaves out. A repost is dated when it was reposted and keyed by the repost record."""
-    for row in json.loads(data).get("feed") or []:
+    for row in remote_json(data).get("feed") or []:
         post = row.get("post") or {}
         record, author = post.get("record") or {}, post.get("author") or {}
         handle = str(author.get("handle") or "")
@@ -1713,11 +1713,35 @@ def private_dir(path):
     return path
 
 
-def open_private(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode="w"):
+LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def remote_json(data):
+    """json.loads for what a server sent. JSON may escape half of a UTF-16 pair (JSON.stringify of a cut emoji);
+    such a lone surrogate cannot be written as UTF-8, so it becomes U+FFFD in every string, keys included."""
+    value = json.loads(data)
+    if isinstance(value, str):
+        return LONE_SURROGATE_RE.sub("\ufffd", value)
+    stack = [value] if isinstance(value, (dict, list)) else []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key in [key for key in node if LONE_SURROGATE_RE.search(key)]:
+                node[LONE_SURROGATE_RE.sub("\ufffd", key)] = node.pop(key)
+        for key, child in (list(node.items()) if isinstance(node, dict) else enumerate(node)):
+            if isinstance(child, str):
+                if LONE_SURROGATE_RE.search(child):
+                    node[key] = LONE_SURROGATE_RE.sub("\ufffd", child)
+            elif isinstance(child, (dict, list)):
+                stack.append(child)
+    return value
+
+
+def open_private(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode="w", errors=None):
     """open() that creates the file 0600 and narrows an existing one to 0600."""
     descriptor = os.open(path, flags, 0o600)
     os.fchmod(descriptor, 0o600)
-    return os.fdopen(descriptor, mode, encoding=None if "b" in mode else "utf-8")
+    return os.fdopen(descriptor, mode, encoding=None if "b" in mode else "utf-8", errors=errors)
 
 
 def app_dir(path):
@@ -1790,7 +1814,8 @@ def save_state(state, path=None):
     if state.get("recovered") and not recovered_file(state, path):
         state.pop("recovered")
     tmp = path.with_suffix(".tmp")
-    with open_private(tmp) as f:
+    # errors="replace": one string UTF-8 cannot hold must not lose the whole delivery
+    with open_private(tmp, errors="replace") as f:
         json.dump(state, f, indent=1, ensure_ascii=False)
         f.write("\n")
         f.flush()
@@ -1927,7 +1952,7 @@ def feed_profile(data):
     """Author details an RSSHub X feed carries at channel level: display name, @handle and avatar URL."""
     if data.lstrip()[:1] == b"{":
         try:
-            feed = json.loads(data)
+            feed = remote_json(data)
         except ValueError:
             return None
         handle = urllib.parse.urlparse(str(feed.get("home_page_url") or "")).path.strip("/").split("/")[0]
@@ -2725,7 +2750,7 @@ def bluesky_feed_url(actor):
 
 def discover_bluesky(actor):
     _, data = download(f"{BLUESKY_API}app.bsky.actor.getProfile?{urllib.parse.urlencode({'actor': actor})}")
-    profile = json.loads(data)
+    profile = remote_json(data)
     did = str(profile.get("did") or "")
     if not did.startswith("did:"):
         raise ValueError("no Bluesky profile found at that address")
@@ -4485,7 +4510,7 @@ def parse_replies(data, status_id):
     sort off). The feed also carries the post itself, the posts it answers and promoted posts; replies are the "Re "
     ones with an id above the post's. parent is the id of the post a reply answers, "" when the feed names none."""
     replies, seen = [], set()
-    for entry in json.loads(data).get("items") or []:
+    for entry in remote_json(data).get("items") or []:
         ref = x_post_ref(str(entry.get("url") or "").strip())
         body = str(entry.get("content_html") or "")
         prefix = REPLY_PREFIX_RE.match(body)
@@ -4506,7 +4531,7 @@ def parse_replies(data, status_id):
 
 def post_avatar(data, status_id):
     """Avatar URL of the post itself in RSSHub's tweet-detail JSON feed, "" when the feed leaves it out."""
-    for entry in json.loads(data).get("items") or []:
+    for entry in remote_json(data).get("items") or []:
         ref = x_post_ref(str(entry.get("url") or "").strip())
         if ref and ref[1] == status_id:
             authors = entry.get("authors") or [{}]
@@ -4543,7 +4568,7 @@ REPLY_DEPTH = 3
 def parse_bluesky_replies(data, limit=MAX_REPLY_THREADS):
     """(post author's handle, threads) from Bluesky's public getPostThread, in Bluesky's order: each top-level reply,
     then the answers under it to REPLY_DEPTH levels, flattened in reading order. Deleted and blocked replies go."""
-    thread = json.loads(data).get("thread") or {}
+    thread = remote_json(data).get("thread") or {}
     author = str(((thread.get("post") or {}).get("author") or {}).get("handle") or "")
 
     def reply(node):
@@ -4576,7 +4601,7 @@ def parse_hn_comments(data, ranked=()):
     """(submitter, threads) from Algolia's item tree, whose children come oldest first. ranked: the story's kids in
     Hacker News's own order (its Firebase API), which orders the top-level comments; ones it lacks go last. Deleted
     and flagged comments have no text and are left out with their answers."""
-    story = json.loads(data)
+    story = remote_json(data)
     place = {str(kid): index for index, kid in enumerate(ranked)}
 
     def comment(node):
@@ -4621,7 +4646,7 @@ def parse_mastodon_replies(data, status_id, limit=MAX_REPLY_THREADS):
     answers. Each direct reply opens a thread holding the answers under it to REPLY_DEPTH levels. The @names
     Mastodon puts before a reply's text go, as X's do."""
     threads, thread_of, depth_of = [], {}, {}
-    for status in json.loads(data).get("descendants") or []:
+    for status in remote_json(data).get("descendants") or []:
         sid, parent = str(status.get("id") or ""), str(status.get("in_reply_to_id") or "")
         if parent == status_id:
             thread, depth = [], 1
@@ -4851,7 +4876,7 @@ def load_hn_comments(item, story, fetch=download_public, image_fetch=download_li
     try:
         _, _, data = fetch(url, MAX_FEED_BYTES)
         try:
-            ranked = json.loads(fetch(f"https://hacker-news.firebaseio.com/v0/item/{story}.json", MAX_FEED_BYTES)[2]).get("kids") or []
+            ranked = remote_json(fetch(f"https://hacker-news.firebaseio.com/v0/item/{story}.json", MAX_FEED_BYTES)[2]).get("kids") or []
         except Exception:
             ranked = []
         author, threads = parse_hn_comments(data, ranked)

@@ -4856,5 +4856,24 @@ class FeedEntityTest(unittest.TestCase):
         self.assertGreater(len(item["html"]), omabox.MAX_ENTRY_HTML // 2)
 
 
+class LoneSurrogateTest(unittest.TestCase):
+    def test_json_sources_lose_lone_surrogates_and_keep_pairs(self):
+        data = b'{"items": [{"id": "1", "url": "https://x.com/a/status/1", "title": "hi \\ud83d", "content_html": "ok \\ud83d\\ude00 \\udc00"}]}'
+        value = omabox.remote_json(data)
+        self.assertEqual(value["items"][0]["title"], "hi \ufffd")
+        self.assertEqual(value["items"][0]["content_html"], "ok \U0001f600 \ufffd")
+        self.assertEqual(omabox.remote_json(b'{"\\ud800": ["\\udfff", [{"k": "\\ud801x"}]]}'), {"\ufffd": ["\ufffd", [{"k": "\ufffdx"}]]})
+        (entry,) = omabox.parse_x_feed(data)
+        self.assertNotRegex(entry["title"] + entry["html"], "[\ud800-\udfff]")
+
+    def test_save_state_survives_a_lone_surrogate(self):
+        path = Path(tempfile.mkdtemp()) / "items.json"
+        self.addCleanup(subprocess.run, ["rm", "-rf", "--", str(path.parent)])
+        omabox.save_state({"items": [{"title": "cut \ud83d emoji"}], "delivered": "2026-01-02T00:00:00Z"}, path)
+        saved = json.loads(path.read_bytes())
+        self.assertEqual(saved["delivered"], "2026-01-02T00:00:00Z")
+        self.assertEqual(saved["items"][0]["title"], "cut ? emoji")
+
+
 if __name__ == "__main__":
     unittest.main()
