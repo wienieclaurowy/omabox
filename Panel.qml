@@ -538,7 +538,10 @@ Panel {
       videoPlayer.running = true
     } else if (media.kind === "picture" && paths.length > 0) {
       root.viewingMedia = true
-      imageViewer.command = [root.omaboxBin, "view", "--start", String(media.index), "--"].concat(paths)
+      // on stdin too: cache names hash the pictures' addresses
+      imageViewer.command = Model.capped([root.omaboxBin, "--args-on-stdin"], Model.SMALL_OUTPUT_BYTES)
+      imageViewer.stdinArgs = JSON.stringify(["view", "--start", String(media.index), "--"].concat(paths)) + "\n"
+      imageViewer.stdinEnabled = true
       imageViewer.running = true
     } else {
       note(Tr.t("reader.noMedia"))
@@ -1348,7 +1351,13 @@ Panel {
 
   Process {
     id: imageViewer
-    onStarted: root.close()
+    property string stdinArgs: ""
+    onStarted: {
+      write(stdinArgs)
+      stdinArgs = ""
+      stdinEnabled = false
+      root.close()
+    }
     onExited: function(exitCode) {
       root.controller.show()
       if (exitCode !== 0) root.note(Tr.t("reader.noViewer"))

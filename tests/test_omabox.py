@@ -3588,6 +3588,41 @@ class ViewerTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_view_shows_numbered_private_copies_and_removes_them(self):
+        cache = Path(tempfile.mkdtemp())
+        pictures = [cache / "0123456789abcdef0123.png", cache / "fedcba98765432100123.jpg"]
+        for n, picture in enumerate(pictures):
+            picture.write_bytes(b"picture %d" % n)
+        seen, looks = {}, iter([set(), {"0xa"}, {"0xa"}, set()])
+
+        def run(argv, **kwargs):
+            folder = Path(argv[-1]).parent
+            seen.update(argv=argv, mode=folder.stat().st_mode & 0o777,
+                        names=sorted(path.name for path in folder.iterdir()),
+                        data=[Path(path).read_bytes() for path in argv[-2:]])
+            seen["viewer"] = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            return seen["viewer"]
+
+        with mock.patch.object(omabox, "viewer_argv", lambda paths, start: ["imv", "-n", paths[start]] + paths), \
+                mock.patch.object(omabox.time, "sleep", lambda s: None):
+            omabox.cmd_view(argparse.Namespace(paths=[str(p) for p in pictures], start=1), windows=lambda: next(looks), run=run)
+        self.assertEqual(seen["names"], ["1.png", "2.jpg"])
+        self.assertEqual(seen["mode"], 0o700)
+        self.assertEqual(seen["data"], [b"picture 0", b"picture 1"])
+        self.assertNotIn("0123456789abcdef", " ".join(seen["argv"]))
+        self.assertTrue(seen["argv"][2].endswith("/2.jpg"))
+        self.assertFalse(Path(seen["argv"][-1]).parent.exists())
+        self.assertIsNotNone(seen["viewer"].poll())
+
+    def test_a_view_folder_left_behind_goes_after_an_hour(self):
+        old, new = self.runtime / "omabox-view-old", self.runtime / "omabox-view-new"
+        for folder in (old, new):
+            folder.mkdir()
+            (folder / "1.png").write_bytes(b"x")
+        os.utime(old, (time.time() - 7200, time.time() - 7200))
+        omabox.remove_old_views(self.runtime)
+        self.assertEqual(sorted(p.name for p in self.runtime.iterdir()), ["omabox-view-new"])
+
     def play(self, urls, start=0, window_after=1, exits=None, window_gone_after=None, players=None, direct_players=None):
         """cmd_play against a fake player whose window shows after window_after looks and closes after
         window_gone_after (default: the next look); exits: poll() result."""
@@ -4756,6 +4791,8 @@ class SupervisorTest(unittest.TestCase):
     def test_streaming_passes_stdout_without_a_deadline(self):
         out = self.run_bounded(["sh", "-c", "echo one; sleep 0.3; echo two"], limit=100, seconds=0)
         self.assertEqual(out, b"one\ntwo\n")
+        done = subprocess.run(["python3", "-I", "-c", SUPERVISOR, "100", "0", "--", "sh", "-c", "exit 5"], timeout=30)
+        self.assertEqual(done.returncode, 5)
         self.assertEqual(self.run_bounded(["sh", "-c", "yes"], limit=100, seconds=0), b"y\n" * 50)
 
     def test_killing_the_supervisor_ends_everything_the_command_started(self):

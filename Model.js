@@ -361,7 +361,8 @@ function localPath(url) {
 // keeps the leader unreaped meanwhile, so the group id cannot be reused. The same happens past SECONDS, past LIMIT
 // bytes of output, on its own SIGTERM and when its parent goes.
 // SECONDS > 0: prints argv's output, stderr merged, then "::exit N" (124 past the deadline), or only "::overflow"
-// (splitCliOutput). SECONDS 0: no deadline; stdout passes through as it comes, stderr is left alone.
+// (splitCliOutput). SECONDS 0: no deadline; stdout passes through as it comes, stderr is left alone, and its exit
+// code is argv's (1 past LIMIT).
 // Kept free of backslashes, backticks and dollar-brace, which a template literal would change.
 var SUPERVISOR = `import os, select, signal, sys, time
 
@@ -489,7 +490,9 @@ def main():
         except OSError:
             pass
     code = os.waitstatus_to_exitcode(os.waitpid(child, 0)[1])
-    if streaming or ending == "stop":
+    if streaming:
+        sys.exit(1 if ending else code)
+    if ending == "stop":
         return
     try:
         if ending == "overflow":
