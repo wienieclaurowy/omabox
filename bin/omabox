@@ -2822,9 +2822,14 @@ def download_feed(url, cached=None, opener=None, lan=False):
 TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
+# the panel reads these lines through a byte cap, and feeds choose how long a title or link is
+MAX_SHOWN_CHARS = 500
+
+
 def shown(text):
-    """Feed-derived text for a terminal line, controls blanked."""
-    return TERMINAL_CONTROL_RE.sub(" ", str(text))
+    """Feed-derived text for a terminal line, controls blanked, cut to MAX_SHOWN_CHARS."""
+    text = TERMINAL_CONTROL_RE.sub(" ", str(text))
+    return text if len(text) <= MAX_SHOWN_CHARS else text[:MAX_SHOWN_CHARS - 1] + "…"
 
 
 def now_iso():

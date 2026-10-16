@@ -280,32 +280,24 @@ BarWidget {
     }
   }
 
+  // Unbuffered, so the merged output keeps its order: the last line is the seconds, or why the run failed. A
+  // delivery fetches every due source in turn, so its deadline is long.
   Process {
     id: tickProc
-    command: [root.omaboxBin, "tick"]
-    // Exit and the end of stderr arrive in either order; -1 until this run exits.
-    property int exitCode: -1
-    function report() {
-      if (exitCode < 0) return
-      var lines = tickErrors.text.trim().split("\n")
-      root.tickProblem = exitCode === 0 ? "" : Model.cliProblem(exitCode, lines[lines.length - 1], Tr)
-        || Model.fill(Tr.t("bar.tickExited"), [exitCode])
-    }
-    onStarted: exitCode = -1
-    onExited: function(code) {
-      exitCode = code
-      report()
-    }
-    stderr: StdioCollector {
-      id: tickErrors
-      waitForEnd: true
-      onStreamFinished: tickProc.report()
-    }
+    command: Model.bounded(["env", "PYTHONUNBUFFERED=1", root.omaboxBin, "tick"], 1024 * 1024, 3600)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var lines = text.trim().split("\n")
-        var seconds = parseInt(lines[lines.length - 1], 10)
+        var result = Model.splitCliOutput(text, Tr)
+        var lines = result.text.trim().split("\n")
+        var last = lines[lines.length - 1]
+        if (result.code !== 0) {
+          root.tickProblem = result.overflow ? result.text : Model.cliProblem(result.code, last, Tr)
+            || Model.fill(Tr.t("bar.tickExited"), [result.code])
+          return
+        }
+        root.tickProblem = ""
+        var seconds = parseInt(last, 10)
         if (seconds > 0) {
           tickTimer.interval = Math.min(seconds, 300) * 1000
           tickTimer.restart()

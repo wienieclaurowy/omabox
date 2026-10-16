@@ -364,6 +364,18 @@ function bounded(argv, limit, seconds) {
   return ["bash", "-c", BOUNDED_SCRIPT, "--", String(limit), String(seconds)].concat(argv)
 }
 
+// For a command that runs as long as the user wants (a video player): only its output is capped.
+var CAPPED_SCRIPT = 'l=$1; shift; set -o pipefail; "$@" | head -c "$l"'
+
+function capped(argv, limit) {
+  return ["bash", "-c", CAPPED_SCRIPT, "--", String(limit)].concat(argv)
+}
+
+// Model.bounded limits for the panel's CLI calls: bytes of output and seconds.
+var CLI_OUTPUT_BYTES = 8 * 1024 * 1024
+var CLI_SECONDS = 600
+var SMALL_OUTPUT_BYTES = 64 * 1024
+
 // bin/omabox keeps items.json within it (MAX_STATE_BYTES there)
 var MAX_STATE_BYTES = 16 * 1024 * 1024
 

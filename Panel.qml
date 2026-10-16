@@ -531,7 +531,8 @@ Panel {
       root.viewingMedia = true
       root.openingVideo = item.id + ":" + media.index
       // on stdin like runCli: which videos the user watches stays out of argv
-      videoPlayer.command = [root.omaboxBin, "--args-on-stdin"]
+      // no deadline: it runs while the video plays
+      videoPlayer.command = Model.capped([root.omaboxBin, "--args-on-stdin"], Model.SMALL_OUTPUT_BYTES)
       videoPlayer.stdinArgs = JSON.stringify(["play", "--start", String(media.index), "--"].concat(urls)) + "\n"
       videoPlayer.stdinEnabled = true
       videoPlayer.running = true
@@ -618,8 +619,8 @@ Panel {
 
   function fetchReplies(post, refresh) {
     root.repliesLoadingId = post.id
-    repliesProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "replies", "--json"]
-      .concat(refresh ? ["--refresh"] : [], ["--", post.id])
+    repliesProc.command = Model.bounded([root.omaboxBin, "replies", "--json"].concat(refresh ? ["--refresh"] : [], ["--", post.id]),
+      Model.CLI_OUTPUT_BYTES, 300)
     repliesProc.running = true
   }
 
@@ -789,7 +790,7 @@ Panel {
     var job = root.cliQueue[0]
     root.cliQueue = root.cliQueue.slice(1)
     root.cliDone = job.done
-    cliProc.command = ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "--args-on-stdin"]
+    cliProc.command = Model.bounded([root.omaboxBin, "--args-on-stdin"], Model.CLI_OUTPUT_BYTES, Model.CLI_SECONDS)
     cliProc.stdinArgs = JSON.stringify(job.args) + "\n"
     cliProc.stdinEnabled = true
     cliProc.running = true
@@ -1286,12 +1287,14 @@ Panel {
   // Off the CLI queue: a read-only check that must not wait behind, or hold up, the user's own changes.
   Process {
     id: deliveryProbe
-    command: [root.omaboxBin, "delivery", "--json"]
+    command: Model.bounded([root.omaboxBin, "delivery", "--json"], Model.SMALL_OUTPUT_BYTES, 30)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        var output = Model.splitCliOutput(text, Tr)
         var result = null
-        try { result = JSON.parse(text) } catch (e) {}
+        // the JSON is the last line; a state recovery prints its notice first
+        if (output.code === 0) try { result = JSON.parse(output.text.split("\n").pop()) } catch (e) {}
         if (result) root.deliveryStatus(result)
       }
     }
@@ -1428,7 +1431,7 @@ Panel {
 
   Process {
     id: tokenProc
-    command: ["bash", "-c", "\"$@\" 2>&1; echo \"::exit $?\"", "--", root.omaboxBin, "x-token", "--set"]
+    command: Model.bounded([root.omaboxBin, "x-token", "--set"], Model.SMALL_OUTPUT_BYTES, 60)
     stdinEnabled: true
     onStarted: {
       write(root.tokenToSend + "\n")
