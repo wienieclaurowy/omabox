@@ -1740,7 +1740,7 @@ Panel {
             font.bold: true
           }
 
-          TextField {
+          InputField {
             id: searchField
             visible: root.mode === "search"
             width: parent.width - (root.filter !== "" ? Style.space(140) : 0)
@@ -2041,7 +2041,7 @@ Panel {
               font.bold: true
             }
 
-            TextField {
+            InputField {
               id: urlField
               objectName: "urlField"
               width: parent.width - addForm.labelWidth - Style.space(10)
@@ -2089,7 +2089,7 @@ Panel {
               font.bold: true
             }
 
-            TextField {
+            InputField {
               id: nameField
               width: parent.width - addForm.labelWidth - Style.space(10)
               foreground: root.fg
@@ -2121,7 +2121,7 @@ Panel {
             font.bold: true
           }
 
-          TextField {
+          InputField {
             id: muteField
             width: parent.width
             placeholderText: root.mutePick >= 0 ? Tr.t("mute.removePlaceholder")
@@ -2610,7 +2610,7 @@ Panel {
                   font.bold: true
                 }
 
-                TextField {
+                InputField {
                   id: tokenField
                   width: parent.width - tokenLabel.width - Style.space(10)
                   password: true
@@ -3128,7 +3128,7 @@ Panel {
             font.bold: true
           }
 
-          TextField {
+          InputField {
             id: renameInput
             visible: source.renaming
             anchors.verticalCenter: parent.verticalCenter

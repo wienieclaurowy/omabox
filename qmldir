@@ -2,3 +2,4 @@ singleton Tr 1.0 Tr.qml
 ChoicePicker 1.0 ChoicePicker.qml
 Reader 1.0 Reader.qml
 SourceIcon 1.0 SourceIcon.qml
+InputField 1.0 InputField.qml
