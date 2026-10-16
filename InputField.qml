@@ -2,12 +2,13 @@ import QtQuick
 import QtQuick.Controls
 import Quickshell.Io
 import qs.Ui
+import qs.Ui as Ui
 import "Model.js" as Model
 
 // Qt 6.12 reads the whole foreign clipboard into an editable TextInput on every clipboard change and on paste, with
 // no size or time cap; every such path skips read-only fields, so typing is done here and paste goes through paster.
 // Costs: no undo, no input method (CJK). Callers' Keys.onPressed still runs, after this one.
-TextField {
+Ui.TextField {
   id: field
 
   property int maxChars: 4096
