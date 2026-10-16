@@ -94,88 +94,106 @@ QtObject {
     root.rightToLeft = entry.direction === "rtl"
   }
 
-  onLanguageChanged: registryFile.reload()
+  onLanguageChanged: registryReader.read()
 
-  // FileView reports a load on a later event-loop turn, which would leave
-  // the first frame showing raw keys; text() with blockLoading reads now.
-  // The language file comes later, through languageReader.
-  Component.onCompleted: {
-    root.readLanguage()
-    root.applyRegistry(registryFile.text())
-    root.englishStrings = root.parseCatalog(englishFile.text())
-    if (baseFile.path !== "") root.baseStrings = root.parseCatalog(baseFile.text())
-    if (languageCatalog.path !== "") root.languageStrings = root.parseCatalog(languageCatalog.text())
-    root.rebuildStrings()
+  // Every file here, the plugin's catalogs too, comes in through a capped, time-limited child and never through the
+  // shell itself: a FIFO or a huge file in its place would block the GUI thread or fill the shell's memory. Until
+  // they arrive t() gives keys; at shell start only the bar's tooltip uses it.
+  component CappedRead: Process {
+    id: reader
+    property string path: ""
+    property int limit: 1024 * 1024
+    property bool stale: false
+    // "" for a missing, unreadable or too large file
+    signal arrived(string text)
+
+    // command is set here, not bound: onPathChanged runs before a binding on path would update it
+    function read() {
+      if (path === "") {
+        arrived("")
+      } else if (running) {
+        stale = true
+      } else {
+        command = ["timeout", "-k", "1", "5", "head", "-c", String(limit + 1), "--", path]
+        running = true
+      }
+    }
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: reader.arrived(text.length > reader.limit ? "" : text)
+    }
+    onExited: if (stale) {
+      stale = false
+      Qt.callLater(reader.read)
+    }
   }
 
-  // Another program's file, so a watcher only (preload: false never reads): a FIFO or a huge file there must not
-  // reach the shell's GUI thread. languageReader reads it capped and time-limited.
+  Component.onCompleted: {
+    languageReader.read()
+    registryReader.read()
+    englishReader.read()
+  }
+
+  // Watchers only: preload: false never reads.
   property FileView languageFile: FileView {
     path: root.languagePath
     preload: false
     watchChanges: true
     printErrors: false
-    onFileChanged: root.readLanguage()
+    onFileChanged: languageReader.read()
   }
 
-  property bool languageStale: false
-
-  function readLanguage() {
-    if (languageReader.running) root.languageStale = true
-    else languageReader.running = true
-  }
-
-  property Process languageReader: Process {
-    command: ["timeout", "-k", "1", "2", "head", "-c", "16", "--", root.languagePath]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.setLanguage(text)
-    }
-    onExited: if (root.languageStale) {
-      root.languageStale = false
-      Qt.callLater(root.readLanguage)
-    }
+  property CappedRead languageReader: CappedRead {
+    path: root.languagePath
+    limit: 16
+    onArrived: function(text) { root.setLanguage(text) }
   }
 
   // Edge only; on stable the defaults above stand.
-  property FileView registryFile: FileView {
-    id: registryFile
+  property CappedRead registryReader: CappedRead {
     path: root.omarchyPath + "/default/i18n/locales.json"
-    printErrors: false
-    blockLoading: true
-    onLoaded: root.applyRegistry(text())
-    onLoadFailed: root.applyRegistry("")
+    onArrived: function(text) { root.applyRegistry(text) }
   }
 
   property FileView englishFile: FileView {
     path: root.catalogDir + "/en.json"
+    preload: false
     watchChanges: true
     printErrors: false
-    blockLoading: true
-    onLoaded: { root.englishStrings = root.parseCatalog(text()); root.rebuildStrings() }
-    onLoadFailed: { root.englishStrings = ({}); root.rebuildStrings() }
-    onFileChanged: reload()
+    onFileChanged: englishReader.read()
+  }
+
+  property CappedRead englishReader: CappedRead {
+    path: root.catalogDir + "/en.json"
+    onArrived: function(text) { root.englishStrings = root.parseCatalog(text); root.rebuildStrings() }
   }
 
   property FileView baseFile: FileView {
-    path: root.baseLanguage !== root.language && root.baseLanguage !== "en" ? root.catalogDir + "/" + root.baseLanguage + ".json" : ""
+    path: baseReader.path
+    preload: false
     watchChanges: true
     printErrors: false
-    blockLoading: true
-    onLoaded: { root.baseStrings = root.parseCatalog(text()); root.rebuildStrings() }
-    onLoadFailed: { root.baseStrings = ({}); root.rebuildStrings() }
-    onPathChanged: if (path === "") { root.baseStrings = ({}); root.rebuildStrings() }
-    onFileChanged: reload()
+    onFileChanged: baseReader.read()
+  }
+
+  property CappedRead baseReader: CappedRead {
+    path: root.baseLanguage !== root.language && root.baseLanguage !== "en" ? root.catalogDir + "/" + root.baseLanguage + ".json" : ""
+    onPathChanged: read()
+    onArrived: function(text) { root.baseStrings = root.parseCatalog(text); root.rebuildStrings() }
   }
 
   property FileView languageCatalog: FileView {
-    path: root.language !== "en" ? root.catalogDir + "/" + root.language + ".json" : ""
+    path: languageCatalogReader.path
+    preload: false
     watchChanges: true
     printErrors: false
-    blockLoading: true
-    onLoaded: { root.languageStrings = root.parseCatalog(text()); root.rebuildStrings() }
-    onLoadFailed: { root.languageStrings = ({}); root.rebuildStrings() }
-    onPathChanged: if (path === "") { root.languageStrings = ({}); root.rebuildStrings() }
-    onFileChanged: reload()
+    onFileChanged: languageCatalogReader.read()
+  }
+
+  property CappedRead languageCatalogReader: CappedRead {
+    path: root.language !== "en" ? root.catalogDir + "/" + root.language + ".json" : ""
+    onPathChanged: read()
+    onArrived: function(text) { root.languageStrings = root.parseCatalog(text); root.rebuildStrings() }
   }
 }
