@@ -5753,11 +5753,17 @@ def read_head(response, size=MEDIA_HEAD_BYTES):
 RELAY_HEAD_SECONDS = 20
 
 
+RANGE_RE = re.compile(r"bytes=(\d{1,15})-(\d{0,15})")
+CONTENT_RANGE_RE = re.compile(r"bytes (\d{1,15})-\d{1,15}/(?:\d{1,15}|\*)")
+
+
 class VideoRelay(http.server.BaseHTTPRequestHandler):
     """Serves each video of a post on loopback, fetched through PUBLIC_OPENER: whichever player plays it never
     dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking.
-    Only single media files pass (by type and by their first bytes), never a playlist naming other addresses, and only
-    to this account's programs: a player other than mpv gets the address, token and all, in its argv."""
+    Only single media files pass, never a playlist naming other addresses: by type, and by the first bytes this relay
+    itself passes from the file's start, never by what the server says the bytes are. A request from the middle of a
+    file is served once its start has passed here. Only this account's programs are served: a player other than mpv
+    gets the address, token and all, in its argv."""
 
     def do_GET(self):
         self.relay(body=True)
@@ -5774,8 +5780,14 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         headers = {"User-Agent": USER_AGENT}
+        start = 0
         if self.headers.get("Range"):
-            headers["Range"] = self.headers["Range"]
+            asked = RANGE_RE.fullmatch(self.headers["Range"].strip())
+            if not asked:
+                self.send_error(416)
+                return
+            start = int(asked.group(1))
+            headers["Range"] = self.headers["Range"].strip()
         request = within(urllib.request.Request(url, headers=headers, method=self.command), RELAY_HEAD_SECONDS)
         try:
             response = self.server.opener.open(request, timeout=15)
@@ -5791,11 +5803,20 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
             try:
                 if PLAYLIST_TYPE_RE.search(response.headers.get("Content-Type", "")):
                     raise ValueError("playlist")
-                if body:
-                    from_start = response.status == 200 or response.headers.get("Content-Range", "").startswith("bytes 0-")
-                    head = read_head(response) if from_start else b""
-                    if not (media_head(head) if from_start else self.media_file(url)):
+                if response.status == 206:
+                    answered = CONTENT_RANGE_RE.fullmatch(response.headers.get("Content-Range", "").strip())
+                    if not answered or int(answered.group(1)) != start:
+                        raise ValueError("not the range asked for")
+                elif response.status != 200:
+                    raise ValueError("unexpected answer")
+                from_start = response.status == 200 or start == 0
+                if body and from_start:
+                    head = read_head(response)
+                    if not media_head(head):
                         raise ValueError("not a media file")
+                    self.server.media.add(url)
+                elif body and url not in self.server.media:
+                    raise ValueError("the file's start has not passed here")
             except (OSError, ValueError):
                 self.send_error(415)
                 return
@@ -5811,17 +5832,6 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(head)
                     shutil.copyfileobj(response, self.wfile, 65536)
 
-    def media_file(self, url):
-        """Whether the file at url begins like media, for a request from its middle; asked once per file."""
-        if url not in self.server.media:
-            request = within(urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                                                  "Range": f"bytes=0-{MEDIA_HEAD_BYTES - 1}"}),
-                             RELAY_HEAD_SECONDS)
-            with self.server.opener.open(request, timeout=15) as response:
-                self.server.media[url] = not PLAYLIST_TYPE_RE.search(response.headers.get("Content-Type", "")) \
-                    and media_head(read_head(response))
-        return self.server.media[url]
-
     def log_message(self, format, *args):
         pass
 
@@ -5832,7 +5842,8 @@ def start_relay(urls, opener=PUBLIC_OPENER):
     token = secrets.token_urlsafe(16)
     suffixes = [Path(urllib.parse.urlparse(url).path).suffix.lower() for url in urls]
     paths = [f"/{token}/{index}{suffix if suffix in MEDIA_SUFFIXES else ''}" for index, suffix in enumerate(suffixes)]
-    server.videos, server.opener, server.media = dict(zip(paths, urls)), opener, {}
+    # media: urls whose start passed the relay as media
+    server.videos, server.opener, server.media = dict(zip(paths, urls)), opener, set()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return [f"http://127.0.0.1:{server.server_port}{path}" for path in paths]
 

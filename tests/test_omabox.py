@@ -3905,10 +3905,42 @@ class ViewerTest(unittest.TestCase):
         media = {"mp4": b"\x00\x00\x00\x18ftypisom", "webm": b"\x1a\x45\xdf\xa3", "ogg": b"OggS", "mp3": b"ID3\x04\x00"}
         for name, start in media.items():
             local = omabox.start_relay([self.upstream(start + bytes(400)) + "/v.mp4"], opener=plain)
-            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[:3:2], (206, bytes(len(start) + 360)), name)
+            # from the middle only once the file's start has passed the relay
+            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[0], 415, name)
             self.assertEqual(self.fetch(local[0])[0], 200, name)
+            self.assertEqual(self.fetch(local[0], {"Range": "bytes=40-"})[:3:2], (206, bytes(len(start) + 360)), name)
         typed = omabox.start_relay([self.upstream(media["mp4"] + bytes(400), "audio/x-mpegurl") + "/v.mp4"], opener=plain)
         self.assertEqual(self.fetch(typed[0])[0], 415)
+
+    def test_relay_sniffs_what_it_passes_whatever_the_server_says_it_is(self):
+        playlist = b"#EXTM3U\nhttp://192.0.2.10/lan\n" + bytes(600)
+        mp4 = b"\x00\x00\x00\x18ftypisom" + bytes(600)
+
+        class Liar(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                # an MP4 for the relay's own look at the start, a playlist labelled as the file's middle otherwise
+                sniff = self.headers.get("Range") == f"bytes=0-{omabox.MEDIA_HEAD_BYTES - 1}"
+                body = mp4[:omabox.MEDIA_HEAD_BYTES] if sniff else playlist
+                self.send_response(206)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Range", f"bytes {0 if sniff else 1}-{len(body)}/{len(body) + 1}")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Liar)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        plain = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        local = omabox.start_relay([f"http://127.0.0.1:{server.server_port}/v.mp4"], opener=plain)
+        self.assertEqual(self.fetch(local[0])[0], 415)
+        self.assertEqual(self.fetch(local[0], {"Range": "bytes=0-"})[0], 415)
+        self.assertEqual(self.fetch(local[0], {"Range": "bytes=1-"})[0], 415)
+        self.assertEqual(self.fetch(local[0], {"Range": "bytes=0-1,5-9"})[0], 416)
 
     def test_relay_paths_keep_media_suffixes_only(self):
         local = omabox.start_relay(["https://cdn.example/a.MP4", "https://cdn.example/b.m3u", "https://cdn.example/c.pls?x=.mp4",
