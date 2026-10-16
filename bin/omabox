@@ -613,9 +613,36 @@ def read_capped(response, limit, seconds):
     return b"".join(chunks)
 
 
+# Pictures, favicons, avatars and article pages an https feed names with http:// go over https or not at all: plain
+# http shows the network which posts are read and lets it swap what they show. A feed fetched over http allows it.
+PLAIN_HTTP = threading.local()
+
+
+@contextlib.contextmanager
+def plain_http_content(allowed):
+    previous = getattr(PLAIN_HTTP, "allowed", False)
+    PLAIN_HTTP.allowed = allowed
+    try:
+        yield
+    finally:
+        PLAIN_HTTP.allowed = previous
+
+
+def plain_http_feed(url):
+    """A feed fetched over plain http across the network; Omabox's RSSHub on loopback does not count."""
+    return url.startswith("http://") and not needs_rsshub(url)
+
+
+def content_url(url):
+    if url.startswith("http://") and not getattr(PLAIN_HTTP, "allowed", False):
+        return "https://" + url[len("http://"):]
+    return url
+
+
 def download_public(url, limit, seconds=DOWNLOAD_SECONDS):
     """Fetches driven by feed content (images, favicons, article pages): public http(s) hosts only, size-capped and
-    time-capped. Returns the URL after redirects, the Content-Type and the body."""
+    time-capped, http:// as https:// (content_url). Returns the URL after redirects, the Content-Type and the body."""
+    url = content_url(url)
     if not url.startswith(("https://", "http://")) or not public_host(url):
         raise ValueError(f"non-public address refused: {url}")
     request = within(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), seconds)
@@ -3968,35 +3995,41 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
     """Downloads the source's feed and builds its new posts against snapshot, which it only reads."""
     name, url = source["name"], source["url"]
     try:
-        x_feed = needs_rsshub(url) and "/twitter/" in url
-        bluesky = bluesky_actor(url)
-        address = x_feed_url(url) if x_feed else bluesky_feed_url(bluesky) if bluesky else url
-        cached = snapshot["http"].get(name)
-        data, validators = get(address, cached, lan=True) if source.get("lan") else get(address, cached)
-        if data is None:
-            def unchanged(state):
-                record_success(state, name, stamp)
-                print(f"{shown(name)}: not modified")
-                return 0
-            return Gathered(name, url, stamp, store=unchanged)
-        mentions = "https://x.com/" if x_feed else ""
-        muted = mute_filter(source.get("mute"), lambda problem: print(shown(f"{name}: {problem}, skipped"), file=sys.stderr))
-        article = extract if source.get("full_text") and not needs_rsshub(url) else None
-        entries = list(parse_x_feed(data) if x_feed else parse_bluesky(data) if bluesky else parse_feed(data))
-        if is_hnrss(url):
-            entries = [hn_entry(entry) for entry in entries]
-        elif reddit_host(url):
-            entries = [reddit_entry(entry) for entry in entries]
-        store = prepare_merge(snapshot, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or url),
-                              mentions_base=mentions, cards=True, muted=muted, article=article)
-        looks = {"icons": {name: snapshot["icons"].get(name, {})}, "profiles": {}}
-        if name in snapshot["profiles"]:
-            looks["profiles"][name] = snapshot["profiles"][name]
-        ensure_icon(looks, source, data)
-        if mentions:
-            ensure_profile(looks, source, data)
+        with plain_http_content(plain_http_feed(url)):
+            return gather_feed(snapshot, source, stamp, get, extract)
     except Exception as error:  # one broken feed must not block the others
         return Gathered(name, url, stamp, error=fetch_error(error, url))
+
+
+def gather_feed(snapshot, source, stamp, get, extract):
+    name, url = source["name"], source["url"]
+    x_feed = needs_rsshub(url) and "/twitter/" in url
+    bluesky = bluesky_actor(url)
+    address = x_feed_url(url) if x_feed else bluesky_feed_url(bluesky) if bluesky else url
+    cached = snapshot["http"].get(name)
+    data, validators = get(address, cached, lan=True) if source.get("lan") else get(address, cached)
+    if data is None:
+        def unchanged(state):
+            record_success(state, name, stamp)
+            print(f"{shown(name)}: not modified")
+            return 0
+        return Gathered(name, url, stamp, store=unchanged)
+    mentions = "https://x.com/" if x_feed else ""
+    muted = mute_filter(source.get("mute"), lambda problem: print(shown(f"{name}: {problem}, skipped"), file=sys.stderr))
+    article = extract if source.get("full_text") and not needs_rsshub(url) else None
+    entries = list(parse_x_feed(data) if x_feed else parse_bluesky(data) if bluesky else parse_feed(data))
+    if is_hnrss(url):
+        entries = [hn_entry(entry) for entry in entries]
+    elif reddit_host(url):
+        entries = [reddit_entry(entry) for entry in entries]
+    store = prepare_merge(snapshot, name, entries, stamp, lambda entry: ImageFetcher(entry["link"] or url),
+                          mentions_base=mentions, cards=True, muted=muted, article=article)
+    looks = {"icons": {name: snapshot["icons"].get(name, {})}, "profiles": {}}
+    if name in snapshot["profiles"]:
+        looks["profiles"][name] = snapshot["profiles"][name]
+    ensure_icon(looks, source, data)
+    if mentions:
+        ensure_profile(looks, source, data)
 
     def stored(state):
         added = store(state)
@@ -4869,8 +4902,10 @@ def load_article(item_id, refresh=False, fetch=download_public, image_fetch=down
     problem = article_refusal(item, sources)
     if problem:
         raise ValueError(problem)
+    feed = next((source["url"] for source in sources if source["name"] == item["source"]), "")
     try:
-        fields = fetch_article(item["link"], item.get("title", ""), fetch, image_fetch)
+        with plain_http_content(plain_http_feed(feed)):
+            fields = fetch_article(item["link"], item.get("title", ""), fetch, image_fetch)
     except Exception as error:
         raise ValueError(article_error(error)) from None
     fields["full_fetched"] = now_iso()

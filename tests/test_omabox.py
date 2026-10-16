@@ -1501,8 +1501,38 @@ class PublicHostTest(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/x.png"
         with mock.patch.object(omabox, "public_address", lambda address: True):
-            self.assertEqual(omabox.download_limited(f"http://127.0.0.1:{server.server_port}/x.png", 100), b"png")
+            with omabox.plain_http_content(True):
+                self.assertEqual(omabox.download_limited(url, 100), b"png")
+            # content of an https feed: asked for over https, which this plain server cannot answer
+            with self.assertRaises(OSError):
+                omabox.download_limited(url, 100)
+
+    def test_content_goes_over_https_unless_the_feed_came_over_http(self):
+        self.assertEqual(omabox.content_url("http://img.example/a.png"), "https://img.example/a.png")
+        self.assertEqual(omabox.content_url("https://img.example/a.png"), "https://img.example/a.png")
+        with omabox.plain_http_content(omabox.plain_http_feed("http://blog.example/feed")):
+            self.assertEqual(omabox.content_url("http://img.example/a.png"), "http://img.example/a.png")
+        self.assertEqual(omabox.content_url("http://img.example/a.png"), "https://img.example/a.png")
+        self.assertFalse(omabox.plain_http_feed("http://127.0.0.1:1200/twitter/user/someone"))
+        seen = []
+
+        def get(url, cached=None, lan=False):
+            return b"<rss><channel><item><guid>1</guid><title>t</title><link>https://blog.example/p</link>" \
+                   b"<description>x</description></item></channel></rss>", {}
+
+        def extract(link, title=""):
+            seen.append(omabox.content_url("http://img.example/a.png"))
+            raise ValueError("no article")
+
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"].append({"id": "x", "source": "Other", "title": "x", "html": "", "published": "", "read": True})
+        for feed in ("https://blog.example/feed", "http://blog.example/feed"):
+            with mock.patch.object(omabox, "ensure_icon", lambda *args: None), contextlib.redirect_stderr(io.StringIO()):
+                omabox.gather_source(state, {"name": "Blog", "url": feed, "full_text": True}, "2026-09-26T08:00:00Z",
+                                     get=get, extract=extract)
+        self.assertEqual(seen, ["https://img.example/a.png", "http://img.example/a.png"])
 
 
     def connect_proxy(self):

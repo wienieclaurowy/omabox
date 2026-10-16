@@ -185,7 +185,9 @@ Omabox has no telemetry and no account. It talks only to the feeds you add, to t
 and articles are never fetched from addresses on your local network, and a feed on the internet cannot redirect
 or link Omabox there either, so a feed cannot use Omabox to reach your router or other machines. Feeds on your
 own network still work: add them by their local address or name, and Omabox remembers that they are local
-(`lan = true` in `sources.toml`) instead of trusting what the name resolves to later.
+(`lan = true` in `sources.toml`) instead of trusting what the name resolves to later. When a feed comes over
+https, the pictures, icons and articles it names with `http://` are fetched over https, or left out when that
+fails, so the network between you and those sites cannot see or change them.
 
 Opening a post can also make requests of its own, and each one shows that service your IP address and the post
 you are reading:
