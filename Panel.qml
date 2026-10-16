@@ -948,7 +948,7 @@ Panel {
       root.discovered = found
       root.mode = "add-name"
       Qt.callLater(function() {
-        nameField.text = found.title
+        nameField.text = Model.spliceField("", 0, 0, found.title, nameField.maxChars).text
         nameField.selectAll()
         nameField.forceActiveFocus()
       })
@@ -2060,10 +2060,13 @@ Panel {
             leftPadding: addForm.labelWidth + Style.space(10)
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
+            maximumLineCount: 3
+            elide: Text.ElideRight
             text: !root.discovered ? ""
-              : root.discovered.latest ? Model.fill(Tr.t("sources.foundLatest"), [root.discovered.title,
-                  root.discovered.latest.title, Model.relativeTime(root.discovered.latest.published, root.now, Tr)])
-              : Model.fill(Tr.t("sources.foundEmpty"), [root.discovered.title])
+              : root.discovered.latest ? Model.fill(Tr.t("sources.foundLatest"), [Model.clip(root.discovered.title, Model.NAME_CHARS),
+                  Model.clip(root.discovered.latest.title, Model.NAME_CHARS),
+                  Model.relativeTime(root.discovered.latest.published, root.now, Tr)])
+              : Model.fill(Tr.t("sources.foundEmpty"), [Model.clip(root.discovered.title, Model.NAME_CHARS)])
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -2090,6 +2093,7 @@ Panel {
             InputField {
               id: nameField
               width: parent.width - addForm.labelWidth - Style.space(10)
+              maxChars: Model.NAME_CHARS
               foreground: root.fg
               font.family: root.fontFamily
               Keys.onPressed: function(event) {
@@ -2416,7 +2420,7 @@ Panel {
         id: messageStrip
         readonly property string text: statusLine.visible ? ""
           : root.busy ? Tr.t("sources.looking")
-          : root.message !== "" ? root.message
+          : root.message !== "" ? Model.clip(root.message, Model.MESSAGE_CHARS)
           : root.fetching ? Tr.t("feed.fetching")
           : root.view === "feed" && !headerStatus.failed && root.recoveredFile !== ""
             ? Model.fill(Tr.t("feed.recovered"), [root.stateDirLabel + "/" + root.recoveredFile])
@@ -2649,7 +2653,9 @@ Panel {
               width: parent.width
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: root.message
+              maximumLineCount: 6
+              elide: Text.ElideRight
+              text: Model.clip(root.message, Model.MESSAGE_CHARS)
               color: Commons.Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall

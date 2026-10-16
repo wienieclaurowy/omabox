@@ -31,6 +31,14 @@ TestCase {
     function formatNumber(value) { return String(value) }
   }
 
+  function test_clip_cuts_long_text_without_splitting_a_pair() {
+    compare(Model.clip("short", 10), "short")
+    compare(Model.clip("abcdefghij", 5), "abcd\u2026")
+    compare(Model.clip("abc\ud83d\ude00x", 5), "abc\u2026")
+    compare(Model.clip(new Array(100001).join("x"), Model.MESSAGE_CHARS).length, Model.MESSAGE_CHARS)
+    verify(Model.MESSAGE_CHARS >= Model.ACTION_SHOWN_MAX + 200)
+  }
+
   function test_bounded_output_past_its_limit_is_an_error() {
     compare(Model.splitCliOutput("::overflow", english).code, 1)
     compare(Model.splitCliOutput("::overflow", english).text, english.t("cli.outputTooLarge"))

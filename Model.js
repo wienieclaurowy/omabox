@@ -376,6 +376,11 @@ var CLI_OUTPUT_BYTES = 8 * 1024 * 1024
 var CLI_SECONDS = 600
 var SMALL_OUTPUT_BYTES = 64 * 1024
 
+// Characters of a source name (MAX_NAME_CHARS in bin/omabox) and of a message the panel lays out; a message holds a
+// whole command to confirm (ACTION_SHOWN_MAX) with room to spare.
+var NAME_CHARS = 200
+var MESSAGE_CHARS = 1200
+
 // bin/omabox keeps items.json within it (MAX_STATE_BYTES there)
 var MAX_STATE_BYTES = 16 * 1024 * 1024
 
@@ -744,6 +749,15 @@ function spliceField(text, start, end, insert, limit) {
   added = added.slice(0, Math.max(0, limit - (value.length - (to - from))))
   if (/[\ud800-\udbff]$/.test(added)) added = added.slice(0, -1)
   return { text: value.slice(0, from) + added + value.slice(to), cursor: from + added.length }
+}
+
+// text cut to at most limit characters (an ellipsis last), never splitting a surrogate pair.
+function clip(text, limit) {
+  var value = String(text || "")
+  if (value.length <= limit) return value
+  var cut = value.slice(0, Math.max(0, limit - 1))
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1)
+  return cut + "\u2026"
 }
 
 // One character back or forward from pos, never splitting a surrogate pair.

@@ -2090,6 +2090,22 @@ class XTokenSaveTest(unittest.TestCase):
             omabox.cmd_discover(argparse.Namespace(url="https://x.com/someone", json=True))
         self.assertEqual(json.loads(out.getvalue())["needs"], "x-token")
 
+    def test_found_titles_and_errors_reach_the_panel_cut_short(self):
+        long_title = "word " * 100_000
+        found = {"title": long_title, "url": "https://a.example/feed", "count": 1,
+                 "latest": {"title": long_title, "published": "2026-09-27T09:00:00Z"}}
+        with mock.patch.object(omabox, "discover", lambda url: found), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            omabox.cmd_discover(argparse.Namespace(url="x", json=True))
+        answer = json.loads(out.getvalue())
+        self.assertEqual(len(answer["title"]), omabox.MAX_NAME_CHARS)
+        self.assertEqual(len(answer["latest"]["title"]), omabox.MAX_NAME_CHARS)
+        with mock.patch.object(omabox, "discover", side_effect=ValueError("<" + "a" * 1_000_000)), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            omabox.cmd_discover(argparse.Namespace(url="x", json=True))
+        self.assertLessEqual(len(json.loads(out.getvalue())["error"]), omabox.MAX_SHOWN_CHARS)
+        self.assertEqual(len(omabox.source_name("-" + "n" * 5000)), omabox.MAX_NAME_CHARS)
+
 
 class TickPlanTest(unittest.TestCase):
     NOW = datetime(2026, 9, 26, 12, 0).astimezone()

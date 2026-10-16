@@ -2612,9 +2612,13 @@ def name_taken(sources, name):
     return any(s["name"] == name for s in sources)
 
 
+# a feed picks its own title, and every item, state map and sources row repeats the name
+MAX_NAME_CHARS = 200
+
+
 def source_name(text):
     """A name as typed or found, never starting with "-": every command that takes a name would read it as an option."""
-    return " ".join(str(text).split()).lstrip("-").strip()
+    return " ".join(str(text).split()).lstrip("-").strip()[:MAX_NAME_CHARS].rstrip()
 
 
 def unique_name(sources, name):
@@ -4197,11 +4201,21 @@ def error_text(error):
     return str(error) if isinstance(error, (ValueError, RuntimeError)) else f"{type(error).__name__}: {error}"
 
 
+def shown_line(text, limit=MAX_NAME_CHARS):
+    """Feed text for one line of the panel: controls blanked, cut to limit characters."""
+    text = TERMINAL_CONTROL_RE.sub(" ", str(text)).strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def cmd_discover(args):
     try:
         found = discover(args.url)
+        found["title"] = shown_line(found["title"])
+        if found["latest"]:
+            found["latest"] = {"title": shown_line(found["latest"]["title"]),
+                               "published": shown_line(found["latest"]["published"], 40)}
     except Exception as error:
-        message = error_text(error)
+        message = shown(error_text(error))
         if args.json:
             # needs: the panel asks for the X token instead of only showing the error
             token = isinstance(error, XTokenMissing) or message == X_TOKEN_ERROR
