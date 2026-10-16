@@ -540,7 +540,14 @@ class ImageFetcher:
         self.base_url = base_url
         self.fetch = fetch
         self.directory = Path(directory or IMAGE_DIR)
-        self.count = self.avatars = 0
+        self.count = self.avatars = self.pixels = 0
+
+    def within_budget(self, picture):
+        """Charges the picture's pixels to the post; False once MAX_PIXELS_PER_ITEM would be passed."""
+        if self.pixels + picture[1] * picture[2] > MAX_PIXELS_PER_ITEM:
+            return False
+        self.pixels += picture[1] * picture[2]
+        return True
 
     def absolute(self, src):
         """src joined to the page's URL, or "" when it is not http(s)."""
@@ -569,6 +576,8 @@ class ImageFetcher:
         name, w, h = picture
         if w <= TRACKING_PIXEL_MAX or h <= TRACKING_PIXEL_MAX:
             return ""
+        if not self.within_budget(picture):
+            return placeholder
         return f'<p><img src="omabox-img:{name}" width="{w}" height="{h}"></p>'
 
     def avatar(self, src):
@@ -605,7 +614,7 @@ class ImageFetcher:
                 continue
             if picture:
                 break
-        if picture is None:
+        if picture is None or not self.within_budget(picture):
             return placeholder
         name, w, h = picture
         return f'<p><a href="{href}"><img src="omabox-poster:{name}" width="{w}" height="{h}"></a></p>'
@@ -614,76 +623,181 @@ class ImageFetcher:
 # Qt rich text decodes every picture of a post on the GUI thread at full size; the reader column is ~800 px wide.
 MAX_PICTURE_WIDTH = 1600
 MAX_PICTURE_HEIGHT = 4096
-# what a picture that cannot be scaled down (animated, no magick) may hold: 64 MB once decoded, 12 per post
+# what a downloaded picture may declare before it is re-encoded; larger ones are not decoded at all
 MAX_PICTURE_PIXELS = 16_000_000
+# decoded pixels one post's pictures may hold, so the per-picture caps cannot multiply
+MAX_PIXELS_PER_ITEM = 24_000_000
 PICTURE_BOX = (MAX_PICTURE_WIDTH, MAX_PICTURE_HEIGHT)
-# Account pictures show at most 40 px wide (2x on HiDPI) and a post's comments can carry dozens: cached at this size,
-# and refused past MAX_AVATAR_PIXELS when they cannot be scaled down.
+# Account pictures show at most 40 px wide (2x on HiDPI) and a post's comments can carry dozens: cached at this size.
 AVATAR_BOX = (128, 128)
-MAX_AVATAR_PIXELS = 512 * 512
 MAX_AVATARS_PER_ITEM = 60
-SHRINK_SECONDS = 20
+REENCODE_SECONDS = 20
+REENCODE_MEMORY = 1024 * 1024 * 1024
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Qt and libpng inflate PNG text and ICC chunks before any pixel limit, so the shell decodes only pictures written
+# by reencode_picture: PNG with these chunks alone, or baseline JPEG without APPn or COM segments.
+PNG_PIXEL_CHUNKS = (b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND")
+JPEG_PLAIN_MARKERS = {0xE0, 0xDB, 0xC4, 0xC0, 0xC1, 0xDD}
+MAGICK_LIMITS = ("-limit", "memory", "512MiB", "-limit", "map", "512MiB", "-limit", "disk", "0", "-limit", "width", "16KP",
+                 "-limit", "height", "16KP", "-limit", "area", "128MP", "-limit", "thread", "1",
+                 "-limit", "time", str(REENCODE_SECONDS))
 
 
 def oversized(width, height, box=PICTURE_BOX):
     return width > box[0] or height > box[1]
 
 
-def animated(data, ext):
-    return ext == "gif" or (ext == "webp" and data[12:16] == b"VP8X" and bool(data[20] & 0x02))
-
-
-def shrink_picture(data, info, run=None, which=None, box=PICTURE_BOX):
-    """(bytes, image_info) of the picture scaled down to fit box (width, height) with ImageMagick, or None to keep
-    the original: small enough, animated, or magick missing, failing or too slow."""
-    ext, width, height = info
-    if not oversized(width, height, box) or animated(data, ext) or not (which or shutil.which)("magick"):
+def png_pixel_chunks(data):
+    """The PNG with every chunk but PNG_PIXEL_CHUNKS dropped (text, ICC, APNG frames), None when malformed."""
+    if data[:8] != PNG_SIGNATURE:
         return None
-    kind = "jpeg" if ext == "jpg" else ext
+    kept, i = [PNG_SIGNATURE], 8
+    while i + 12 <= len(data):
+        end = i + 12 + int.from_bytes(data[i:i + 4], "big")
+        kind = data[i + 4:i + 8]
+        if end > len(data):
+            return None
+        if kind in PNG_PIXEL_CHUNKS:
+            kept.append(data[i:end])
+        if kind == b"IEND":
+            return b"".join(kept)
+        i = end
+    return None
+
+
+def plain_picture(data):
+    """Whether data is a picture as reencode_picture writes it."""
+    if data[:8] == PNG_SIGNATURE:
+        return png_pixel_chunks(data) == data
+    if data[:2] != b"\xff\xd8":
+        return False
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA:
+            return True
+        if marker not in JPEG_PLAIN_MARKERS:
+            return False
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return False
+
+
+def opaque_webp(data):
+    return data[12:16] == b"VP8 " or (data[12:16] == b"VP8X" and len(data) > 20 and not data[20] & 0x10)
+
+
+def reencode_picture(data, kind, box=PICTURE_BOX, run=None, which=None):
+    """(bytes, image_info) of the picture's first frame fitted into box and written again by ImageMagick, in a
+    memory- and time-limited process: JPEG for photos, else PNG, no metadata. None when that fails or magick is missing."""
+    which = which or shutil.which
+    if not which("magick"):
+        return None
+    if kind == "png":
+        data = png_pixel_chunks(data)
+        if data is None:
+            return None
+    source = {"jpg": "jpeg"}.get(kind, kind)
+    out = "jpeg" if kind == "jpg" or (kind == "webp" and opaque_webp(data)) else "png"
     size = f"{box[0]}x{box[1]}"
-    argv = ["magick", "-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB",
-            "-define", f"jpeg:size={size}", f"{kind}:-", "-auto-orient", "-resize", f"{size}>", "-strip",
-            *(["-quality", "85"] if ext in ("jpg", "webp") else []), f"{kind}:-"]
+    jail = ["prlimit", f"--as={REENCODE_MEMORY}", f"--cpu={REENCODE_SECONDS}", "--"] if which("prlimit") else []
+    # jpeg:size lets libjpeg decode at a scale, which may be larger than the picture: only for big ones
+    large = source == "jpeg" and (info := image_info(data)) and oversized(info[1], info[2], box)
+    argv = [*jail, "magick", *MAGICK_LIMITS, *(["-define", f"jpeg:size={size}"] if large else []),
+            f"{source}:-[0]", "-auto-orient", "-resize", f"{size}>", "-strip",
+            *(["-quality", "85", "-interlace", "none"] if out == "jpeg" else []), f"{out}:-"]
     try:
-        result = (run or subprocess.run)(argv, input=data, capture_output=True, timeout=SHRINK_SECONDS)
+        result = (run or subprocess.run)(argv, input=data, capture_output=True, timeout=REENCODE_SECONDS + 5)
     except (OSError, subprocess.SubprocessError):
         return None
-    shrunk = image_info(result.stdout) if result.returncode == 0 else None
-    if not shrunk or shrunk[0] != ext or oversized(shrunk[1], shrunk[2], box):
+    if result.returncode != 0:
         return None
-    return result.stdout, shrunk
+    picture = png_pixel_chunks(result.stdout) if out == "png" else result.stdout
+    info = image_info(picture) if picture and plain_picture(picture) else None
+    if not info or info[0] != ("jpg" if out == "jpeg" else "png") or oversized(info[1], info[2], box):
+        return None
+    return picture, info
+
+
+def store_picture(path, data):
+    app_dir(path.parent)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}"
+    write_private(tmp, data)
+    os.replace(tmp, path)
 
 
 def cache_image(src, fetch, directory, limit, box=PICTURE_BOX, max_pixels=MAX_PICTURE_PIXELS):
-    """(file name, width, height) of the picture at src in the cache directory, downloaded the first time, or None
-    when the bytes are no PNG, JPEG, GIF or WebP. Pictures larger than box are cached scaled down, or not at all past
-    max_pixels when they cannot be; tracking pixels not at all."""
+    """(file name, width, height) of the picture at src in the cache directory, downloaded and re-encoded the first
+    time, or None when the bytes are no PNG, JPEG, GIF or WebP, declare more than max_pixels or do not re-encode.
+    Tracking pixels are not cached."""
     stem = hashlib.sha1(src.encode()).hexdigest()[:20]
     cached = next(iter(directory.glob(stem + ".*")), None) if directory.exists() else None
     if cached:
         # a fresh mtime keeps prune_files off a picture about to be referenced again
         with contextlib.suppress(OSError):
             os.utime(cached)
-    data = cached.read_bytes() if cached else fetch(src, limit)
+        data = cached.read_bytes()
+        info = image_info(data)
+        if info and plain_picture(data) and not oversized(info[1], info[2], box):
+            return cached.name, info[1], info[2]
+    else:
+        data = fetch(src, limit)
     info = image_info(data)
-    if info is None:
+    if info is None or info[1] * info[2] > max_pixels:
         return None
-    if not cached and info[1] > TRACKING_PIXEL_MAX and info[2] > TRACKING_PIXEL_MAX:
-        data, info = shrink_picture(data, info, box=box) or (data, info)
-        if info[1] * info[2] > max_pixels:
-            return None
-        app_dir(directory)
-        tmp = directory / f".{stem}.{os.getpid()}.{threading.get_ident()}"
-        write_private(tmp, data)
-        os.replace(tmp, directory / f"{stem}.{info[0]}")
-    ext, width, height = info
-    if width * height > max_pixels:
+    if info[1] <= TRACKING_PIXEL_MAX or info[2] <= TRACKING_PIXEL_MAX:
+        return f"{stem}.{info[0]}", info[1], info[2]
+    picture = reencode_picture(data, info[0], box)
+    if picture is None:
         return None
-    return f"{stem}.{ext}", width, height
+    data, info = picture
+    # a picture cached by an older version keeps its name, which stored posts refer to; Qt reads it by content
+    path = cached or directory / f"{stem}.{info[0]}"
+    store_picture(path, data)
+    return path.name, info[1], info[2]
 
 
 def cache_avatar(src, fetch, directory):
-    return cache_image(src, fetch, directory, MAX_ICON_BYTES, AVATAR_BOX, MAX_AVATAR_PIXELS)
+    return cache_image(src, fetch, directory, MAX_ICON_BYTES, AVATAR_BOX)
+
+
+def plain_icon(data):
+    """(bytes, extension) of a downloaded favicon or account picture as reencode_picture writes it, or None."""
+    kind = "ico" if data[:4] == b"\x00\x00\x01\x00" else (image_info(data) or ("",))[0]
+    picture = reencode_picture(data, kind, AVATAR_BOX) if kind else None
+    return (picture[0], picture[1][0]) if picture else None
+
+
+PLAIN_CACHE_MARK = ".plain-pictures"
+
+
+def plain_cache(directories=None, mark=None):
+    """Re-encodes, in place, pictures cached before every picture was (reencode_picture), each directory's into
+    its box; once, then a mark file."""
+    directories = directories or ((IMAGE_DIR, PICTURE_BOX), (ICON_DIR, AVATAR_BOX))
+    mark = Path(mark or CACHE_DIR / PLAIN_CACHE_MARK)
+    if mark.exists():
+        return
+    for directory, box in directories:
+        directory = Path(directory)
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.name.startswith(".") or not path.is_file() or path.is_symlink():
+                continue
+            with contextlib.suppress(OSError):
+                data = path.read_bytes() if path.stat().st_size <= MAX_IMAGE_BYTES else b""
+                if data and plain_picture(data):
+                    continue
+                kind = "ico" if data[:4] == b"\x00\x00\x01\x00" else (image_info(data) or ("",))[0]
+                info = image_info(data) if kind != "ico" else None
+                fits = kind and (info is None or info[1] * info[2] <= MAX_PICTURE_PIXELS)
+                picture = reencode_picture(data, kind, box) if fits else None
+                if picture:
+                    store_picture(path, picture[0])
+                else:
+                    path.unlink()
+    app_dir(mark.parent)
+    write_private(mark, b"")
 
 
 # Fetches, `omabox article` and `omabox replies` download pictures before taking the state lock to store their refs.
@@ -1900,13 +2014,6 @@ def feed_home(data):
     return (root.findtext(f"{ns}channel/{ns}link") or "").strip()
 
 
-def icon_ext(data):
-    if data[:4] == b"\x00\x00\x01\x00":
-        return "ico"
-    info = image_info(data)
-    return info[0] if info else ""
-
-
 def fetch_favicon(feed_url, feed_data=b"", fetch=download_limited, directory=None):
     """Saves the site's favicon (never SVG) under the cache and returns its path, or "" when none works."""
     directory = Path(directory or ICON_DIR)
@@ -1927,12 +2034,11 @@ def fetch_favicon(feed_url, feed_data=b"", fetch=download_limited, directory=Non
             data = fetch(url, MAX_ICON_BYTES)
         except Exception:
             continue
-        ext = icon_ext(data)
-        if not ext:
+        icon = plain_icon(data)
+        if not icon:
             continue
-        app_dir(directory)
-        path = directory / f"{hashlib.sha1(feed_url.encode()).hexdigest()[:20]}.{ext}"
-        write_private(path, data)
+        path = directory / f"{hashlib.sha1(feed_url.encode()).hexdigest()[:20]}.{icon[1]}"
+        store_picture(path, icon[0])
         return str(path)
     return ""
 
@@ -1993,12 +2099,10 @@ def ensure_profile(state, source, feed_data, fetch=download_limited, directory=N
     if profile["avatar_url"] and (current.get("avatar_url") != profile["avatar_url"] or not Path(avatar).exists()):
         avatar = ""
         try:
-            data = fetch(profile["avatar_url"], MAX_ICON_BYTES)
-            info = image_info(data)
-            if info:
-                app_dir(directory)
-                path = directory / f"avatar-{hashlib.sha1(profile['avatar_url'].encode()).hexdigest()[:20]}.{info[0]}"
-                write_private(path, data)
+            icon = plain_icon(fetch(profile["avatar_url"], MAX_ICON_BYTES))
+            if icon:
+                path = directory / f"avatar-{hashlib.sha1(profile['avatar_url'].encode()).hexdigest()[:20]}.{icon[1]}"
+                store_picture(path, icon[0])
                 avatar = str(path)
         except Exception:
             avatar = ""
@@ -2128,20 +2232,22 @@ def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base
         existing = known.get(entry["guid"])
         if entry["guid"] in built or (existing is not None and existing.get("media") == MEDIA_VERSION):
             continue
-        body, text = sanitize(entry["html"], images(entry) if images else None)
+        # one fetcher per post: its picture and pixel caps hold across body, card and quote
+        fetcher = images(entry) if images else None
+        body, text = sanitize(entry["html"], fetcher)
         body, summary, minutes = structure(body, text)
         short = is_short_post(entry["title"], text)
         card = entry.get("card")
         if cards and short and not card:
-            body = attach_card(body, text, images(entry) if images else None)
+            body = attach_card(body, text, fetcher)
         body = linkify(body, mentions_base)
         if card:
-            body += card_markup(card["url"], card["title"], card["site"], card["thumb"], images(entry) if images else None)
+            body += card_markup(card["url"], card["title"], card["site"], card["thumb"], fetcher)
         if entry.get("reply_to"):
             body = replying_to(entry["reply_to"], mentions_base) + body
         if entry.get("quote"):
             body = TRAILING_BREAKS_RE.sub("", body)
-            body += quote_markup(entry["quote"], images(entry) if images else None, mentions_base)
+            body += quote_markup(entry["quote"], fetcher, mentions_base)
         title = excerpt(text, 110) if short else (entry["title"] or excerpt(text, 80) or "(untitled)")
         shaped = {"html": body, "excerpt": "" if short else excerpt(text), "summary": summary, "minutes": minutes,
                   "short": short, "title": title, "media": MEDIA_VERSION}
@@ -5189,6 +5295,8 @@ def cmd_tick(args):
             archive_notifications()
         with contextlib.suppress(OSError):
             stop_stale_rsshub()
+        with contextlib.suppress(OSError):
+            plain_cache()
         state = load_state()
         action, _ = tick_plan(state)
         # No notification for the first delivery: it only seeds one unread post per source.
@@ -5644,7 +5752,7 @@ def cmd_doctor(args):
         launcher = ""
     if "omabox pick" not in launcher:
         print("  launcher search: not in the Omarchy menu yet (omabox pick --help)")
-    for tool, use in (("wl-copy", "copy link (yy)"), ("omarchy-update", "update (U)")):
+    for tool, use in (("magick", "pictures in posts"), ("wl-copy", "copy link (yy)"), ("omarchy-update", "update (U)")):
         line(shutil.which(tool) is not None, f"{tool}: {use}")
     viewer = viewer_argv([str(IMAGE_DIR / "x.png")], 0)[0]
     line(shutil.which(viewer) is not None, f"picture viewer (i): {viewer}")

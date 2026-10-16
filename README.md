@@ -59,6 +59,8 @@ Optional:
 - a video player and a picture viewer: Omabox opens your default ones, else `mpv` and `imv` (both come
   with Omarchy). YouTube, Reddit and Bluesky videos always play in `mpv`, YouTube through `yt-dlp` (also
   part of Omarchy).
+- ImageMagick (`magick`, part of Omarchy) to show pictures: Omabox writes every picture again before the panel
+  shows it, and shows none without it
 - `wl-copy` to copy links
 - `podman` or `docker` for X sources (see [X sources](#x-sources))
 

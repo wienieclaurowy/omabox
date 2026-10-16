@@ -1,6 +1,7 @@
 import argparse
 import codecs
 import contextlib
+import functools
 import html
 import http.server
 import importlib.machinery
@@ -22,6 +23,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1079,13 +1081,22 @@ class DiscoverTest(unittest.TestCase):
             omabox.discover("https://plain.example/")
 
 
-def png(width, height):
-    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00"
+def png_chunk(kind, data):
+    return len(data).to_bytes(4, "big") + kind + data + (zlib.crc32(kind + data) & 0xFFFFFFFF).to_bytes(4, "big")
 
 
+def png(width, height, *extra):
+    """A blank RGBA PNG; past MAX_PICTURE_PIXELS only its header, which is all such a picture gets read for."""
+    header = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00")
+    if width * height > omabox.MAX_PICTURE_PIXELS:
+        return header
+    rows = zlib.compress((b"\x00" + b"\x00" * 4 * width) * height, 1)
+    return header + b"".join(extra) + png_chunk(b"IDAT", rows) + png_chunk(b"IEND", b"")
+
+
+@functools.cache
 def jpeg(width, height):
-    sof = b"\xff\xc0\x00\x11\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big") + b"\x03" + b"\x00" * 9
-    return b"\xff\xd8" + b"\xff\xe0\x00\x10" + b"JFIF\x00" + b"\x00" * 9 + sof
+    return subprocess.run(["magick", "-size", f"{width}x{height}", "xc:gray", "jpeg:-"], capture_output=True, check=True).stdout
 
 
 class ImageTest(unittest.TestCase):
@@ -1114,9 +1125,74 @@ class ImageTest(unittest.TestCase):
         body, _ = omabox.sanitize('<p>Look <img src="/a.png"></p>', self.fetcher())
         (name,) = omabox.IMAGE_REF_RE.findall(body)
         self.assertIn(f'<img src="omabox-img:{name}" width="640" height="480">', body)
-        self.assertEqual((self.dir / name).read_bytes(), png(640, 480))
+        cached = (self.dir / name).read_bytes()
+        self.assertTrue(omabox.plain_picture(cached))
+        self.assertEqual(omabox.image_info(cached), ("png", 640, 480))
 
-    @unittest.skipUnless(omabox.shutil.which("magick"), "needs ImageMagick")
+    def test_pictures_are_cached_re_encoded_without_their_metadata(self):
+        bomb = zlib.compress(b"\0" * 8_000_000, 9)
+        text = b"".join(png_chunk(b"zTXt", b"c%d\0\0" % n + bomb) for n in range(20))
+        icc = png_chunk(b"iCCP", b"icc\0\0" + bomb)
+        self.served["https://blog.example/bomb.png"] = png(64, 64, text, icc, png_chunk(b"tEXt", b"Comment\0hi"))
+        body, _ = omabox.sanitize('<img src="/bomb.png">', self.fetcher())
+        (name,) = omabox.IMAGE_REF_RE.findall(body)
+        cached = (self.dir / name).read_bytes()
+        self.assertEqual(omabox.image_info(cached), ("png", 64, 64))
+        for kind in (b"zTXt", b"iCCP", b"tEXt"):
+            self.assertNotIn(kind, cached)
+        exif = subprocess.run(["magick", "-size", "300x200", "xc:teal", "-set", "comment", "planted", "jpeg:-"],
+                              capture_output=True, check=True).stdout
+        self.assertIn(b"planted", exif)
+        self.served["https://blog.example/c.jpg"] = exif
+        body, _ = omabox.sanitize('<img src="/c.jpg">', self.fetcher())
+        (name,) = omabox.IMAGE_REF_RE.findall(body)
+        cached = (self.dir / name).read_bytes()
+        self.assertTrue(omabox.plain_picture(cached))
+        self.assertNotIn(b"planted", cached)
+
+    def test_plain_picture(self):
+        self.assertTrue(omabox.plain_picture(png(4, 4)))
+        self.assertFalse(omabox.plain_picture(png(4, 4, png_chunk(b"tEXt", b"a\0b"))))
+        self.assertEqual(omabox.png_pixel_chunks(png(4, 4, png_chunk(b"tEXt", b"a\0b"))), png(4, 4))
+        self.assertIsNone(omabox.png_pixel_chunks(png(4, 4)[:-20]))
+        self.assertFalse(omabox.plain_picture(b"GIF89a" + b"\x00" * 20))
+
+    def test_a_cache_from_an_older_version_is_re_encoded_once(self):
+        icons = self.dir.parent / "icons"
+        self.dir.mkdir(parents=True)
+        icons.mkdir()
+        raw = png(40, 30, png_chunk(b"zTXt", b"c\0\0" + zlib.compress(b"\0" * 1000)))
+        (self.dir / "0123456789abcdef0123.png").write_bytes(raw)
+        (self.dir / "0123456789abcdef0124.gif").write_bytes(subprocess.run(
+            ["magick", "-size", "20x10", "xc:red", "gif:-"], capture_output=True, check=True).stdout)
+        (self.dir / "0123456789abcdef0125.png").write_bytes(b"not a picture")
+        (icons / "fav.png").write_bytes(png(300, 300, png_chunk(b"iCCP", b"icc\0\0" + zlib.compress(b"\0" * 100))))
+        mark = self.dir.parent / "mark"
+        omabox.plain_cache(((self.dir, omabox.PICTURE_BOX), (icons, omabox.AVATAR_BOX)), mark)
+        self.assertEqual(omabox.image_info((self.dir / "0123456789abcdef0123.png").read_bytes()), ("png", 40, 30))
+        self.assertTrue(omabox.plain_picture((self.dir / "0123456789abcdef0123.png").read_bytes()))
+        # the name stored posts refer to stays; Qt reads the picture by its content
+        self.assertEqual(omabox.image_info((self.dir / "0123456789abcdef0124.gif").read_bytes()), ("png", 20, 10))
+        self.assertFalse((self.dir / "0123456789abcdef0125.png").exists())
+        self.assertEqual(omabox.image_info((icons / "fav.png").read_bytes()), ("png", 128, 128))
+        self.assertTrue(mark.exists())
+        (self.dir / "0123456789abcdef0126.png").write_bytes(raw)
+        omabox.plain_cache(((self.dir, omabox.PICTURE_BOX), (icons, omabox.AVATAR_BOX)), mark)
+        self.assertEqual((self.dir / "0123456789abcdef0126.png").read_bytes(), raw)
+
+    def test_a_post_has_one_pixel_budget(self):
+        side = 2000
+        count = omabox.MAX_PIXELS_PER_ITEM // (1600 * 1600) + 2
+        tags = ""
+        for n in range(count):
+            self.served[f"https://blog.example/{n}.png"] = png(side, side - n)
+            tags += f'<img src="https://blog.example/{n}.png">'
+        body, _ = omabox.sanitize(tags, self.fetcher())
+        sizes = re.findall(r'width="(\d+)" height="(\d+)"', body)
+        self.assertLessEqual(sum(int(w) * int(h) for w, h in sizes), omabox.MAX_PIXELS_PER_ITEM)
+        self.assertEqual(len(sizes) + body.count("▢ image"), count)
+        self.assertGreater(body.count("▢ image"), 0)
+
     def test_wide_pictures_are_cached_scaled_down(self):
         for kind in ("jpg", "png", "webp"):
             photo = subprocess.run(["magick", "-size", "2000x1500", "gradient:navy-orange", f"{kind}:-"], capture_output=True,
@@ -1125,32 +1201,22 @@ class ImageTest(unittest.TestCase):
             body, _ = omabox.sanitize(f'<img src="/{kind}">', self.fetcher())
             self.assertIn('width="1600" height="1200"', body, kind)
             (name,) = omabox.IMAGE_REF_RE.findall(body)
-            self.assertEqual(omabox.image_info((self.dir / name).read_bytes()), (kind, 1600, 1200))
+            self.assertEqual(omabox.image_info((self.dir / name).read_bytes()), ("png" if kind == "png" else "jpg", 1600, 1200))
         self.served["https://blog.example/narrow.png"] = png(1200, 900)
         body, _ = omabox.sanitize('<img src="/narrow.png">', self.fetcher())
         self.assertIn('width="1200" height="900"', body)
 
-    def test_pictures_stay_as_they_are_without_a_working_magick(self):
-        wide = jpeg(4000, 3000)
-        self.served["https://blog.example/w.jpg"] = wide
+    def test_pictures_are_dropped_without_a_working_magick(self):
+        self.served["https://blog.example/w.jpg"] = jpeg(400, 300)
         with mock.patch.object(omabox.shutil, "which", lambda name: None):
             body, _ = omabox.sanitize('<img src="/w.jpg">', self.fetcher())
-        self.assertIn('width="4000" height="3000"', body)
+        self.assertEqual(body, '<p><a href="https://blog.example/w.jpg">▢ image</a></p>')
         for failure in (subprocess.TimeoutExpired("magick", 20), OSError("gone")):
-            self.dir = Path(tempfile.mkdtemp())
-            with mock.patch.object(omabox.subprocess, "run", side_effect=failure), \
-                    mock.patch.object(omabox.shutil, "which", lambda name: "/usr/bin/magick"):
+            with mock.patch.object(omabox.subprocess, "run", side_effect=failure):
                 body, _ = omabox.sanitize('<img src="/w.jpg">', self.fetcher())
-            self.assertIn('width="4000" height="3000"', body)
-            self.assertEqual(next(self.dir.iterdir()).read_bytes(), wide)
-        gif = b"GIF89a" + (4000).to_bytes(2, "little") + (3000).to_bytes(2, "little") + b"\x00" * 8
-        self.served["https://blog.example/a.gif"] = gif
-        with mock.patch.object(omabox.subprocess, "run") as run:
-            body, _ = omabox.sanitize('<img src="/a.gif">', self.fetcher())
-        run.assert_not_called()
-        self.assertIn('width="4000"', body)
+            self.assertNotIn("<img", body)
+        self.assertFalse(self.dir.exists() and any(self.dir.iterdir()))
 
-    @unittest.skipUnless(omabox.shutil.which("magick"), "needs ImageMagick")
     def test_tall_pictures_are_cached_scaled_down_too(self):
         tall = subprocess.run(["magick", "-size", "1000x8000", "gradient:navy-orange", "png:-"], capture_output=True,
                               check=True).stdout
@@ -1176,15 +1242,14 @@ class ImageTest(unittest.TestCase):
     def test_avatars_are_few_and_small(self):
         sizes = {"https://a.example/small.png": png(400, 400), "https://a.example/tall.png": png(1600, 4000)}
         fetch = lambda url, limit: sizes.get(url, png(48, 48))
-        with mock.patch.object(omabox.shutil, "which", lambda name: None):
-            self.assertIsNotNone(omabox.cache_avatar("https://a.example/small.png", fetch, self.dir))
-            self.assertIsNone(omabox.cache_avatar("https://a.example/tall.png", fetch, self.dir))
-            urls = [f"https://a.example/{n}.png" for n in range(omabox.MAX_AVATARS_PER_ITEM + 20)]
-            faces = omabox.fetch_avatars(urls[:1] + urls, fetch, self.dir)
-            self.assertEqual(list(faces), urls[:omabox.MAX_AVATARS_PER_ITEM])
-            fetcher = omabox.ImageFetcher("https://a.example/", fetch, self.dir)
-            minis = [fetcher.avatar(url) for url in urls[:omabox.MAX_IMAGES_PER_ITEM + 3]]
-            self.assertEqual(sum(bool(mini) for mini in minis), omabox.MAX_IMAGES_PER_ITEM)
+        self.assertEqual(omabox.cache_avatar("https://a.example/small.png", fetch, self.dir)[1:], (128, 128))
+        self.assertEqual(omabox.cache_avatar("https://a.example/tall.png", fetch, self.dir)[1:], (51, 128))
+        urls = [f"https://a.example/{n}.png" for n in range(omabox.MAX_AVATARS_PER_ITEM + 20)]
+        faces = omabox.fetch_avatars(urls[:1] + urls, fetch, self.dir)
+        self.assertEqual(list(faces), urls[:omabox.MAX_AVATARS_PER_ITEM])
+        fetcher = omabox.ImageFetcher("https://a.example/", fetch, self.dir)
+        minis = [fetcher.avatar(url) for url in urls[:omabox.MAX_IMAGES_PER_ITEM + 3]]
+        self.assertEqual(sum(bool(mini) for mini in minis), omabox.MAX_IMAGES_PER_ITEM)
 
     def test_skips_tracking_pixels_without_download_when_declared(self):
         body, _ = omabox.sanitize('<img src="https://t.example/p.gif" width="1" height="1">', self.fetcher())
@@ -1308,6 +1373,22 @@ class IconTest(unittest.TestCase):
         self.assertEqual(omabox.glyph_for("https://www.reddit.com/r/archlinux/.rss"), chr(0xF044D))
         self.assertEqual(omabox.glyph_for("https://fosstodon.org/@someone.rss"), chr(0xF0AD1))
         self.assertEqual(omabox.glyph_for("https://blog.example/@home.xml"), "")
+
+    def test_favicons_and_avatars_are_cached_re_encoded(self):
+        directory = Path(tempfile.mkdtemp())
+        ico = subprocess.run(["magick", "-size", "32x32", "xc:blue", "ico:-"], capture_output=True, check=True).stdout
+        bomb = png(48, 48, png_chunk(b"zTXt", b"c\0\0" + zlib.compress(b"\0" * 4_000_000, 9)))
+        served = {"https://icons.example/": b"", "https://icons.example/favicon.ico": ico,
+                  "https://a.example/me.png": bomb}
+        path = Path(omabox.fetch_favicon("https://icons.example/feed", fetch=lambda url, limit: served[url], directory=directory))
+        self.assertEqual(path.suffix, ".png")
+        self.assertEqual(omabox.image_info(path.read_bytes()), ("png", 32, 32))
+        state = {"profiles": {}}
+        omabox.ensure_profile(state, {"name": "Rowan"}, b'{"home_page_url": "https://x.com/rowanvale", "icon": "https://a.example/me.png"}',
+                              fetch=lambda url, limit: served[url], directory=directory)
+        avatar = Path(state["profiles"]["Rowan"]["avatar"]).read_bytes()
+        self.assertTrue(omabox.plain_picture(avatar))
+        self.assertNotIn(b"zTXt", avatar)
 
     def test_favicon_from_page_link_then_rss_fallback(self):
         directory = Path(tempfile.mkdtemp())
@@ -3804,7 +3885,9 @@ class ArticleTest(unittest.TestCase):
         body = self.article(ARTICLE_PAGE)["full_html"]
         (name,) = omabox.IMAGE_REF_RE.findall(body)
         self.assertIn(f'<img src="omabox-img:{name}" width="800" height="400">', body)
-        self.assertEqual((self.dir / "images" / name).read_bytes(), png(800, 400))
+        cached = (self.dir / "images" / name).read_bytes()
+        self.assertTrue(omabox.plain_picture(cached))
+        self.assertEqual(omabox.image_info(cached), ("png", 800, 400))
         self.assertIn("https://blog.example/posts/img/wide.png", self.calls)
 
     def test_without_article_tag_the_biggest_text_block_wins(self):
