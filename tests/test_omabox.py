@@ -3644,6 +3644,32 @@ class ViewerTest(unittest.TestCase):
         self.assertFalse(Path(seen["argv"][-1]).parent.exists())
         self.assertIsNotNone(seen["viewer"].poll())
 
+    def test_a_player_without_a_window_goes_with_everything_it_started(self):
+        pidfile = self.runtime / "child"
+        player = ["sh", "-c", 'sleep 91 & echo $! > "$0"; wait', str(pidfile)]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            omabox.cmd_play(argparse.Namespace(urls=["https://video.example.com/clip.mp4"], start=0), windows=lambda: set(),
+                            wait_seconds=0.5, poll_every=0.1, relay=lambda urls: urls, focus=lambda window: None,
+                            players=lambda files, start, ipc=None: player)
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{child}").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(Path(f"/proc/{child}").exists())
+
+    def test_a_version_command_that_hangs_goes_with_its_children(self):
+        pidfile = self.runtime / "child"
+        started = time.monotonic()
+        self.assertIsNone(omabox.run_bounded(f'sleep 92 & echo $! > {pidfile}; wait', seconds=0.5, shell=True))
+        self.assertLess(time.monotonic() - started, 5)
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{child}").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(Path(f"/proc/{child}").exists())
+        self.assertEqual(omabox.installed_version("echo 4.0.4-1"), "4.0.4")
+        self.assertIsNone(omabox.run_bounded("yes", limit=1000, shell=True))
+
     def test_a_view_folder_left_behind_goes_after_an_hour(self):
         old, new = self.runtime / "omabox-view-old", self.runtime / "omabox-view-new"
         for folder in (old, new):
@@ -5062,7 +5088,7 @@ class CopyScriptTest(unittest.TestCase):
 
     def setUp(self):
         text = (BIN.parent.parent / "Panel.qml").read_text()
-        self.command = json.loads(re.search(r"id: copyProc.*?command: (\[.*?\])\n", text, re.S).group(1))
+        self.command = ["bash", "-c", json.loads(re.search(r"id: copyProc.*?property string script: (\".*?\")\n", text, re.S).group(1))]
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, True)
 
@@ -5082,6 +5108,14 @@ printf '%s\\n' "$@" > "{self.dir}/args"; cat > "{self.dir}/text"
         args = (self.dir / "args").read_text().split("\n") if (self.dir / "args").exists() else None
         copied = (self.dir / "text").read_text() if (self.dir / "text").exists() else None
         return code, args, copied
+
+    def test_the_copy_runs_under_the_supervisor(self):
+        self.copy("x")
+        env = {"PATH": f"{self.dir}:/usr/bin:/bin", "OMABOX_COPY": "plain"}
+        out = subprocess.run(["python3", "-I", "-c", SUPERVISOR, "100", "10", "--"] + self.command, input=b"hello",
+                             env=env, capture_output=True, timeout=30).stdout
+        self.assertEqual(out, b"::exit 0")
+        self.assertEqual((self.dir / "text").read_text(), "hello")
 
     def test_notification_copy_is_sensitive_and_off_argv(self):
         code, args, copied = self.copy("Your sign-in code is 482913\n\n")

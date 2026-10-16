@@ -378,7 +378,8 @@ BarWidget {
 
   Process {
     id: archiveProc
-    command: [root.omaboxBin, "archive-notifications"]
+    command: Model.bounded([root.omaboxBin, "archive-notifications"], Model.SMALL_OUTPUT_BYTES, 60)
+    stdout: StdioCollector { waitForEnd: true }
   }
 
   // A watcher only (preload: false never reads): items.json comes in through stateReader, capped and time-limited.

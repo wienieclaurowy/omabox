@@ -12,14 +12,15 @@ import hashlib
 import html
 import html.entities
 import http.client
-import io
 import http.server
+import io
 import ipaddress
 import json
 import os
 import pwd
 import re
 import secrets
+import select
 import shlex
 import shutil
 import signal
@@ -1958,12 +1959,40 @@ def version_of(text):
     return match.group(1) if match else ""
 
 
-def installed_version(command):
+def run_bounded(command, limit=64 * 1024, seconds=10, shell=False):
+    """command's stdout, or None past limit bytes, past seconds or when it cannot start. It runs in a session of its
+    own, so a timeout ends everything it started (a shell's children too), not only its first process."""
     try:
-        out = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return version_of(out.strip().split("-")[0])
+        process = subprocess.Popen(command, shell=shell, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+    deadline, out = time.monotonic() + seconds, b""
+    with process.stdout:
+        while len(out) <= limit:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([process.stdout], [], [], left)[0]:
+                out = None
+                break
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            out += chunk
+        else:
+            out = None
+    if out is None:
+        end_session(process, grace=2)
+        return None
+    try:
+        process.wait(max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        end_session(process, grace=2)
+    return out
+
+
+def installed_version(command):
+    out = run_bounded(command, shell=True)
+    return version_of(out.decode("utf-8", "replace").strip().split("-")[0]) if out else ""
 
 
 def item_id(source, guid):
@@ -5873,6 +5902,7 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
     direct = all(direct_video(url) for url in urls)
     tokens = runtime_dir() / "omabox-ytdl"
     files, made = ytdl_tokens(urls, tokens) if direct else (relay(urls), [])
+    player, done = None, False
     try:
         ours, theirs = socket.socketpair()
         argv = (direct_players if direct else players)(files, start, ipc=theirs.fileno())
@@ -5905,17 +5935,21 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
             if player.poll() not in (None, 0):
                 sys.exit(shown(f"{argv[0]} could not play {urls[start]}"))
             if time.monotonic() > deadline:
-                player.terminate()
                 sys.exit(f"{argv[0]} opened no window")
             time.sleep(poll_every)
         print("opened", flush=True)
         if window:
             focus(window)
         player.wait()
+        done = True
         ours.close()
         while window and window in (windows() or set()):
             time.sleep(poll_every)
     finally:
+        # no window in time, or this run ended (SIGTERM from the panel's supervisor): the player and whatever it
+        # started go too, since the relay they play from ends with this process
+        if player is not None and not done:
+            end_session(player)
         # mpv reads a token's file when it reaches that video, so they go only once the player is gone
         for path in made:
             path.unlink(missing_ok=True)
