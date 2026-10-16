@@ -2797,6 +2797,7 @@ class XTokenTest(unittest.TestCase):
         (argv,) = calls
         self.assertEqual(argv[0], "notify-send")
         self.assertIn('string:omarchy-exec-argv:["omarchy-shell", "omabox", "toggleView", "sources"]', argv)
+        self.assertEqual(argv[-3:-1], ["--", "Omabox: X token rejected"])
 
 
 class NetworkWaitTest(unittest.TestCase):

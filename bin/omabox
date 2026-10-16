@@ -4217,7 +4217,7 @@ def send_notification(summary, body, view, glyph, run=subprocess.run):
         run(["notify-send", "-a", "Omabox", "-u", "normal",
              "-h", f"string:omarchy-exec-argv:{open_view}",
              "-h", f"string:omarchy-glyph:{glyph}",
-             f"Omabox: {summary}", html.escape(body, quote=False)], timeout=10, check=False)
+             "--", f"Omabox: {summary}", html.escape(body, quote=False)], timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         pass
 
