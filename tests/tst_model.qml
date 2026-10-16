@@ -44,8 +44,10 @@ TestCase {
     compare(Model.splitCliOutput("::overflow", english).text, english.t("cli.outputTooLarge"))
     compare(Model.splitCliOutput("{}::exit 0", english).text, "{}")
     var argv = Model.bounded(["head", "--", "/x"], 100, 5)
-    compare(argv.slice(0, 2), ["bash", "-c"])
-    compare(argv.slice(3), ["--", "100", "5", "head", "--", "/x"])
+    compare(argv.slice(0, 3), ["python3", "-I", "-c"])
+    verify(argv[3].indexOf("posix_spawnp") > 0)
+    compare(argv.slice(4), ["100", "5", "--", "head", "--", "/x"])
+    compare(Model.capped(["mpv"], 10).slice(4), ["10", "0", "--", "mpv"])
   }
 
   function test_notification_action_runs_only_on_the_second_o() {

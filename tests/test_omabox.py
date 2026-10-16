@@ -13,6 +13,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import socket
 import socketserver
 import subprocess
@@ -4696,6 +4697,58 @@ class FullTextFetchTest(unittest.TestCase):
 
 QMLTESTRUNNER = next((path for path in ("/usr/lib/qt6/bin/qmltestrunner", omabox.shutil.which("qmltestrunner") or "")
                       if path and Path(path).exists()), None)
+
+
+SUPERVISOR = re.search(r"var SUPERVISOR = `(.*?)`", (BIN.parent.parent / "Model.js").read_text(), re.S).group(1)
+
+
+class SupervisorTest(unittest.TestCase):
+    """Model.bounded's supervisor, run as the shell runs it."""
+
+    def run_bounded(self, argv, limit=1000, seconds=5, **kwargs):
+        return subprocess.run(["python3", "-I", "-c", SUPERVISOR, str(limit), str(seconds), "--"] + argv,
+                              capture_output=True, timeout=30, **kwargs).stdout
+
+    def test_output_exit_code_and_stdin_pass_through(self):
+        out = self.run_bounded(["sh", "-c", "cat; echo err >&2; exit 3"], input=b"args")
+        self.assertEqual(out, b"argserr\n::exit 3")
+        self.assertEqual(self.run_bounded(["omabox-no-such-command"]),
+                         b"omabox-no-such-command: No such file or directory\n::exit 127")
+
+    def test_too_much_output_or_time_ends_the_command(self):
+        self.assertEqual(self.run_bounded(["sh", "-c", "yes"], limit=100), b"::overflow")
+        started = time.monotonic()
+        self.assertEqual(self.run_bounded(["sh", "-c", "echo a; sleep 30"], seconds=0.5), b"a\n::exit 124")
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_streaming_passes_stdout_without_a_deadline(self):
+        out = self.run_bounded(["sh", "-c", "echo one; sleep 0.3; echo two"], limit=100, seconds=0)
+        self.assertEqual(out, b"one\ntwo\n")
+        self.assertEqual(self.run_bounded(["sh", "-c", "yes"], limit=100, seconds=0), b"y\n" * 50)
+
+    def test_killing_the_supervisor_ends_everything_the_command_started(self):
+        folder = Path(tempfile.mkdtemp())
+        pidfile = folder / "pid"
+        command = ["sh", "-c", 'sleep 77 & echo $! > "$0"; exec sleep 78', str(pidfile)]
+        for signum in (signal.SIGKILL, signal.SIGTERM):
+            pidfile.unlink(missing_ok=True)
+            wrapper = subprocess.Popen(["python3", "-I", "-c", SUPERVISOR, "1000", "300", "--"] + command,
+                                       stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+            deadline = time.monotonic() + 10
+            while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            child = int(pidfile.read_text())
+            group = os.getpgid(child)
+            self.assertNotEqual(group, os.getpgid(0))
+            wrapper.send_signal(signum)
+            wrapper.wait()
+            wrapper.stdout.close()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and any(
+                    int(Path(f"/proc/{entry}/stat").read_text().rsplit(")", 1)[1].split()[2]) == group
+                    for entry in os.listdir("/proc") if entry.isdigit() and Path(f"/proc/{entry}/stat").exists()):
+                time.sleep(0.05)
+            self.assertFalse(Path(f"/proc/{child}").exists(), signum)
 
 
 class ModelJsTest(unittest.TestCase):

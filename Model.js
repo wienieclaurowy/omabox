@@ -354,21 +354,162 @@ function localPath(url) {
   return decodeURIComponent(String(url).replace(/^file:\/\//, ""))
 }
 
-// Output of `bash -c '"$@" 2>&1; echo "::exit $?"'`.
-// argv's output with stderr merged and "::exit N" appended (splitCliOutput), or only "::overflow" past limit bytes. It
-// ends after seconds: TERM, then KILL 5 s later, to timeout's whole process group, so a hung CLI cannot hold a queue.
-var BOUNDED_SCRIPT = 'l=$1 s=$2; shift 2; out=$(set -o pipefail; timeout -k 5 "$s" "$@" 2>&1 | head -c $((l + 1)); r=$?; printf x; exit $r); '
-  + 'r=$?; LC_ALL=C; out=${out%x}; if [ ${#out} -gt "$l" ]; then printf ::overflow; else printf \'%s::exit %s\' "$out" "$r"; fi'
+// Supervisor for every command the shell runs and reads (python3 -I -c SUPERVISOR LIMIT SECONDS -- argv). It starts
+// argv as the leader of a process group of its own under a guard child, so the shell killing it (SIGKILL when a
+// Process goes, which no trap sees) still ends the command and everything it started: PR_SET_PDEATHSIG gives the
+// guard a SIGTERM, and the guard sends the group TERM, then KILL 10 s later or once only the leader is left. The guard
+// keeps the leader unreaped meanwhile, so the group id cannot be reused. The same happens past SECONDS, past LIMIT
+// bytes of output, on its own SIGTERM and when its parent goes.
+// SECONDS > 0: prints argv's output, stderr merged, then "::exit N" (124 past the deadline), or only "::overflow"
+// (splitCliOutput). SECONDS 0: no deadline; stdout passes through as it comes, stderr is left alone.
+// Kept free of backslashes, backticks and dollar-brace, which a template literal would change.
+var SUPERVISOR = `import os, select, signal, sys, time
+
+
+class Stop(Exception):
+    pass
+
+
+def stop(*_):
+    raise Stop
+
+
+def emit(data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(1, view):]
+
+
+def group_alive(group):
+    for entry in os.listdir("/proc"):
+        try:
+            fields = open("/proc/" + entry + "/stat").read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[2]) == group and fields[0] != "Z":
+            return True
+    return False
+
+
+def end_group(group):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except OSError:
+        return
+    until = time.monotonic() + 10
+    while time.monotonic() < until and group_alive(group):
+        time.sleep(0.05)
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def guard(parent, write_end, argv, streaming):
+    import ctypes
+    leader = None
+    try:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
+        if os.getppid() != parent:
+            raise Stop
+        actions = [(os.POSIX_SPAWN_DUP2, write_end, 1)]
+        if not streaming:
+            actions.append((os.POSIX_SPAWN_DUP2, write_end, 2))
+        try:
+            leader = os.posix_spawnp(argv[0], argv, os.environ, file_actions=actions, setpgroup=0, setsigmask=(),
+                                     setsigdef=(signal.SIGPIPE, signal.SIGXFSZ, signal.SIGTERM, signal.SIGINT))
+        except OSError as error:
+            os.write(write_end, (argv[0] + ": " + str(error.strerror) + chr(10)).encode())
+            os._exit(126 if isinstance(error, PermissionError) else 127)
+        finally:
+            os.close(write_end)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        os.waitid(os.P_PID, leader, os.WEXITED | os.WNOWAIT)
+    except Stop:
+        if leader is not None:
+            end_group(leader)
+    if leader is None:
+        os._exit(1)
+    code = os.waitstatus_to_exitcode(os.waitpid(leader, 0)[1])
+    os._exit(128 - code if code < 0 else code)
+
+
+def main():
+    limit, seconds, argv = int(sys.argv[1]), float(sys.argv[2]), sys.argv[4:]
+    streaming = seconds <= 0
+    parent, shell = os.getpid(), os.getppid()
+    read_end, write_end = os.pipe()
+    signal.signal(signal.SIGTERM, stop)
+    child = os.fork()
+    if child == 0:
+        os.close(read_end)
+        guard(parent, write_end, argv, streaming)
+    os.close(write_end)
+    done = os.pidfd_open(child)
+    deadline = None if streaming else time.monotonic() + seconds
+    out, size, ending, finished = [], 0, None, False
+    try:
+        while True:
+            wait = 1.0 if deadline is None else min(1.0, deadline - time.monotonic())
+            if wait <= 0:
+                ending = "timeout"
+                break
+            ready = select.select([read_end] + ([] if finished else [done]), [], [], wait)[0]
+            if os.getppid() != shell:
+                raise Stop
+            if done in ready:
+                finished = True
+                os.set_blocking(read_end, False)
+            if read_end not in ready and not finished:
+                continue
+            try:
+                chunk = os.read(read_end, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                if streaming:
+                    emit(chunk[:len(chunk) - (size - limit)])
+                ending = "overflow"
+                break
+            if streaming:
+                emit(chunk)
+            else:
+                out.append(chunk)
+    except (Stop, OSError):
+        ending = "stop"
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if ending:
+        try:
+            os.kill(child, signal.SIGTERM)
+        except OSError:
+            pass
+    code = os.waitstatus_to_exitcode(os.waitpid(child, 0)[1])
+    if streaming or ending == "stop":
+        return
+    try:
+        if ending == "overflow":
+            emit(b"::overflow")
+        else:
+            emit(b"".join(out) + ("::exit " + str(124 if ending == "timeout" else code)).encode())
+    except OSError:
+        pass
+
+
+main()
+`
 
 function bounded(argv, limit, seconds) {
-  return ["bash", "-c", BOUNDED_SCRIPT, "--", String(limit), String(seconds)].concat(argv)
+  return ["python3", "-I", "-c", SUPERVISOR, String(limit), String(seconds), "--"].concat(argv)
 }
 
 // For a command that runs as long as the user wants (a video player): only its output is capped.
-var CAPPED_SCRIPT = 'l=$1; shift; set -o pipefail; "$@" | head -c "$l"'
-
 function capped(argv, limit) {
-  return ["bash", "-c", CAPPED_SCRIPT, "--", String(limit)].concat(argv)
+  return bounded(argv, limit, 0)
 }
 
 // Model.bounded limits for the panel's CLI calls: bytes of output and seconds.
