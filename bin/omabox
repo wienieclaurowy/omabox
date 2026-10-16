@@ -4902,18 +4902,15 @@ def menu_select(options, prompt, call=shell_call, sleep=time.sleep, clock=time.m
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def open_in_reader(post_id, run=subprocess.run):
-    """Opens the post in the Omabox panel's reader through the bar widget's IPC; ValueError when it cannot."""
-    try:
-        result = run(["omarchy-shell", "omabox", "openPost", post_id], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ValueError(f"omarchy-shell: {error}") from None
-    answer = result.stdout.strip()
-    if result.returncode != 0 or answer not in ("reading", "opened"):
-        raise ValueError(f"Omabox panel did not open {post_id}: {answer or result.stderr.strip() or 'no answer'}")
+def open_in_reader(post_id, call=shell_call):
+    """Opens the post in the Omabox panel's reader through the bar widget's IPC, over the shell's socket: a post id in
+    argv tells every account which post is being read. ValueError when it cannot."""
+    answer = call("omabox", "openPost", post_id).strip()
+    if answer not in ("reading", "opened"):
+        raise ValueError(f"Omabox panel did not open {post_id}: {answer or 'no answer'}")
 
 
-def pick_post(query="", run=subprocess.run, select=menu_select, timeout=PICK_TIMEOUT, state=None, now=None):
+def pick_post(query="", call=shell_call, select=menu_select, timeout=PICK_TIMEOUT, state=None, now=None):
     """Shows the posts matching query in the Omarchy menu and opens the chosen one in the reader. Returns its id,
     or None when the menu was cancelled. ValueError explains a failure."""
     items = search_items((load_state() if state is None else state)["items"], query)
@@ -4924,7 +4921,7 @@ def pick_post(query="", run=subprocess.run, select=menu_select, timeout=PICK_TIM
     picked = select(options, prompt, timeout=timeout)
     post_id = pick_selection(picked, ids) if picked else None
     if post_id:
-        open_in_reader(post_id, run)
+        open_in_reader(post_id, call)
     return post_id
 
 

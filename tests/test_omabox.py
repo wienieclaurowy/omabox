@@ -4881,12 +4881,14 @@ class SearchPickTest(unittest.TestCase):
         self.assertEqual(omabox.menu_text("x" * 50, 10), "xxxxxxxxx…")
 
     def menu(self, answer):
-        """A fake shell: the summon (over the shell's socket, call) answers like the menu (writes the selection,
-        touches done); openPost (omarchy-shell, run) records the id."""
+        """A fake shell socket: the summon answers like the menu (writes the selection, touches done); openPost
+        records the id."""
         calls = []
 
         def call(target, function, *args):
             calls.append([target, function, *args])
+            if function == "openPost":
+                return "reading"
             self.assertEqual([target, function, args[0]], ["shell", "summon", "omarchy.menu"])
             payload = json.loads(args[1])
             self.assertEqual(payload["mode"], "select")
@@ -4898,31 +4900,25 @@ class SearchPickTest(unittest.TestCase):
                 Path(payload["doneFile"]).touch()
             return "ok"
 
-        def run(argv, **kwargs):
-            calls.append(argv)
-            return type("Done", (), {"returncode": 0, "stdout": "reading\n", "stderr": ""})()
-
-        return call, run, calls
+        return call, calls
 
     def pick(self, answer, query="", **kwargs):
         self.runtime = Path(tempfile.mkdtemp())
-        call, run, calls = self.menu(answer)
+        call, calls = self.menu(answer)
 
         def select(options, prompt, timeout):
             return omabox.menu_select(options, prompt, call, sleep=lambda s: None, timeout=timeout,
                                       runtime_dir=self.runtime, **kwargs)
 
-        picked = omabox.pick_post(query, run, select, state={"items": self.items()}, now=self.NOW)
+        picked = omabox.pick_post(query, call, select, state={"items": self.items()}, now=self.NOW)
         self.assertEqual(list(self.runtime.iterdir()), [])
         return picked, calls
 
     def test_pick_opens_the_chosen_post_in_the_reader(self):
         picked, calls = self.pick(lambda options: options[1].split("\t", 1)[1], "omarchy")
         self.assertEqual(picked, "mid")
-        self.assertEqual(calls[-1], ["omarchy-shell", "omabox", "openPost", "mid"])
+        self.assertEqual(calls[-1], ["omabox", "openPost", "mid"])
         self.assertEqual(json.loads(calls[0][3])["prompt"], "Omabox: omarchy")
-        # titles and sources travel over the socket only; the one command run carries the post id alone
-        self.assertEqual([argv for argv in calls if argv[0] == "omarchy-shell"], [calls[-1]])
 
     def test_cancel_and_timeout_open_nothing(self):
         picked, calls = self.pick(lambda options: None)

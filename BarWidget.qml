@@ -120,7 +120,7 @@ BarWidget {
     for (var k = 0; k < items.length; k++) if (items[k].id === id) shown = true
     if (!shown) {
       for (var c = 0; c < copies.length; c++) if (copies[c]) copies[c].override([id], { snoozed_until: "" })
-      Quickshell.execDetached([omaboxBin, "unsnooze", id])
+      runWrite(["unsnooze", id])
     }
     for (var i = 0; i < copies.length; i++) {
       var panel = copies[i] && copies[i].panelItem ? copies[i].panelItem() : null
@@ -148,18 +148,53 @@ BarWidget {
   function markRead(ids) {
     if (!ids || ids.length === 0) return
     override(ids, { read: true })
-    Quickshell.execDetached([omaboxBin, "read"].concat(ids))
+    runWrite(["read"].concat(ids))
   }
 
   function snooze(item, until) {
     override([item.id], { snoozed_until: until })
-    Quickshell.execDetached([omaboxBin, "snooze", item.id, "--until", until])
+    runWrite(["snooze", item.id, "--until", until])
   }
 
   function toggleLater(item) {
     var later = !item.later
     override([item.id], { later: later })
-    Quickshell.execDetached([omaboxBin, "later", item.id, later ? "--on" : "--off"])
+    runWrite(["later", item.id, later ? "--on" : "--off"])
+  }
+
+  // CLI writes for the posts the user reads, snoozes and saves, one at a time and in order, on the state owner. Their
+  // arguments go on stdin (--args-on-stdin): post ids in argv would tell every account what the user reads.
+  property var writeQueue: []
+
+  function runWrite(args) {
+    if (!ownsState) {
+      stateOwner.runWrite(args)
+      return
+    }
+    writeQueue = writeQueue.concat([args])
+    nextWrite()
+  }
+
+  function nextWrite() {
+    if (writeProc.running || writeQueue.length === 0) return
+    writeProc.stdinArgs = JSON.stringify(writeQueue[0]) + "\n"
+    writeQueue = writeQueue.slice(1)
+    writeProc.stdinEnabled = true
+    writeProc.running = true
+  }
+
+  Process {
+    id: writeProc
+    property string stdinArgs: ""
+    command: Model.bounded([root.omaboxBin, "--args-on-stdin"], Model.SMALL_OUTPUT_BYTES, 120)
+    // Turning stdin off closes it after the one line.
+    onStarted: {
+      write(stdinArgs)
+      stdinArgs = ""
+      stdinEnabled = false
+    }
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: Qt.callLater(root.nextWrite)
   }
 
   function markAllRead() {

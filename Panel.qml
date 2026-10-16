@@ -619,8 +619,9 @@ Panel {
 
   function fetchReplies(post, refresh) {
     root.repliesLoadingId = post.id
-    repliesProc.command = Model.bounded([root.omaboxBin, "replies", "--json"].concat(refresh ? ["--refresh"] : [], ["--", post.id]),
-      Model.CLI_OUTPUT_BYTES, 300)
+    repliesProc.command = Model.bounded([root.omaboxBin, "--args-on-stdin"], Model.CLI_OUTPUT_BYTES, 300)
+    repliesProc.stdinArgs = JSON.stringify(["replies", "--json"].concat(refresh ? ["--refresh"] : [], ["--", post.id])) + "\n"
+    repliesProc.stdinEnabled = true
     repliesProc.running = true
   }
 
@@ -1448,6 +1449,12 @@ Panel {
 
   Process {
     id: repliesProc
+    property string stdinArgs: ""
+    onStarted: {
+      write(stdinArgs)
+      stdinArgs = ""
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
