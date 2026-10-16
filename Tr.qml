@@ -14,6 +14,7 @@ QtObject {
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
   readonly property string omarchyPath: Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy"
   readonly property string catalogDir: String(Qt.resolvedUrl("i18n")).replace(/^file:\/\//, "")
+  readonly property string languagePath: Quickshell.env("OMARCHY_LANGUAGE_FILE") || (root.configHome + "/omarchy/language")
 
   property string language: "en"
   readonly property string baseLanguage: language.split("-")[0]
@@ -97,8 +98,9 @@ QtObject {
 
   // FileView reports a load on a later event-loop turn, which would leave
   // the first frame showing raw keys; text() with blockLoading reads now.
+  // The language file comes later, through languageReader.
   Component.onCompleted: {
-    root.setLanguage(languageFile.text())
+    root.readLanguage()
     root.applyRegistry(registryFile.text())
     root.englishStrings = root.parseCatalog(englishFile.text())
     if (baseFile.path !== "") root.baseStrings = root.parseCatalog(baseFile.text())
@@ -106,14 +108,33 @@ QtObject {
     root.rebuildStrings()
   }
 
+  // Another program's file, so a watcher only (preload: false never reads): a FIFO or a huge file there must not
+  // reach the shell's GUI thread. languageReader reads it capped and time-limited.
   property FileView languageFile: FileView {
-    path: Quickshell.env("OMARCHY_LANGUAGE_FILE") || (root.configHome + "/omarchy/language")
+    path: root.languagePath
+    preload: false
     watchChanges: true
     printErrors: false
-    blockLoading: true
-    onLoaded: root.setLanguage(text())
-    onLoadFailed: root.setLanguage("")
-    onFileChanged: reload()
+    onFileChanged: root.readLanguage()
+  }
+
+  property bool languageStale: false
+
+  function readLanguage() {
+    if (languageReader.running) root.languageStale = true
+    else languageReader.running = true
+  }
+
+  property Process languageReader: Process {
+    command: ["timeout", "-k", "1", "2", "head", "-c", "16", "--", root.languagePath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.setLanguage(text)
+    }
+    onExited: if (root.languageStale) {
+      root.languageStale = false
+      Qt.callLater(root.readLanguage)
+    }
   }
 
   // Edge only; on stable the defaults above stand.

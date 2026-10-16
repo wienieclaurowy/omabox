@@ -1473,13 +1473,37 @@ Panel {
     }
   }
 
+  // Omarchy's file, so a watcher only (preload: false never reads): dndReader reads it capped and time-limited.
   FileView {
     path: root.notificationSettingsPath
+    preload: false
     watchChanges: true
     printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      try { root.dnd = JSON.parse(text()).dnd === true } catch (e) {}
+    onFileChanged: root.readDnd()
+    Component.onCompleted: root.readDnd()
+  }
+
+  property bool dndStale: false
+
+  function readDnd() {
+    if (dndReader.running) dndStale = true
+    else dndReader.running = true
+  }
+
+  Process {
+    id: dndReader
+    command: Model.bounded(["head", "-c", String(Model.SMALL_OUTPUT_BYTES + 1), "--", root.notificationSettingsPath],
+                           Model.SMALL_OUTPUT_BYTES, 5)
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = Model.splitCliOutput(text, Tr)
+        if (result.code === 0) try { root.dnd = JSON.parse(result.text).dnd === true } catch (e) {}
+      }
+    }
+    onExited: if (root.dndStale) {
+      root.dndStale = false
+      Qt.callLater(root.readDnd)
     }
   }
 
