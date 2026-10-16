@@ -117,7 +117,7 @@ NOTES = [
     ("Calendar", "Design review in 10 minutes", "Room 3 and on video. Bring the sketches from Tuesday.", 12, ""),
     ("Signal", "Mira", "Are we still on for climbing on Saturday?", 35, ""),
     ("Steam", "Download complete", "Ostriv is ready to play.", 80, ""),
-    ("Omabox", "Omabox: 6 new posts", "Lantern, Field Notes, Quarry Bench, Ada Lumen on X, Fernwick, Hacker News", 40, "󰚇"),
+    ("Omabox", "Omabox: 6 new posts", "from 6 sources", 40, "󰚇"),
     ("Battery", "Headphones at 15%", "About two hours of listening left.", 190, ""),
     ("Thunderbird", "Invoice 2026-10", "Your hosting invoice is ready. Nothing to pay: it is covered by credit.", 300, ""),
     ("Updates", "System up to date", "42 packages updated. No restart needed.", 520, ""),
