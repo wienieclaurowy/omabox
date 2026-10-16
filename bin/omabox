@@ -70,6 +70,8 @@ VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source", "wbr"}
 
 
 MAX_OPEN_TAGS = 64
+# links longer than this are dropped, so a post's markup cannot grow by its links and their escaping
+MAX_LINK_CHARS = 2048
 
 
 class Sanitizer(HTMLParser):
@@ -108,7 +110,7 @@ class Sanitizer(HTMLParser):
             self.text.append("\n")
         elif tag == "a":
             href = dict(attrs).get("href") or ""
-            if href.startswith(("https://", "http://")):
+            if href.startswith(("https://", "http://")) and len(href) <= MAX_LINK_CHARS:
                 self.open("a", f'<a href="{html.escape(href, quote=True)}">')
             else:
                 self.open("a-dropped", "")
@@ -188,6 +190,8 @@ CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "omabox"
 IMAGE_DIR = CACHE_DIR / "images"
 ICON_DIR = CACHE_DIR / "icons"
 MAX_IMAGES_PER_ITEM = 12
+# links standing in for pictures and videos that are not shown; past these the rest are left out
+MAX_PLACEHOLDERS_PER_ITEM = 24
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_ICON_BYTES = 256 * 1024
 TRACKING_PIXEL_MAX = 2
@@ -540,7 +544,7 @@ class ImageFetcher:
         self.base_url = base_url
         self.fetch = fetch
         self.directory = Path(directory or IMAGE_DIR)
-        self.count = self.avatars = self.pixels = 0
+        self.count = self.avatars = self.pixels = self.placeholders = 0
 
     def within_budget(self, picture):
         """Charges the picture's pixels to the post; False once MAX_PIXELS_PER_ITEM would be passed."""
@@ -556,6 +560,13 @@ class ImageFetcher:
             src = urllib.parse.urljoin(self.base_url, src)
         return src if src.startswith(("https://", "http://")) else ""
 
+    def placeholder(self, src, label):
+        """A link to what is not shown, or "" past MAX_PLACEHOLDERS_PER_ITEM or for a link past MAX_LINK_CHARS."""
+        if self.placeholders >= MAX_PLACEHOLDERS_PER_ITEM or len(src) > MAX_LINK_CHARS:
+            return ""
+        self.placeholders += 1
+        return f'<p><a href="{html.escape(src, quote=True)}">{label}</a></p>'
+
     def __call__(self, attrs):
         src = self.absolute(attrs.get("src"))
         if not src:
@@ -563,21 +574,20 @@ class ImageFetcher:
         width, height = declared_size(attrs, "width"), declared_size(attrs, "height")
         if (width is not None and width <= TRACKING_PIXEL_MAX) or (height is not None and height <= TRACKING_PIXEL_MAX):
             return ""
-        placeholder = f'<p><a href="{html.escape(src, quote=True)}">▢ image</a></p>'
         if self.count >= MAX_IMAGES_PER_ITEM:
-            return placeholder
+            return self.placeholder(src, "▢ image")
         self.count += 1
         try:
             picture = cache_image(src, self.fetch, self.directory, MAX_IMAGE_BYTES)
         except Exception:
-            return placeholder
+            picture = None
         if picture is None:
-            return placeholder
+            return self.placeholder(src, "▢ image")
         name, w, h = picture
         if w <= TRACKING_PIXEL_MAX or h <= TRACKING_PIXEL_MAX:
             return ""
         if not self.within_budget(picture):
-            return placeholder
+            return self.placeholder(src, "▢ image")
         return f'<p><img src="omabox-img:{name}" width="{w}" height="{h}"></p>'
 
     def avatar(self, src):
@@ -600,11 +610,12 @@ class ImageFetcher:
         src = self.absolute(attrs.get("src"))
         if not src:
             return ""
+        if len(src) > MAX_LINK_CHARS:
+            return ""
         href = html.escape(src, quote=True)
-        placeholder = f'<p><a href="{href}">▶ video</a></p>'
         posters = [url for url in (self.absolute(attrs.get("poster")), self.absolute(attrs.get("fallback"))) if url]
         if not posters or not src.startswith("https://") or self.count >= MAX_IMAGES_PER_ITEM:
-            return placeholder
+            return self.placeholder(src, "▶ video")
         self.count += 1
         picture = None
         for poster in posters:
@@ -615,7 +626,7 @@ class ImageFetcher:
             if picture:
                 break
         if picture is None or not self.within_budget(picture):
-            return placeholder
+            return self.placeholder(src, "▶ video")
         name, w, h = picture
         return f'<p><a href="{href}"><img src="omabox-poster:{name}" width="{w}" height="{h}"></a></p>'
 
@@ -1272,7 +1283,7 @@ def fetch_article(url, title="", fetch=download_public, image_fetch=download_lim
     while EMPTY_BLOCK_RE.search(body):
         body = EMPTY_BLOCK_RE.sub("", body)
     body, summary, minutes = structure(body, text)
-    return {"full_html": linkify(body), "full_summary": summary, "full_minutes": minutes}
+    return {"full_html": capped_html(linkify(body)), "full_summary": summary, "full_minutes": minutes}
 
 
 def article_error(error):
@@ -2204,11 +2215,28 @@ def stored_posts(state, source, entries):
 
 MAX_ENTRY_TITLE = 1000
 MAX_ENTRY_HTML = 1_000_000
+# what one stored html field (a post, its article or its replies) keeps; items.json is parsed inside the shell
+MAX_STORED_HTML = 1_000_000
+ENTITY_TAIL_RE = re.compile(r"&[#\w]{0,10}$")
+
+
+def capped_html(markup, limit=MAX_STORED_HTML):
+    """markup cut to limit characters, before a tag or character reference the cut would split; Qt's rich text
+    closes the tags left open."""
+    if len(markup) <= limit:
+        return markup
+    cut = markup[:limit]
+    if cut.rfind("<") > cut.rfind(">"):
+        cut = cut[:cut.rfind("<")]
+    return ENTITY_TAIL_RE.sub("", cut)
 
 
 def capped_entry(entry):
-    """The entry with its title and html (a quoted post's too) cut to what items.json, which the shell parses, keeps."""
+    """The entry with its title and html (a quoted post's too) cut to what items.json, which the shell parses, keeps,
+    and a link past MAX_LINK_CHARS dropped."""
     entry = {**entry, "title": (entry.get("title") or "")[:MAX_ENTRY_TITLE], "html": (entry.get("html") or "")[:MAX_ENTRY_HTML]}
+    if len(entry.get("link") or "") > MAX_LINK_CHARS:
+        entry["link"] = ""
     if entry.get("quote"):
         entry["quote"] = {**entry["quote"], "html": (entry["quote"].get("html") or "")[:MAX_ENTRY_HTML]}
     return entry
@@ -2248,6 +2276,7 @@ def prepare_merge(state, source, entries, fetched_at, images=None, mentions_base
         if entry.get("quote"):
             body = TRAILING_BREAKS_RE.sub("", body)
             body += quote_markup(entry["quote"], fetcher, mentions_base)
+        body = capped_html(body)
         title = excerpt(text, 110) if short else (entry["title"] or excerpt(text, 80) or "(untitled)")
         shaped = {"html": body, "excerpt": "" if short else excerpt(text), "summary": summary, "minutes": minutes,
                   "short": short, "title": title, "media": MEDIA_VERSION}
@@ -5072,7 +5101,7 @@ def replies_markup(threads, author, fetched, images=None, avatars=None, site="X"
     for first, *rest in threads:
         children = "".join(comment_markup(reply, author, images, avatars, 2) for reply in rest)
         parts.append(comment_markup(first, author, images, avatars, 1, children))
-    return "".join(parts)
+    return capped_html("".join(parts))
 
 
 def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session, image_fetch=download_limited):

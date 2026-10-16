@@ -199,6 +199,11 @@ class SanitizeTest(unittest.TestCase):
         self.assertEqual(body, "<p>Hi link</p>")
         self.assertEqual(text, "Hi link")
 
+    def test_drops_links_past_the_length_cap(self):
+        long = "https://a.example/" + "'" * omabox.MAX_LINK_CHARS
+        body, _ = omabox.sanitize(f'<a href="{long}">x</a> <a href="https://a.example/ok">y</a>')
+        self.assertEqual(body, 'x <a href="https://a.example/ok">y</a>')
+
     def test_keeps_http_links_and_flattens_headings(self):
         body, _ = omabox.sanitize('<h2>Fixes</h2><a href="https://a.b/?q=1&amp;r=2">x</a>')
         self.assertEqual(body, '<p class="h">Fixes</p><a href="https://a.b/?q=1&amp;r=2">x</a>')
@@ -1275,6 +1280,27 @@ class ImageTest(unittest.TestCase):
         body, _ = omabox.sanitize(tags, self.fetcher())
         self.assertEqual(body.count("<img"), omabox.MAX_IMAGES_PER_ITEM)
         self.assertEqual(body.count("▢ image"), 2)
+
+    def test_pictures_not_shown_leave_few_short_links(self):
+        link = "https://feed.example/" + "p" * omabox.MAX_LINK_CHARS + "/"
+        body, _ = omabox.sanitize("<img src=a>" * 20000, omabox.ImageFetcher(link, self.fetch, self.dir))
+        self.assertEqual(body.count("▢ image"), 0)
+        body, _ = omabox.sanitize("<img src=a>" * 20000, self.fetcher())
+        self.assertEqual(body.count("▢ image"), omabox.MAX_PLACEHOLDERS_PER_ITEM)
+        self.assertLess(len(body), 4000)
+
+    def test_stored_html_is_capped_between_tags(self):
+        self.assertEqual(omabox.capped_html("<p>ab</p>", 100), "<p>ab</p>")
+        self.assertEqual(omabox.capped_html("<p>abc</p><b>x</b>", 12), "<p>abc</p>")
+        self.assertEqual(omabox.capped_html("<p>a &amp; b</p>", 7), "<p>a ")
+        self.assertEqual(omabox.capped_html("<p>abcdef", 6), "<p>abc")
+        entries = [{"guid": "g", "title": "Long", "link": "https://blog.example/" + "x" * 3000, "published": "2026-01-01T00:00:00Z",
+                    "html": "<p>" + "word " * 190_000 + "</p><p>" + "&lt;more&gt; " * 50_000 + "</p>"}]
+        state = {"items": []}
+        omabox.prepare_merge(state, "Blog", entries, "2026-01-02T00:00:00Z")(state)
+        (item,) = state["items"]
+        self.assertLessEqual(len(item["html"]), omabox.MAX_STORED_HTML)
+        self.assertEqual(item["link"], "")
 
     def test_without_hook_images_are_dropped(self):
         body, _ = omabox.sanitize('<img src="https://blog.example/a.png">')
