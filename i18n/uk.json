@@ -344,26 +344,5 @@
     "few": "Вставте новий в Omabox: «Джерела», потім t. Чекають %1 джерела X.",
     "many": "Вставте новий в Omabox: «Джерела», потім t. Чекають %1 джерел X.",
     "other": "Вставте новий в Omabox: «Джерела», потім t. Чекають %1 джерела X."
-  },
-  "pick.prompt": "Дописи Omabox",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(без назви)",
-  "pick.post": "допис",
-  "pick.unread": "непрочитано",
-  "pick.readLater": "прочитати пізніше",
-  "pick.snoozed": "відкладено",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "січ.",
-  "month.feb": "лют.",
-  "month.mar": "бер.",
-  "month.apr": "квіт.",
-  "month.may": "трав.",
-  "month.jun": "черв.",
-  "month.jul": "лип.",
-  "month.aug": "серп.",
-  "month.sep": "вер.",
-  "month.oct": "жовт.",
-  "month.nov": "лист.",
-  "month.dec": "груд."
+  }
 }

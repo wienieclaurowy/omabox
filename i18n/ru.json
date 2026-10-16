@@ -344,26 +344,5 @@
     "few": "Вставьте новый в Omabox: «Источники», затем t. Ждут %1 источника X.",
     "many": "Вставьте новый в Omabox: «Источники», затем t. Ждут %1 источников X.",
     "other": "Вставьте новый в Omabox: «Источники», затем t. Ждут %1 источника X."
-  },
-  "pick.prompt": "Записи Omabox",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(без названия)",
-  "pick.post": "запись",
-  "pick.unread": "непрочитано",
-  "pick.readLater": "прочитать позже",
-  "pick.snoozed": "отложено",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "янв.",
-  "month.feb": "февр.",
-  "month.mar": "марта",
-  "month.apr": "апр.",
-  "month.may": "мая",
-  "month.jun": "июня",
-  "month.jul": "июля",
-  "month.aug": "авг.",
-  "month.sep": "сент.",
-  "month.oct": "окт.",
-  "month.nov": "нояб.",
-  "month.dec": "дек."
+  }
 }

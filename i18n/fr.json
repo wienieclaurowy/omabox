@@ -324,26 +324,5 @@
     "one": "Collez-en un nouveau dans Omabox : Sources, puis t. %1 source X en attente.",
     "many": "Collez-en un nouveau dans Omabox : Sources, puis t. %1 de sources X en attente.",
     "other": "Collez-en un nouveau dans Omabox : Sources, puis t. %1 sources X en attente."
-  },
-  "pick.prompt": "Articles Omabox",
-  "pick.promptQuery": "Omabox : %1",
-  "pick.untitled": "(sans titre)",
-  "pick.post": "article",
-  "pick.unread": "non lu",
-  "pick.readLater": "à lire plus tard",
-  "pick.snoozed": "reporté",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "janv.",
-  "month.feb": "févr.",
-  "month.mar": "mars",
-  "month.apr": "avr.",
-  "month.may": "mai",
-  "month.jun": "juin",
-  "month.jul": "juil.",
-  "month.aug": "août",
-  "month.sep": "sept.",
-  "month.oct": "oct.",
-  "month.nov": "nov.",
-  "month.dec": "déc."
+  }
 }

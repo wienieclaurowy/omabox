@@ -304,26 +304,5 @@
   "notify.xTokenWaiting": {
     "one": "Paste a new one in Omabox: Sources, then t. %1 X source waiting.",
     "other": "Paste a new one in Omabox: Sources, then t. %1 X sources waiting."
-  },
-  "pick.prompt": "Omabox posts",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(untitled)",
-  "pick.post": "post",
-  "pick.unread": "unread",
-  "pick.readLater": "read later",
-  "pick.snoozed": "snoozed",
-  "pick.date": "%1 %2",
-  "pick.dateYear": "%1 %2 %3",
-  "month.jan": "Jan",
-  "month.feb": "Feb",
-  "month.mar": "Mar",
-  "month.apr": "Apr",
-  "month.may": "May",
-  "month.jun": "Jun",
-  "month.jul": "Jul",
-  "month.aug": "Aug",
-  "month.sep": "Sep",
-  "month.oct": "Oct",
-  "month.nov": "Nov",
-  "month.dec": "Dec"
+  }
 }

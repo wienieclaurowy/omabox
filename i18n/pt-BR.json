@@ -324,26 +324,5 @@
     "one": "Cole um novo no Omabox: Fontes, depois t. %1 fonte do X aguardando.",
     "many": "Cole um novo no Omabox: Fontes, depois t. %1 de fontes do X aguardando.",
     "other": "Cole um novo no Omabox: Fontes, depois t. %1 fontes do X aguardando."
-  },
-  "pick.prompt": "Posts do Omabox",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(sem título)",
-  "pick.post": "post",
-  "pick.unread": "não lido",
-  "pick.readLater": "ler depois",
-  "pick.snoozed": "adiado",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "jan",
-  "month.feb": "fev",
-  "month.mar": "mar",
-  "month.apr": "abr",
-  "month.may": "mai",
-  "month.jun": "jun",
-  "month.jul": "jul",
-  "month.aug": "ago",
-  "month.sep": "set",
-  "month.oct": "out",
-  "month.nov": "nov",
-  "month.dec": "dez"
+  }
 }

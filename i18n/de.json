@@ -304,26 +304,5 @@
   "notify.xTokenWaiting": {
     "one": "Füge in Omabox einen neuen ein: Quellen, dann t. %1 X-Quelle wartet.",
     "other": "Füge in Omabox einen neuen ein: Quellen, dann t. %1 X-Quellen warten."
-  },
-  "pick.prompt": "Omabox-Beiträge",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(ohne Titel)",
-  "pick.post": "Beitrag",
-  "pick.unread": "ungelesen",
-  "pick.readLater": "später lesen",
-  "pick.snoozed": "zurückgestellt",
-  "pick.date": "%2. %1",
-  "pick.dateYear": "%2. %1 %3",
-  "month.jan": "Jan.",
-  "month.feb": "Feb.",
-  "month.mar": "März",
-  "month.apr": "Apr.",
-  "month.may": "Mai",
-  "month.jun": "Juni",
-  "month.jul": "Juli",
-  "month.aug": "Aug.",
-  "month.sep": "Sep.",
-  "month.oct": "Okt.",
-  "month.nov": "Nov.",
-  "month.dec": "Dez."
+  }
 }

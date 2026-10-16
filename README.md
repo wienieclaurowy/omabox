@@ -95,7 +95,7 @@ A few things are only in the command:
 
 - `omabox pause 3d` holds deliveries for a while (`omabox pause off` resumes them).
 - `omabox opml export` and `omabox opml import FILE` move your sources from or to another reader.
-- `omabox pick` searches your posts from the Omarchy menu. See [docs/launcher.md](docs/launcher.md).
+- `omabox pick` opens the panel's search from the Omarchy menu or a key. See [docs/launcher.md](docs/launcher.md).
 - `omabox doctor` checks the setup and lists any feeds that failed.
 
 Run `omabox --help` for the full list.

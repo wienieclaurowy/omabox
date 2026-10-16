@@ -248,12 +248,15 @@ Panel {
     root.query = ""
     var requestedRead = hostWidget ? hostWidget.takeRequestedRead() : -1
     var requestedPost = hostWidget ? hostWidget.takeRequestedPost() : ""
+    var requestedSearch = hostWidget && typeof hostWidget.takeRequestedSearch === "function" ? hostWidget.takeRequestedSearch() : null
+    root.picking = false
     showView(requested || "feed")
     loadDelivery()
     // Every open, whatever the view: switching to Notifications must not show the previous list first.
     refreshNotifications()
     // The notification list loads asynchronously; its reader opens once the list arrives.
     if (requestedPost) openPostById(requestedPost)
+    else if (requestedSearch !== null) pickSearch(requestedSearch)
     else if (requestedRead >= 0 && root.view === "notifications") root.pendingRead = requestedRead
     else if (requestedRead >= 0) openReader(requestedRead)
     root.controller.show()
@@ -261,6 +264,7 @@ Panel {
 
   function close() {
     if (typing) focusCatcher()
+    root.picking = false
     root.mode = "list"
     root.controller.hide()
   }
@@ -699,7 +703,29 @@ Panel {
     root.cursor = 0
   }
 
+  // `omabox pick`: the search works as a launcher does. The arrows move while typing, Enter opens the post under the
+  // cursor in the reader and Escape closes the panel.
+  property bool picking: false
+
+  function pickSearch(query) {
+    showView("feed")
+    clearFilters()
+    root.picking = true
+    root.query = Model.spliceField("", 0, 0, query, searchField.maxChars).text
+    startSearch()
+  }
+
+  function pickCurrent() {
+    var item = feedItemAt(root.cursor)
+    if (!item || !item.id) return
+    root.picking = false
+    root.mode = "list"
+    focusCatcher()
+    openPostById(item.id)
+  }
+
   function endSearch(keep) {
+    root.picking = false
     if (!keep) root.query = ""
     root.mode = "list"
     root.cursor = 0
@@ -1787,8 +1813,19 @@ Panel {
             font.family: root.fontFamily
             onTextChanged: if (root.mode === "search") { root.query = text; root.cursor = 0 }
             Keys.onPressed: function(event) {
-              if (event.key === Qt.Key_Escape) { root.endSearch(false); event.accepted = true }
-              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.endSearch(true); event.accepted = true }
+              if (root.picking && (event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
+                root.moveCursor(event.key === Qt.Key_Up ? -1 : 1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Escape) {
+                var picked = root.picking
+                root.endSearch(false)
+                if (picked) root.close()
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (root.picking) root.pickCurrent()
+                else root.endSearch(true)
+                event.accepted = true
+              }
             }
           }
 

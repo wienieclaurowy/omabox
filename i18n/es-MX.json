@@ -324,26 +324,5 @@
     "one": "Pega uno nuevo en Omabox: Fuentes, luego t. %1 fuente de X en espera.",
     "many": "Pega uno nuevo en Omabox: Fuentes, luego t. %1 de fuentes de X en espera.",
     "other": "Pega uno nuevo en Omabox: Fuentes, luego t. %1 fuentes de X en espera."
-  },
-  "pick.prompt": "Publicaciones de Omabox",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(sin título)",
-  "pick.post": "publicación",
-  "pick.unread": "sin leer",
-  "pick.readLater": "leer después",
-  "pick.snoozed": "pospuesta",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "ene",
-  "month.feb": "feb",
-  "month.mar": "mar",
-  "month.apr": "abr",
-  "month.may": "may",
-  "month.jun": "jun",
-  "month.jul": "jul",
-  "month.aug": "ago",
-  "month.sep": "sep",
-  "month.oct": "oct",
-  "month.nov": "nov",
-  "month.dec": "dic"
+  }
 }

@@ -1,21 +1,19 @@
 # Searching posts from the Omarchy menu
 
-`omabox pick [QUERY]` shows the newest 300 posts that match QUERY in the
-Omarchy menu's select mode. Without a query, it shows all posts. Each row is
-the post title, with the source and date underneath. Unread posts have a `●`
-and read-later posts have a bookmark. The post you pick opens in the Omabox
-reader. Filter, search and snooze are cleared so the post is visible. Press
-Escape to close the menu without opening anything.
+`omabox pick [QUERY]` opens the Omabox panel's search with QUERY already
+typed, and works like a launcher: type to filter the posts, move with the arrow
+keys, and press Enter to open the highlighted post in the reader. Press Escape
+to close the panel without opening anything. The search clears the panel's
+source filter and finds the query in a post's title, source and opening text.
+Snoozed posts are not in the panel's list, so it does not find them.
 
-The rows reach the menu over the shell's own IPC socket, never as command
-arguments, so other accounts on this computer cannot read them from the process
-list. The row you pick is the exception: Omarchy's menu writes it back with a
-short shell command, which other accounts can see for a moment. If you share the
-computer, use the search in the panel (`/`) instead.
+The query reaches the panel over the shell's own IPC socket, and the posts
+never leave the panel, so other accounts on this computer cannot read them from
+the process list.
 
-`omabox search [QUERY] [--json]` is the same search, printed to the terminal.
-A post matches when every word of the query appears in its title, source or
-text. Case is ignored.
+`omabox search [QUERY] [--json]` searches from the terminal instead. A post
+matches when every word of the query appears in its title, source or text.
+Case is ignored.
 
 The reader can also open a post by id over IPC:
 `omarchy-shell omabox openPost <id>`.

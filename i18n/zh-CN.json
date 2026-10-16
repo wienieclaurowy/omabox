@@ -284,26 +284,5 @@
   "notify.xTokenRejected": "X 令牌被拒绝",
   "notify.xTokenWaiting": {
     "other": "请在 Omabox 中粘贴新令牌：来源，然后按 t。有 %1 个 X 来源在等待。"
-  },
-  "pick.prompt": "Omabox 文章",
-  "pick.promptQuery": "Omabox：%1",
-  "pick.untitled": "（无标题）",
-  "pick.post": "文章",
-  "pick.unread": "未读",
-  "pick.readLater": "稍后阅读",
-  "pick.snoozed": "已推迟",
-  "pick.date": "%1%2日",
-  "pick.dateYear": "%3年%1%2日",
-  "month.jan": "1月",
-  "month.feb": "2月",
-  "month.mar": "3月",
-  "month.apr": "4月",
-  "month.may": "5月",
-  "month.jun": "6月",
-  "month.jul": "7月",
-  "month.aug": "8月",
-  "month.sep": "9月",
-  "month.oct": "10月",
-  "month.nov": "11月",
-  "month.dec": "12月"
+  }
 }

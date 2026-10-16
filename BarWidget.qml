@@ -44,6 +44,8 @@ BarWidget {
   property double requestedAt: 0
   property int requestedRead: -1
   property string requestedPost: ""
+  // `omabox pick`'s query for the opening copy's search; null: no search asked for.
+  property var requestedSearch: null
 
   function takeRequestedView() {
     var view = Date.now() - requestedAt < 3000 ? requestedView : ""
@@ -63,18 +65,25 @@ BarWidget {
     return id
   }
 
+  function takeRequestedSearch() {
+    var query = Date.now() - requestedAt < 3000 ? requestedSearch : null
+    requestedSearch = null
+    return query
+  }
+
   function peers() {
     return bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : [root]
   }
 
-  // Sets all three fields: only the opening copy consumes them, so a field left on another monitor's copy
+  // Sets all four fields: only the opening copy consumes them, so a field left on another monitor's copy
   // would turn fresh again with the next request's requestedAt.
-  function requestOpen(copies, view, read, post) {
+  function requestOpen(copies, view, read, post, search) {
     for (var j = 0; j < copies.length; j++) {
       if (!copies[j]) continue
       copies[j].requestedView = view
       copies[j].requestedRead = read
       copies[j].requestedPost = post
+      copies[j].requestedSearch = search === undefined ? null : search
       copies[j].requestedAt = Date.now()
     }
     Quickshell.execDetached(["omarchy-shell", "shell", "summon", moduleName, "{}"])
@@ -127,6 +136,18 @@ BarWidget {
       if (panel && panel.opened) return panel.openPostById(id) ? "reading" : "no post " + id
     }
     return requestOpen(copies, "feed", -1, id)
+  }
+
+  function pickPost(query) {
+    var copies = peers()
+    for (var i = 0; i < copies.length; i++) {
+      var panel = copies[i] && copies[i].panelItem ? copies[i].panelItem() : null
+      if (panel && panel.opened) {
+        panel.pickSearch(query)
+        return "searching"
+      }
+    }
+    return requestOpen(copies, "feed", -1, "", query)
   }
 
   function override(ids, fields) {
@@ -259,6 +280,11 @@ BarWidget {
     // Opens the post with this id in the reader, clearing the filter and search; `omabox pick` calls it.
     function openPost(id: string): string {
       return root.openPost(id)
+    }
+
+    // The panel's search with query typed in, picking like a launcher; `omabox pick` calls it.
+    function pick(query: string): string {
+      return root.pickPost(query)
     }
 
     // Switches the post open in the reader between its full article (fetched on first use) and its feed version.

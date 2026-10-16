@@ -4649,38 +4649,7 @@ def cmd_search(args):
         print(f"{mark} {row['id']}  {shown(row['published'][:10])}  {shown(row['source'])}: {shown(row['title'])}{flags}")
 
 
-MONTH_KEYS = ("month.jan", "month.feb", "month.mar", "month.apr", "month.may", "month.jun", "month.jul", "month.aug",
-              "month.sep", "month.oct", "month.nov", "month.dec")
-
-
-def relative_date(value, now):
-    """Model.relativeTime's wording: 5m ago, 3h ago, 2d ago, then Sep 20, or Sep 20 2025 in another year."""
-    stamp = iso_utc(value)
-    if not stamp:
-        return ""
-    then = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    minutes = int((now - then).total_seconds() // 60)
-    if minutes < 1:
-        return tr("time.justNow")
-    if minutes < 60:
-        return trn("time.minutesAgo", minutes)
-    if minutes < 24 * 60:
-        return trn("time.hoursAgo", minutes // 60)
-    if minutes < 7 * 24 * 60:
-        return trn("time.daysAgo", minutes // (24 * 60))
-    local = then.astimezone()
-    month = tr(MONTH_KEYS[local.month - 1])
-    if local.year == now.astimezone().year:
-        return tr("pick.date", month, local.day)
-    return tr("pick.dateYear", month, local.day, local.year)
-
-
-PICK_LIMIT = 300
-PICK_TIMEOUT = 600
-PICK_WIDTH = 760
-PICK_GLYPHS = {"later": "\U000f00c0", "unread": "●", "read": "○"}
 OMARCHY_MENU_PATH = HOME / ".config/omarchy/extensions/omarchy-menu.jsonc"
-MENU_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 MENU_SNIPPET = """\
 Launcher entry, for ~/.config/omarchy/extensions/omarchy-menu.jsonc (inside the outer braces):
   "omabox-search": {"icon": "\U000f0349", "label": "Omabox: search posts", "action": "omabox pick", \
@@ -4688,37 +4657,6 @@ Launcher entry, for ~/.config/omarchy/extensions/omarchy-menu.jsonc (inside the 
 
 Keybinding, for ~/.config/hypr/bindings.lua:
   o.bind("SUPER + CTRL + SHIFT + M", "Omabox search", "omabox pick")"""
-
-
-def menu_text(text, limit):
-    """One line for a menu row: a tab would split the option into glyph/label/subtext."""
-    text = " ".join(MENU_CONTROL_RE.sub(" ", str(text or "")).split())
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
-
-
-def pick_options(items, now=None, limit=PICK_LIMIT):
-    """Omarchy menu options "glyph<TAB>title<TAB>subtext" for the first `limit` posts, and the post id for each
-    "title<TAB>subtext", which is what the menu hands back (never the glyph). Same-looking rows get a counter."""
-    now = now or datetime.now(timezone.utc)
-    options, ids = [], {}
-    for item in items[:limit]:
-        label = menu_text(item.get("title"), 160) or tr("pick.untitled")
-        marks = [menu_text(item.get("source"), 60), relative_date(item.get("published"), now)]
-        marks += [word for word, on in ((tr("pick.unread"), not item.get("read")), (tr("pick.readLater"), item.get("later")),
-                                        (tr("pick.snoozed"), is_snoozed(item, now))) if on]
-        subtext = " · ".join(mark for mark in marks if mark) or tr("pick.post")
-        key, count = f"{label}\t{subtext}", 1
-        while key in ids:
-            count += 1
-            key = f"{label}\t{subtext} · {count}"
-        ids[key] = item["id"]
-        glyph = PICK_GLYPHS["later" if item.get("later") else "read" if item.get("read") else "unread"]
-        options.append(f"{glyph}\t{key}")
-    return options, ids
-
-
-def pick_selection(text, ids):
-    return ids.get(text.rstrip("\n"))
 
 
 def shell_display(runtime):
@@ -4870,64 +4808,22 @@ def shell_call(target, function, *args):
     raise ValueError("omarchy-shell is not running")
 
 
-def summon_menu(payload, call):
-    try:
-        answer = call("shell", "summon", "omarchy.menu", payload)
-    except ValueError as error:
-        raise ValueError(f"Omarchy menu unavailable: {error}") from None
-    if answer.strip() != "ok":
-        raise ValueError(f"Omarchy menu unavailable: {answer.strip() or 'no answer'}")
+# what `omabox pick` types into the panel's search field (InputField.maxChars there)
+PICK_QUERY_CHARS = 4096
 
 
-def menu_select(options, prompt, call=shell_call, sleep=time.sleep, clock=time.monotonic, timeout=PICK_TIMEOUT,
-                runtime_dir=None):
-    """The option the user picked in the Omarchy menu's select mode, without its glyph; None when the menu was
-    closed or nothing came back within timeout seconds. ValueError when the menu cannot be shown."""
-    base = runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent)
-    # The menu writes both files after the pick; removing their folder makes a pick after the timeout a no-op.
-    folder = Path(tempfile.mkdtemp(prefix="omabox-pick-", dir=base))
-    selection, done = folder / "selection", folder / "done"
-    try:
-        selection.touch()
-        payload = json.dumps({"mode": "select", "prompt": prompt, "options": options, "selectionFile": str(selection),
-                              "doneFile": str(done), "width": PICK_WIDTH}, ensure_ascii=False)
-        summon_menu(payload, call)
-        deadline = clock() + timeout
-        while not done.exists():
-            if clock() > deadline:
-                return None
-            sleep(0.05)
-        return selection.read_text(encoding="utf-8", errors="replace").rstrip("\n") or None
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-def open_in_reader(post_id, call=shell_call):
-    """Opens the post in the Omabox panel's reader through the bar widget's IPC, over the shell's socket: a post id in
-    argv tells every account which post is being read. ValueError when it cannot."""
-    answer = call("omabox", "openPost", post_id).strip()
-    if answer not in ("reading", "opened"):
-        raise ValueError(f"Omabox panel did not open {post_id}: {answer or 'no answer'}")
-
-
-def pick_post(query="", call=shell_call, select=menu_select, timeout=PICK_TIMEOUT, state=None, now=None):
-    """Shows the posts matching query in the Omarchy menu and opens the chosen one in the reader. Returns its id,
-    or None when the menu was cancelled. ValueError explains a failure."""
-    items = search_items((load_state() if state is None else state)["items"], query)
-    if not items:
-        raise ValueError(f"no posts match {query!r}" if query.strip() else "no posts yet")
-    options, ids = pick_options(items, now)
-    prompt = tr("pick.promptQuery", menu_text(query, 40)) if query.strip() else tr("pick.prompt")
-    picked = select(options, prompt, timeout=timeout)
-    post_id = pick_selection(picked, ids) if picked else None
-    if post_id:
-        open_in_reader(post_id, call)
-    return post_id
+def pick_post(query="", call=shell_call):
+    """Opens the Omabox panel's search with query typed in, as a launcher works: typing filters the posts, the arrows
+    move, Enter opens the post in the reader, Escape closes. The query goes over the shell's socket, not argv; nothing
+    of a post leaves the panel. ValueError when the panel cannot be reached."""
+    answer = call("omabox", "pick", query[:PICK_QUERY_CHARS]).strip()
+    if answer not in ("opened", "searching"):
+        raise ValueError(f"Omabox panel did not open its search: {answer or 'no answer'}")
 
 
 def cmd_pick(args):
     try:
-        pick_post(" ".join(args.query), timeout=args.timeout)
+        pick_post(" ".join(args.query))
     except ValueError as error:
         sys.exit(shown(error))
 
@@ -6225,12 +6121,11 @@ def main(argv=None):
     search.add_argument("query", nargs="*")
     search.add_argument("--json", action="store_true")
     search.set_defaults(func=cmd_search)
-    pick = sub.add_parser("pick", help="search posts in the Omarchy menu and open the chosen one in the reader",
-                          description=f"Shows the newest {PICK_LIMIT} posts matching QUERY (all without one) in the "
-                                      "Omarchy menu; the chosen post opens in the Omabox reader.",
+    pick = sub.add_parser("pick", help="search posts in the Omabox panel and open the chosen one in the reader",
+                          description="Opens the Omabox panel's search with QUERY typed in: the arrows pick a post, "
+                                      "Enter opens it in the reader, Escape closes.",
                           epilog=MENU_SNIPPET, formatter_class=argparse.RawDescriptionHelpFormatter)
     pick.add_argument("query", nargs="*")
-    pick.add_argument("--timeout", type=float, default=PICK_TIMEOUT, help="seconds to wait for a pick (default %(default)s)")
     pick.set_defaults(func=cmd_pick)
     opener = sub.add_parser("open", help="open a post's link in the browser and mark it read")
     opener.add_argument("id")

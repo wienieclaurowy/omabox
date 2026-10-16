@@ -304,26 +304,5 @@
   "notify.xTokenWaiting": {
     "one": "Plak een nieuwe in Omabox: Bronnen, dan t. %1 X-bron wacht.",
     "other": "Plak een nieuwe in Omabox: Bronnen, dan t. %1 X-bronnen wachten."
-  },
-  "pick.prompt": "Omabox-berichten",
-  "pick.promptQuery": "Omabox: %1",
-  "pick.untitled": "(zonder titel)",
-  "pick.post": "bericht",
-  "pick.unread": "ongelezen",
-  "pick.readLater": "later lezen",
-  "pick.snoozed": "uitgesteld",
-  "pick.date": "%2 %1",
-  "pick.dateYear": "%2 %1 %3",
-  "month.jan": "jan",
-  "month.feb": "feb",
-  "month.mar": "mrt",
-  "month.apr": "apr",
-  "month.may": "mei",
-  "month.jun": "jun",
-  "month.jul": "jul",
-  "month.aug": "aug",
-  "month.sep": "sep",
-  "month.oct": "okt",
-  "month.nov": "nov",
-  "month.dec": "dec"
+  }
 }

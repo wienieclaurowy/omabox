@@ -4899,82 +4899,27 @@ class SearchPickTest(unittest.TestCase):
         row = omabox.search_row(self.items()[2], self.NOW)
         self.assertEqual((row["read"], row["later"], row["snoozed"]), (False, False, True))
 
-    def test_options_carry_marks_and_map_the_menu_answer_back(self):
-        options, ids = omabox.pick_options(omabox.search_items(self.items()), self.NOW)
-        self.assertEqual(options[0], "\U000f00c0\tv4.0.4\tOmarchy · 3h ago · unread · read later")
-        self.assertEqual(options[1], "●\tOmarchy ships\tRowan on X · 1d ago · unread · snoozed")
-        self.assertTrue(options[2].startswith("○\tTiling windows\tBlog · "))
-        self.assertTrue(all(option.count("\t") == 2 for option in options))
-        self.assertEqual(omabox.pick_selection("Omarchy ships\tRowan on X · 1d ago · unread · snoozed\n", ids), "mid")
-        self.assertIsNone(omabox.pick_selection("v4.0.4", ids))
-
-    def test_same_looking_posts_stay_apart_and_the_list_is_bounded(self):
-        twins = [{"id": str(n), "source": "A", "title": "Same", "published": "2026-09-27T11:00:00Z", "read": True}
-                 for n in range(3)]
-        options, ids = omabox.pick_options(twins, self.NOW, limit=2)
-        self.assertEqual(len(options), 2)
-        self.assertEqual(sorted(ids.values()), ["0", "1"])
-        self.assertEqual(options[1], "○\tSame\tA · 1h ago · 2")
-        self.assertEqual(omabox.menu_text("x" * 50, 10), "xxxxxxxxx…")
-
-    def menu(self, answer):
-        """A fake shell socket: the summon answers like the menu (writes the selection, touches done); openPost
-        records the id."""
+    def test_pick_opens_the_panel_search_over_the_shell_socket(self):
         calls = []
 
         def call(target, function, *args):
             calls.append([target, function, *args])
-            if function == "openPost":
-                return "reading"
-            self.assertEqual([target, function, args[0]], ["shell", "summon", "omarchy.menu"])
-            payload = json.loads(args[1])
-            self.assertEqual(payload["mode"], "select")
-            self.assertTrue(payload["selectionFile"].startswith(str(self.runtime)))
-            if answer is not None:
-                picked = answer(payload["options"])
-                if picked is not None:
-                    Path(payload["selectionFile"]).write_text(picked + "\n")
-                Path(payload["doneFile"]).touch()
-            return "ok"
+            return "opened"
 
-        return call, calls
+        omabox.pick_post("omarchy ships", call)
+        self.assertEqual(calls, [["omabox", "pick", "omarchy ships"]])
+        omabox.pick_post("x" * 10_000, call)
+        self.assertEqual(len(calls[-1][2]), omabox.PICK_QUERY_CHARS)
 
-    def pick(self, answer, query="", **kwargs):
-        self.runtime = Path(tempfile.mkdtemp())
-        call, calls = self.menu(answer)
-
-        def select(options, prompt, timeout):
-            return omabox.menu_select(options, prompt, call, sleep=lambda s: None, timeout=timeout,
-                                      runtime_dir=self.runtime, **kwargs)
-
-        picked = omabox.pick_post(query, call, select, state={"items": self.items()}, now=self.NOW)
-        self.assertEqual(list(self.runtime.iterdir()), [])
-        return picked, calls
-
-    def test_pick_opens_the_chosen_post_in_the_reader(self):
-        picked, calls = self.pick(lambda options: options[1].split("\t", 1)[1], "omarchy")
-        self.assertEqual(picked, "mid")
-        self.assertEqual(calls[-1], ["omabox", "openPost", "mid"])
-        self.assertEqual(json.loads(calls[0][3])["prompt"], "Omabox: omarchy")
-
-    def test_cancel_and_timeout_open_nothing(self):
-        picked, calls = self.pick(lambda options: None)
-        self.assertIsNone(picked)
-        self.assertEqual(len(calls), 1)
-        ticks = iter(range(0, 10000, 30))
-        picked, calls = self.pick(None, clock=lambda: next(ticks))
-        self.assertIsNone(picked)
-        self.assertEqual(len(calls), 1)
-
-    def test_no_match_or_no_menu_is_an_error(self):
-        with self.assertRaises(ValueError):
-            omabox.pick_post("nothing like this", state={"items": self.items()})
+    def test_a_shell_without_the_panel_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "did not open its search: no answer"):
+            omabox.pick_post("", lambda *args: "")
 
         def down(*args):
             raise ValueError("omarchy-shell is not running")
 
-        with self.assertRaisesRegex(ValueError, "Omarchy menu unavailable: omarchy-shell is not running"):
-            omabox.menu_select(["x"], "p", down, runtime_dir=Path(tempfile.mkdtemp()))
+        with self.assertRaisesRegex(ValueError, "omarchy-shell is not running"):
+            omabox.pick_post("", down)
 
 
 class RowsTest(unittest.TestCase):
