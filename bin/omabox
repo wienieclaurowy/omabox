@@ -12,6 +12,7 @@ import hashlib
 import html
 import html.entities
 import http.client
+import io
 import http.server
 import ipaddress
 import json
@@ -259,7 +260,91 @@ def public_host(url):
         return False
 
 
-def connect_checked(address, timeout, source_address, public):
+class Deadline:
+    """One wall-clock limit for a request, from connect through the status line, headers and body to the last byte,
+    redirects included. Socket timeouts count per read, so without it a server sending a byte every few seconds holds
+    a request for days. at = None lifts it (a video relay streams for as long as the video plays)."""
+
+    def __init__(self, seconds):
+        self.at = time.monotonic() + seconds
+
+    def left(self, per_read=None):
+        """Seconds the next socket operation may take: what is left, or per_read when that is shorter."""
+        if self.at is None:
+            return per_read
+        left = self.at - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the server took too long to answer")
+        return left if per_read is None else min(left, per_read)
+
+
+# for a request whose caller gave it none (within)
+REQUEST_SECONDS = 60
+
+
+def within(request, seconds):
+    """request with a Deadline of seconds starting now."""
+    request.deadline = Deadline(seconds)
+    return request
+
+
+def request_deadline(req):
+    if getattr(req, "deadline", None) is None:
+        req.deadline = Deadline(REQUEST_SECONDS)
+    return req.deadline
+
+
+def per_read(timeout):
+    return None if timeout is socket._GLOBAL_DEFAULT_TIMEOUT else timeout
+
+
+class DeadlineSocketIO(socket.SocketIO):
+    def __init__(self, sock, deadline, timeout):
+        super().__init__(sock, "rb")
+        # as socket.makefile does: urllib closes the socket once the headers are in, the body still reads from it
+        sock._io_refs += 1
+        self.deadline, self.timeout = deadline, timeout
+
+    def readinto(self, buffer):
+        self._sock.settimeout(self.deadline.left(self.timeout))
+        return super().readinto(buffer)
+
+
+class DeadlineResponse(http.client.HTTPResponse):
+    def __init__(self, sock, *args, deadline, timeout, **kwargs):
+        class Readable:
+            @staticmethod
+            def makefile(mode):
+                return io.BufferedReader(DeadlineSocketIO(sock, deadline, timeout))
+
+        super().__init__(Readable, *args, **kwargs)
+        self.deadline = deadline
+
+
+class DeadlineConnection:
+    """An http.client connection held to a Deadline: connecting, the TLS handshake, the request and every read of
+    the answer (a CONNECT tunnel's too) get at most the time left. CPython times a whole handshake by the socket's
+    timeout as it starts, so the time left set just before it bounds all of its round trips."""
+
+    def __init__(self, *args, deadline=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deadline, self.per_read = deadline or Deadline(REQUEST_SECONDS), per_read(self.timeout)
+        self.response_class = functools.partial(DeadlineResponse, deadline=self.deadline, timeout=self.per_read)
+
+    def clamp(self):
+        self.timeout = self.deadline.left(self.per_read)
+
+    def connect(self):
+        self.clamp()
+        super().connect()
+
+    def send(self, data):
+        if self.sock is not None:
+            self.sock.settimeout(self.deadline.left(self.per_read))
+        super().send(data)
+
+
+def connect_checked(address, timeout, source_address, public, deadline=None):
     """socket.create_connection that dials only the addresses it checked, all public or all not. A check of the name
     before connecting is not enough: the connection resolves it again, and a short-TTL record can answer that second
     lookup differently."""
@@ -271,11 +356,15 @@ def connect_checked(address, timeout, source_address, public):
     for family, kind, proto, _, sockaddr in infos:
         sock = socket.socket(family, kind, proto)
         try:
-            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+            if deadline is not None:
+                sock.settimeout(deadline.left(per_read(timeout)))
+            elif timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
                 sock.settimeout(timeout)
             if source_address:
                 sock.bind(source_address)
             sock.connect(sockaddr)
+            if deadline is not None:
+                sock.settimeout(deadline.left(per_read(timeout)))
             return sock
         except OSError as caught:
             error = caught
@@ -283,18 +372,18 @@ def connect_checked(address, timeout, source_address, public):
     raise error
 
 
-def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
-    return connect_checked(address, timeout, source_address, public=True)
+def connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, deadline=None):
+    return connect_checked(address, timeout, source_address, public=True, deadline=deadline)
 
 
-def connect_private(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
-    return connect_checked(address, timeout, source_address, public=False)
+def connect_private(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, deadline=None):
+    return connect_checked(address, timeout, source_address, public=False, deadline=deadline)
 
 
-class PublicConnection:
+class PublicConnection(DeadlineConnection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._create_connection = connect_public
+        self._create_connection = functools.partial(connect_public, deadline=self.deadline)
 
 
 class PublicHTTPConnection(PublicConnection, http.client.HTTPConnection):
@@ -305,10 +394,10 @@ class PublicHTTPSConnection(PublicConnection, http.client.HTTPSConnection):
     pass
 
 
-class PrivateConnection:
+class PrivateConnection(DeadlineConnection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._create_connection = connect_private
+        self._create_connection = functools.partial(connect_private, deadline=self.deadline)
 
 
 class PrivateHTTPConnection(PrivateConnection, http.client.HTTPConnection):
@@ -319,14 +408,18 @@ class PrivateHTTPSConnection(PrivateConnection, http.client.HTTPSConnection):
     pass
 
 
+def held_to(connection, req):
+    return functools.partial(connection, deadline=request_deadline(req))
+
+
 class PrivateHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(PrivateHTTPConnection, req)
+        return self.do_open(held_to(PrivateHTTPConnection, req), req)
 
 
 class PrivateHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        return self.do_open(PrivateHTTPSConnection, req, context=self._context)
+        return self.do_open(held_to(PrivateHTTPSConnection, req), req, context=self._context)
 
 
 def proxied(req):
@@ -347,31 +440,34 @@ class PinnedTunnel:
         super().set_tunnel(infos[0][4][0], port, headers)
 
 
-class PinnedProxyHTTPConnection(PinnedTunnel, http.client.HTTPConnection):
+class PinnedProxyHTTPConnection(PinnedTunnel, DeadlineConnection, http.client.HTTPConnection):
     pass
 
 
-class PinnedProxyHTTPSConnection(PinnedTunnel, http.client.HTTPSConnection):
+class PinnedProxyHTTPSConnection(PinnedTunnel, DeadlineConnection, http.client.HTTPSConnection):
     def connect(self):
+        self.clamp()
         http.client.HTTPConnection.connect(self)
+        self.sock.settimeout(self.deadline.left(self.per_read))
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.server_name)
 
 
 class PublicHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
         if not proxied(req):
-            return self.do_open(PublicHTTPConnection, req)
+            return self.do_open(held_to(PublicHTTPConnection, req), req)
         # tunnelled like https, so the proxy gets an address and not a name to resolve
         origin = urllib.parse.urlsplit(req.full_url)
         host, port = origin.hostname or "", origin.port or 80
         req._tunnel_host = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
         req.selector = urllib.parse.urlunsplit(("", "", origin.path or "/", origin.query, ""))
-        return self.do_open(PinnedProxyHTTPConnection, req)
+        return self.do_open(held_to(PinnedProxyHTTPConnection, req), req)
 
 
 class PublicHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        return self.do_open(PinnedProxyHTTPSConnection if proxied(req) else PublicHTTPSConnection, req, context=self._context)
+        return self.do_open(held_to(PinnedProxyHTTPSConnection if proxied(req) else PublicHTTPSConnection, req), req,
+                            context=self._context)
 
 
 class WebRedirects(urllib.request.HTTPRedirectHandler):
@@ -387,6 +483,8 @@ class WebRedirects(urllib.request.HTTPRedirectHandler):
         # http_error_302 reads the 3xx body to its end, past read_capped; a closed response reads as b""
         if fp is not None:
             fp.close()
+        if new is not None:
+            new.deadline = request_deadline(req)
         return new
 
 
@@ -455,7 +553,7 @@ class ForeignPeer(OSError):
     pass
 
 
-class OwnedLoopbackConnection(http.client.HTTPConnection):
+class OwnedLoopbackConnection(DeadlineConnection, http.client.HTTPConnection):
     """Goes on only when the other end belongs to this account (rootless podman's pasta) or root (docker-proxy),
     checked on every connection: another account may take the port once the container is gone."""
 
@@ -473,7 +571,7 @@ class OwnedLoopbackConnection(http.client.HTTPConnection):
 
 class OwnedLoopbackHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(OwnedLoopbackConnection, req)
+        return self.do_open(held_to(OwnedLoopbackConnection, req), req)
 
 
 class NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -520,7 +618,7 @@ def download_public(url, limit, seconds=DOWNLOAD_SECONDS):
     time-capped. Returns the URL after redirects, the Content-Type and the body."""
     if not url.startswith(("https://", "http://")) or not public_host(url):
         raise ValueError(f"non-public address refused: {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request = within(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), seconds)
     with PUBLIC_OPENER.open(request, timeout=15) as response:
         data = read_capped(response, limit, seconds)
         final_url, content_type = response.geturl(), response.headers.get("Content-Type", "")
@@ -2809,7 +2907,7 @@ def linked_feed(lan, url):
 def download(url, headers=None, opener=None):
     send = opener or feed_opener(url).open
     request = urllib.request.Request(rsshub_keyed(url), headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with paced_open(url, lambda: send(request, timeout=30)) as response:
+    with paced_open(url, lambda: send(within(request, FEED_SECONDS), timeout=30)) as response:
         # an RSSHub answer keeps the stored address: the live one carries the per-run key
         final_url = url if needs_rsshub(url) else response.geturl()
         return final_url, feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
@@ -2828,7 +2926,7 @@ def download_feed(url, cached=None, opener=None, lan=False):
             headers["If-Modified-Since"] = cached["modified"]
     try:
         request = urllib.request.Request(rsshub_keyed(url), headers=headers)
-        with paced_open(url, lambda: opener(request, timeout=30)) as response:
+        with paced_open(url, lambda: opener(within(request, FEED_SECONDS), timeout=30)) as response:
             data = feed_body(read_capped(response, MAX_FEED_BYTES, FEED_SECONDS), response.headers)
             reply = response.headers
     except urllib.error.HTTPError as error:
@@ -3376,7 +3474,7 @@ def rsshub_keyed(url):
 
 def rsshub_up(timeout=2):
     try:
-        with LOOPBACK_OPENER.open(rsshub_live_base() + "/", timeout=timeout):
+        with LOOPBACK_OPENER.open(within(urllib.request.Request(rsshub_live_base() + "/"), timeout + 1), timeout=timeout):
             return True
     except urllib.error.URLError as error:
         if isinstance(error.reason, ForeignPeer):
@@ -5651,6 +5749,10 @@ def read_head(response, size=MEDIA_HEAD_BYTES):
     return head
 
 
+# the answer's status, headers and first bytes; the video itself streams on
+RELAY_HEAD_SECONDS = 20
+
+
 class VideoRelay(http.server.BaseHTTPRequestHandler):
     """Serves each video of a post on loopback, fetched through PUBLIC_OPENER: whichever player plays it never
     dials a feed-supplied address itself, so a feed cannot point it at the LAN. Range passes through for seeking.
@@ -5674,9 +5776,9 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
         headers = {"User-Agent": USER_AGENT}
         if self.headers.get("Range"):
             headers["Range"] = self.headers["Range"]
+        request = within(urllib.request.Request(url, headers=headers, method=self.command), RELAY_HEAD_SECONDS)
         try:
-            response = self.server.opener.open(urllib.request.Request(url, headers=headers, method=self.command),
-                                               timeout=15)
+            response = self.server.opener.open(request, timeout=15)
         except urllib.error.HTTPError as error:
             error.close()
             self.send_error(error.code)
@@ -5702,6 +5804,8 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
                 if response.headers.get(name):
                     self.send_header(name, response.headers[name])
             self.end_headers()
+            # the rest streams for as long as the video plays, each read still under the 15 s timeout
+            request.deadline.at = None
             if body:
                 with contextlib.suppress(OSError):
                     self.wfile.write(head)
@@ -5710,8 +5814,9 @@ class VideoRelay(http.server.BaseHTTPRequestHandler):
     def media_file(self, url):
         """Whether the file at url begins like media, for a request from its middle; asked once per file."""
         if url not in self.server.media:
-            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                                           "Range": f"bytes=0-{MEDIA_HEAD_BYTES - 1}"})
+            request = within(urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                                  "Range": f"bytes=0-{MEDIA_HEAD_BYTES - 1}"}),
+                             RELAY_HEAD_SECONDS)
             with self.server.opener.open(request, timeout=15) as response:
                 self.server.media[url] = not PLAYLIST_TYPE_RE.search(response.headers.get("Content-Type", "")) \
                     and media_head(read_head(response))

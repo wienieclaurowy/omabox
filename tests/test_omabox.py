@@ -4889,6 +4889,52 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(omabox.panel_rows(state), {"feed": 0, "notifications": 0})
 
 
+class RequestDeadlineTest(unittest.TestCase):
+    def trickling_server(self, head, pause=0.2, at_once=b""):
+        """A server on loopback that sends at_once, then head one byte every pause seconds."""
+        listener = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(listener.close)
+
+        def serve():
+            with contextlib.suppress(OSError):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.recv(65536)
+                    connection.sendall(at_once)
+                    for byte in head:
+                        connection.sendall(bytes([byte]))
+                        time.sleep(pause)
+
+        threading.Thread(target=serve, daemon=True).start()
+        return f"http://127.0.0.1:{listener.getsockname()[1]}/feed.xml"
+
+    def test_a_server_trickling_its_headers_runs_out_of_time(self):
+        url = self.trickling_server(b"HTTP/1.1 200 OK\r\n" + b"X-Slow: " + b"a" * 200 + b"\r\n\r\n")
+        started = time.monotonic()
+        with mock.patch.object(omabox, "FEED_SECONDS", 1), self.assertRaises(TimeoutError):
+            omabox.download(url, opener=omabox.LAN_OPENER.open)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_the_deadline_carries_across_redirects(self):
+        later = self.trickling_server(b"HTTP/1.1 200 OK\r\n" + b"X-Slow: " + b"a" * 200 + b"\r\n\r\n")
+        first = self.trickling_server(f"HTTP/1.1 302 Found\r\nLocation: {later}\r\nContent-Length: 0\r\n\r\n".encode(),
+                                      pause=0.01)
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            omabox.LAN_OPENER.open(omabox.within(urllib.request.Request(first), 2), timeout=5).read()
+        self.assertGreater(time.monotonic() - started, 1.5)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_a_relayed_video_streams_past_the_deadline_for_its_head(self):
+        start = b"\x00\x00\x00\x18ftypisom" + bytes(600)
+        url = self.trickling_server(b"abcdefgh", pause=0.25, at_once=b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n"
+                                    b"Content-Length: 620\r\n\r\n" + start[:612])
+        with mock.patch.object(omabox, "RELAY_HEAD_SECONDS", 0.5):
+            local = omabox.start_relay([url.replace("feed.xml", "v.mp4")], opener=omabox.LAN_OPENER)
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(local[0], timeout=5) as response:
+                self.assertEqual(response.read(), start[:612] + b"abcdefgh")
+
+
 class LoopbackOpenerTest(unittest.TestCase):
     def test_rsshub_opener_refuses_redirects_and_https(self):
         elsewhere = socket.socket()
