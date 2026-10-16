@@ -1550,9 +1550,15 @@ class PrologEnd(Exception):
 
 
 def declares_entities(text):
-    """Whether the DOCTYPE declares entities. Expat lets text grow ~100x through them before its bomb guard trips,
-    and feeds never need them. Parsing stops at the first element, so only the prolog is read."""
+    """Whether the DOCTYPE has an internal subset, where entities are declared. Expat lets text grow ~100x through
+    them before its bomb guard trips, and feeds never need them. The subset is refused as it opens: a malformed
+    declaration inside it would stop the parse before any later ENTITY. Parsing stops at the first element, so only
+    the prolog is read."""
     parser = xml.parsers.expat.ParserCreate()
+
+    def doctype(name, system_id, public_id, has_internal_subset):
+        if has_internal_subset:
+            raise EntityDeclared
 
     def entity(*args):
         raise EntityDeclared
@@ -1560,7 +1566,7 @@ def declares_entities(text):
     def element(*args):
         raise PrologEnd
 
-    parser.EntityDeclHandler, parser.StartElementHandler = entity, element
+    parser.StartDoctypeDeclHandler, parser.EntityDeclHandler, parser.StartElementHandler = doctype, entity, element
     try:
         parser.Parse(text, True)
     except EntityDeclared:
@@ -1582,6 +1588,8 @@ def parse_xml(data):
         repaired = repair_xml(text)
         if repaired == text:
             raise
+        if declares_entities(repaired):
+            raise ET.ParseError("entity declarations refused") from None
         try:
             return ET.fromstring(repaired)
         except ET.ParseError:

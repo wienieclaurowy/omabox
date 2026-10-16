@@ -5215,6 +5215,13 @@ class FeedEntityTest(unittest.TestCase):
             with self.assertRaises(omabox.ET.ParseError):
                 list(omabox.parse_feed(doc))
 
+    def test_a_broken_declaration_cannot_hide_a_later_entity(self):
+        for subset in ('<!ATTLIST junk a CDATA "&"><!ENTITY e0 "declared">', '<!ATTLIST junk a CDATA "x">'):
+            doc = ('<?xml version="1.0"?><!DOCTYPE rss [' + subset + "]><rss><channel><title>t</title>"
+                   "</channel></rss>").encode()
+            with self.assertRaises(omabox.ET.ParseError):
+                omabox.parse_xml(doc)
+
     def test_doctypes_without_entities_and_cdata_still_parse(self):
         legacy = (b'<?xml version="1.0"?><!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN" '
                   b'"http://my.netscape.com/publish/formats/rss-0.91.dtd"><rss version="0.91"><channel><item>'
