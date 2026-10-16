@@ -2913,6 +2913,44 @@ class FeedRedirectTest(unittest.TestCase):
                 omabox.download_feed(f"http://127.0.0.1:{lan_to_file}/feed.xml")
 
 
+class StateBudgetTest(unittest.TestCase):
+    def post(self, n, read, size):
+        return {"id": f"{n:016x}", "source": "Blog", "title": f"Post {n}", "link": f"https://blog.example/{n}",
+                "published": f"2026-01-{n + 1:02d}T00:00:00Z", "read": read, "html": "<p>" + "ż" * size + "</p>",
+                "full_html": "<p>" + "a" * size + "</p>", "full_summary": "s", "replies_html": "r" * size, "replies_count": 3}
+
+    def test_items_json_stays_within_its_budget(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"] = [self.post(n, n < 5, 100_000) for n in range(10)]
+        limit = 3_300_000
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            text = omabox.fit_state(state, limit)
+        self.assertLessEqual(len(text.encode()), limit)
+        self.assertIn("older posts dropped", errors.getvalue())
+        self.assertEqual(json.loads(text), state)
+        by_id = {item["id"]: item for item in state["items"]}
+        newest = by_id[f"{9:016x}"]
+        self.assertTrue(newest["html"] and newest["full_html"] and newest["replies_html"])
+        oldest_read = by_id[f"{0:016x}"]
+        self.assertNotIn("replies_html", oldest_read)
+        self.assertNotIn("replies_count", oldest_read)
+        self.assertEqual(len(state["items"]), 10)
+
+    def test_posts_go_when_their_bodies_are_not_enough(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"] = [{**self.post(n, False, 10), "title": "t" * 50_000} for n in range(10)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            text = omabox.fit_state(state, 200_000)
+        self.assertLessEqual(len(text.encode()), 200_000)
+        self.assertTrue(0 < len(state["items"]) < 10)
+        self.assertEqual(state["items"][-1]["id"], f"{9:016x}")
+
+    def test_a_small_state_is_written_as_it_is(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"] = [self.post(1, True, 10)]
+        self.assertEqual(omabox.fit_state(state), json.dumps(state, indent=1, ensure_ascii=False) + "\n")
+
+
 class DowngradeTest(unittest.TestCase):
     def test_no_opener_follows_https_down_to_http(self):
         request = urllib.request.Request("https://img.example/v.mp4")

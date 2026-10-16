@@ -52,6 +52,7 @@
   },
   "bar.tickExited": "omabox tick завершился с кодом %1",
   "cli.needsPython": "Omabox требует Python 3.11 или новее как python3.",
+  "cli.outputTooLarge": "Вывод Omabox слишком велик для чтения.",
   "feed.empty": "Пока здесь ничего нет.",
   "feed.unread": {
     "one": "НЕПРОЧИТАНО: %1",

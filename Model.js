@@ -355,8 +355,21 @@ function localPath(url) {
 }
 
 // Output of `bash -c '"$@" 2>&1; echo "::exit $?"'`.
+// argv's output with stderr merged and "::exit N" appended (splitCliOutput), or only "::overflow" past limit bytes. It
+// ends after seconds: TERM, then KILL 5 s later, to timeout's whole process group, so a hung CLI cannot hold a queue.
+var BOUNDED_SCRIPT = 'l=$1 s=$2; shift 2; out=$(set -o pipefail; timeout -k 5 "$s" "$@" 2>&1 | head -c $((l + 1)); r=$?; printf x; exit $r); '
+  + 'r=$?; LC_ALL=C; out=${out%x}; if [ ${#out} -gt "$l" ]; then printf ::overflow; else printf \'%s::exit %s\' "$out" "$r"; fi'
+
+function bounded(argv, limit, seconds) {
+  return ["bash", "-c", BOUNDED_SCRIPT, "--", String(limit), String(seconds)].concat(argv)
+}
+
+// bin/omabox keeps items.json within it (MAX_STATE_BYTES there)
+var MAX_STATE_BYTES = 16 * 1024 * 1024
+
 function splitCliOutput(text, Tr) {
   var out = String(text || "")
+  if (/::overflow$/.test(out)) return { code: 1, text: Tr.t("cli.outputTooLarge"), overflow: true }
   var match = out.match(/::exit (\d+)\s*$/)
   var code = match ? parseInt(match[1], 10) : 1
   return { code: code, text: cliProblem(code, match ? out.slice(0, match.index) : out, Tr) }

@@ -51,6 +51,7 @@
   },
   "bar.tickExited": "omabox tick terminé avec %1",
   "cli.needsPython": "Omabox nécessite Python 3.11 ou plus récent en tant que python3.",
+  "cli.outputTooLarge": "La sortie d'Omabox était trop volumineuse pour être lue.",
   "feed.empty": "Rien ici pour l'instant.",
   "feed.unread": {
     "one": "%1 NON LU",

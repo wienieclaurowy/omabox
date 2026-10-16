@@ -49,6 +49,7 @@
   },
   "bar.tickExited": "omabox tick 已退出，返回 %1",
   "cli.needsPython": "Omabox 需要 Python 3.11 或更高版本，并以 python3 提供。",
+  "cli.outputTooLarge": "Omabox 的输出过大，无法读取。",
   "feed.empty": "这里还没有内容。",
   "feed.unread": {
     "other": "%1 条未读"

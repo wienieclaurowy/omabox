@@ -1936,6 +1936,57 @@ def recovered_file(state, path=None):
     return name if name and (Path(path or STATE_PATH).parent / name).exists() else ""
 
 
+# The shell reads at most this much of items.json (Model.MAX_STATE_BYTES) and refuses a larger file.
+MAX_STATE_BYTES = 16 * 1024 * 1024
+
+
+def state_text(state):
+    return json.dumps(state, indent=1, ensure_ascii=False) + "\n"
+
+
+def utf8_size(text):
+    return len(text.encode("utf-8", "replace"))
+
+
+def fit_state(state, limit=MAX_STATE_BYTES):
+    """state_text(state) within limit bytes. Past it the oldest posts give up their stored replies, then their
+    articles, then their bodies, read posts before unread ones; then the oldest posts go."""
+    text = state_text(state)
+    excess = utf8_size(text) - limit
+    if excess <= 0:
+        return text
+    order = sorted(state["items"], key=lambda item: (not item.get("read"), item.get("published") or ""))
+    shed = 0
+    for key, related in (("replies_html", REPLY_KEYS), ("full_html", ARTICLE_KEYS), ("html", ())):
+        for item in order:
+            if excess <= 0:
+                break
+            if item.get(key):
+                excess -= utf8_size(json.dumps(item[key], ensure_ascii=False))
+                for field in related:
+                    item.pop(field, None)
+                if not related:
+                    item[key] = ""
+                shed += 1
+    text = state_text(state)
+    excess = utf8_size(text) - limit
+    while excess > 0 and state["items"]:
+        dropped = set()
+        for item in order:
+            if excess <= 0:
+                break
+            if item["id"] not in dropped:
+                dropped.add(item["id"])
+                excess -= utf8_size(json.dumps(item, indent=1, ensure_ascii=False))
+        order = [item for item in order if item["id"] not in dropped]
+        state["items"] = [item for item in state["items"] if item["id"] not in dropped]
+        shed += len(dropped)
+        text = state_text(state)
+        excess = utf8_size(text) - limit
+    print(f"items.json over {limit // (1024 * 1024)} MB: stored text of {shed} older posts dropped", file=sys.stderr)
+    return text
+
+
 def save_state(state, path=None):
     """Atomic and durable: the bar watches the file and must only ever see a complete one."""
     path = Path(path or STATE_PATH)
@@ -1944,9 +1995,9 @@ def save_state(state, path=None):
         state.pop("recovered")
     tmp = path.with_suffix(".tmp")
     # errors="replace": one string UTF-8 cannot hold must not lose the whole delivery
+    text = fit_state(state)
     with open_private(tmp, errors="replace") as f:
-        json.dump(state, f, indent=1, ensure_ascii=False)
-        f.write("\n")
+        f.write(text)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)

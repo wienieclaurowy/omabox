@@ -328,19 +328,45 @@ BarWidget {
     command: [root.omaboxBin, "archive-notifications"]
   }
 
+  // A watcher only (preload: false never reads): items.json comes in through stateReader, capped and time-limited.
   FileView {
     path: root.stateDirReady && root.ownsState ? root.statePath : ""
+    preload: false
     watchChanges: true
     printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      root.ownState = Model.parseState(text())
-      root.ownOverrides = ({})
-      root.ownLoaded = true
+    onFileChanged: root.readState()
+  }
+
+  readonly property bool readsState: stateDirReady && ownsState
+  onReadsStateChanged: if (readsState) readState()
+  property bool stateStale: false
+
+  function readState() {
+    if (stateReader.running) stateStale = true
+    else stateReader.running = true
+  }
+
+  Process {
+    id: stateReader
+    command: Model.bounded(["head", "-c", String(Model.MAX_STATE_BYTES + 1), "--", root.statePath], Model.MAX_STATE_BYTES, 10)
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = Model.splitCliOutput(text, Tr)
+        // too large or too slow keeps the posts shown; a missing file is an empty feed
+        if (result.code === 0) {
+          root.ownState = Model.parseState(result.text)
+          root.ownOverrides = ({})
+        } else if (!result.overflow && result.code !== 124 && result.code !== 137) {
+          root.ownState = Model.parseState("")
+        }
+        root.ownLoaded = true
+      }
     }
-    onLoadFailed: {
-      root.ownState = Model.parseState("")
-      root.ownLoaded = true
+    // a change seen while a read ran gets a read of its own
+    onExited: if (root.stateStale) {
+      root.stateStale = false
+      if (root.readsState) Qt.callLater(root.readState)
     }
   }
 

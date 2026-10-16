@@ -31,6 +31,15 @@ TestCase {
     function formatNumber(value) { return String(value) }
   }
 
+  function test_bounded_output_past_its_limit_is_an_error() {
+    compare(Model.splitCliOutput("::overflow", english).code, 1)
+    compare(Model.splitCliOutput("::overflow", english).text, english.t("cli.outputTooLarge"))
+    compare(Model.splitCliOutput("{}::exit 0", english).text, "{}")
+    var argv = Model.bounded(["head", "--", "/x"], 100, 5)
+    compare(argv.slice(0, 2), ["bash", "-c"])
+    compare(argv.slice(3), ["--", "100", "5", "head", "--", "/x"])
+  }
+
   function test_notification_action_runs_only_on_the_second_o() {
     var row = { file: "1760000000000-1.json", execArgv: JSON.stringify(["sh", "-c", "echo planted\n"]) }
     var first = Model.actionStep(row, "", "", english)

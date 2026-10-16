@@ -50,6 +50,7 @@
   },
   "bar.tickExited": "omabox tick beëindigd met %1",
   "cli.needsPython": "Omabox heeft Python 3.11 of nieuwer nodig als python3.",
+  "cli.outputTooLarge": "De uitvoer van Omabox was te groot om te lezen.",
   "feed.empty": "Hier is nog niets.",
   "feed.unread": {
     "one": "%1 ONGELEZEN",

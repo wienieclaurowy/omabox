@@ -50,6 +50,7 @@
   },
   "bar.tickExited": "omabox tick exited with %1",
   "cli.needsPython": "Omabox needs Python 3.11 or newer as python3.",
+  "cli.outputTooLarge": "Omabox's output was too large to read.",
   "feed.empty": "Nothing here yet.",
   "feed.unread": {
     "one": "%1 UNREAD",

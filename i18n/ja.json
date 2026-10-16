@@ -49,6 +49,7 @@
   },
   "bar.tickExited": "omabox tick が %1 で終了しました",
   "cli.needsPython": "Omabox には python3 として Python 3.11 以降が必要です。",
+  "cli.outputTooLarge": "Omabox の出力が大きすぎて読み込めません。",
   "feed.empty": "まだ何もありません。",
   "feed.unread": {
     "other": "未読 %1 件"
