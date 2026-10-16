@@ -2251,6 +2251,36 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertEqual((archive / f"{stamp}-1.json").read_text(), '{"summary": "hi"}')
 
 
+    def test_odd_files_are_neither_archived_nor_listed(self):
+        root = Path(tempfile.mkdtemp())
+        history, archive, popup = root / "history", root / "archive", root / "popup"
+        for path in (history, archive, popup):
+            path.mkdir()
+        stamp = int(time.time() * 1000)
+        names = [f"{stamp + n}-{n}.json" for n in range(6)]
+        (history / names[0]).write_text('{"summary": "fine", "body": "ż"}')
+        os.mkfifo(history / names[1])
+        (root / "secret").write_text('{"summary": "elsewhere"}')
+        (history / names[2]).symlink_to(root / "secret")
+        (history / names[3]).write_text(json.dumps({"body": "x" * omabox.NOTE_MAX_BYTES}))
+        os.link(root / "secret", history / names[4])
+        (popup / names[5]).write_text('["not", "an", "object"]')
+        omabox.archive_notifications(history, archive)
+        self.assertEqual([p.name for p in archive.iterdir()], [names[0]])
+        rows = omabox.note_rows((history, archive, popup))
+        self.assertEqual(rows, [names[0] + '\t{"summary": "fine", "body": "\\u017c"}'])
+
+    def test_the_list_is_newest_first_and_capped(self):
+        root = Path(tempfile.mkdtemp())
+        stamp = int(time.time() * 1000)
+        for n in range(50):
+            (root / f"{stamp + n}-{n}.json").write_text(json.dumps({"summary": str(n), "body": "b" * 1000}))
+        with mock.patch.object(omabox, "NOTE_LIST_MAX", 30), mock.patch.object(omabox, "NOTE_LIST_BYTES", 20_000):
+            rows = omabox.note_rows((root,))
+        self.assertEqual([json.loads(row.split("\t")[1])["summary"] for row in rows], [str(n) for n in range(49, 30, -1)])
+        self.assertLessEqual(sum(len(row) + 1 for row in rows), 20_000)
+        self.assertTrue(all(row.isascii() for row in rows))
+
     def test_a_cleared_popup_is_not_archived_again(self):
         root = Path(tempfile.mkdtemp())
         popup, archive = root / "popup", root / "archive"

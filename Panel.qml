@@ -41,9 +41,6 @@ Panel {
   readonly property string home: Quickshell.env("HOME")
   readonly property string omaboxBin: Model.localPath(Qt.resolvedUrl("bin/omabox"))
   readonly property string imageDir: (Quickshell.env("XDG_CACHE_HOME") || (home + "/.cache")) + "/omabox/images"
-  readonly property string historyDir: home + "/.local/state/omarchy/notifications/history"
-  // Omarchy keeps a notification here while its popup shows and moves the file, same name, into historyDir after.
-  readonly property string popupDir: home + "/.local/state/omarchy/notifications"
   readonly property string notificationSettingsPath: home + "/.local/state/omarchy/notifications.json"
 
   // feed | notifications | sources
@@ -113,7 +110,6 @@ Panel {
   readonly property var allItems: hostWidget ? hostWidget.items : []
   readonly property var items: Model.filterItems(allItems, filter, query)
   readonly property int readerFontSize: Style.font.title + Math.max(-4, Math.min(10, Number(setting("readerFontDelta", 0)) || 0))
-  readonly property string archiveDir: (Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")) + "/omabox/notifications"
   readonly property var feedState: hostWidget ? hostWidget.feedState : Model.parseState("")
   readonly property var noteRows: Model.filterNotes(notifications, filter, query)
   readonly property var rows: view === "feed" ? items : view === "notifications" ? noteRows : sources
@@ -1460,14 +1456,13 @@ Panel {
 
   Process {
     id: historyProc
-    // Archive first so Omarchy's 10-entry history and Omabox's 7-day copy agree; all dirs are listed, parseHistory dedups.
-    // Bash builtins only: a process per file (tr) took over half a second for a week of notifications.
-    command: ["bash", "-c", "\"$1\" archive-notifications >/dev/null 2>&1; for d in \"$2\" \"$3\" \"$4\"; do for f in \"$d\"/*.json; do [[ -e $f ]] || continue; text=; IFS= read -r -d '' text < \"$f\"; printf '%s\\t%s\\n' \"${f##*/}\" \"${text//$'\\n'/}\"; done; done",
-      "--", root.omaboxBin, root.historyDir, root.archiveDir, root.popupDir]
+    // Other apps write these files: the CLI reads each one capped (NOTE_MAX_BYTES), and its whole answer is capped here.
+    command: Model.bounded([root.omaboxBin, "notifications"], 8 * 1024 * 1024, 60)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.notifications = Model.parseHistory(text)
+        var result = Model.splitCliOutput(text, Tr)
+        if (result.code === 0) root.notifications = Model.parseHistory(result.text)
         root.notificationsLoaded = true
         if (root.pendingRead >= 0 && root.view === "notifications") root.openReader(root.pendingRead)
         root.pendingRead = -1
