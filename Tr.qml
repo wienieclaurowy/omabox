@@ -31,8 +31,12 @@ QtObject {
   property var englishStrings: ({})
   property var baseStrings: ({})
   property var languageStrings: ({})
+  // The catalogs arrive from a child process a moment after load; until English is in, text stays empty
+  // instead of showing raw keys.
+  property bool ready: false
 
   function t(key, fallback) {
+    if (!root.ready) return fallback !== undefined ? fallback : ""
     var value = root.strings[key]
     if (value && typeof value === "object") value = value.other
     if (typeof value === "string" && value.length > 0) return value
@@ -41,6 +45,7 @@ QtObject {
 
   // Use as Tr.tn(key, n).arg(Tr.formatNumber(n)).
   function tn(key, count, fallback) {
+    if (!root.ready) return fallback !== undefined ? fallback : ""
     var layers = [[root.languageStrings, root.language], [root.baseStrings, root.baseLanguage], [root.englishStrings, "en"]]
     for (var i = 0; i < layers.length; i++) {
       var value = Plural.pick(layers[i][0][key], layers[i][1], count)
@@ -166,7 +171,7 @@ QtObject {
 
   property CappedRead englishReader: CappedRead {
     path: root.catalogDir + "/en.json"
-    onArrived: function(text) { root.englishStrings = root.parseCatalog(text); root.rebuildStrings() }
+    onArrived: function(text) { root.englishStrings = root.parseCatalog(text); root.ready = true; root.rebuildStrings() }
   }
 
   property FileView baseFile: FileView {
