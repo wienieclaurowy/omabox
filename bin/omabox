@@ -896,6 +896,10 @@ def count_items(list_markup):
     return count
 
 
+# one line under a post's title; a feed chooses how many headings a post has and how long they are
+MAX_SUMMARY_CHARS = 300
+
+
 def structure(markup, text):
     """Release-note shaping: dims credits and install boilerplate (moved last), counts items per heading.
     Returns html, a "Improvements 3 · Fixes 12" summary ("" when the post has no heading+list) and minutes to read."""
@@ -923,7 +927,10 @@ def structure(markup, text):
             if label:
                 parts.append(f"{label} {count_items(following)}")
     minutes = max(1, round(len(text.split()) / READING_WPM))
-    return "".join(body + tail), "  ·  ".join(parts), minutes
+    summary = "  ·  ".join(parts)
+    if len(summary) > MAX_SUMMARY_CHARS:
+        summary = summary[:MAX_SUMMARY_CHARS - 1] + "…"
+    return "".join(body + tail), summary, minutes
 
 
 URL_TEXT_RE = re.compile(r"https?://[^\s<>\"]+")
@@ -1951,12 +1958,14 @@ def utf8_size(text):
 
 def fit_state(state, limit=MAX_STATE_BYTES):
     """state_text(state) within limit bytes. Past it the oldest posts give up their stored replies, then their
-    articles, then their bodies, read posts before unread ones; then the oldest posts go."""
+    articles, then their bodies, read posts before unread ones and read-later posts last; then the oldest posts go,
+    in the same order."""
     text = state_text(state)
     excess = utf8_size(text) - limit
     if excess <= 0:
         return text
-    order = sorted(state["items"], key=lambda item: (not item.get("read"), item.get("published") or ""))
+    order = sorted(state["items"], key=lambda item: (bool(item.get("later")), not item.get("read"),
+                                                     item.get("published") or ""))
     shed = 0
     for key, related in (("replies_html", REPLY_KEYS), ("full_html", ARTICLE_KEYS), ("html", ())):
         for item in order:
@@ -2156,6 +2165,8 @@ def ensure_profile(state, source, feed_data, fetch=download_limited, directory=N
     profile = feed_profile(feed_data)
     if not profile:
         return
+    if len(profile["avatar_url"]) > MAX_LINK_CHARS:
+        profile["avatar_url"] = ""
     directory = Path(directory or ICON_DIR)
     current = state["profiles"].get(source["name"], {})
     avatar = current.get("avatar", "")
@@ -2169,7 +2180,8 @@ def ensure_profile(state, source, feed_data, fetch=download_limited, directory=N
                 avatar = str(path)
         except Exception:
             avatar = ""
-    state["profiles"][source["name"]] = {"name": profile["name"], "handle": profile["handle"],
+    state["profiles"][source["name"]] = {"name": str(profile["name"] or "")[:MAX_NAME_CHARS],
+                                         "handle": str(profile["handle"] or "")[:MAX_NAME_CHARS],
                                          "avatar_url": profile["avatar_url"], "avatar": avatar}
 
 
@@ -2266,6 +2278,8 @@ def stored_posts(state, source, entries):
 
 
 MAX_ENTRY_TITLE = 1000
+# a feed picks its guids; past this one is stored as its hash, which still names the same post on every fetch
+MAX_GUID_CHARS = 1000
 MAX_ENTRY_HTML = 1_000_000
 # what one stored html field (a post, its article or its replies) keeps; items.json is parsed inside the shell
 MAX_STORED_HTML = 1_000_000
@@ -2284,11 +2298,15 @@ def capped_html(markup, limit=MAX_STORED_HTML):
 
 
 def capped_entry(entry):
-    """The entry with its title and html (a quoted post's too) cut to what items.json, which the shell parses, keeps,
-    and a link past MAX_LINK_CHARS dropped."""
+    """The entry with its title, html (a quoted post's too) and repost names cut to what items.json, which the shell
+    parses, keeps, a guid past MAX_GUID_CHARS hashed and a link past MAX_LINK_CHARS dropped."""
     entry = {**entry, "title": (entry.get("title") or "")[:MAX_ENTRY_TITLE], "html": (entry.get("html") or "")[:MAX_ENTRY_HTML]}
+    if len(entry["guid"]) > MAX_GUID_CHARS:
+        entry["guid"] = "sha1:" + hashlib.sha1(entry["guid"].encode("utf-8", "replace")).hexdigest()
     if len(entry.get("link") or "") > MAX_LINK_CHARS:
         entry["link"] = ""
+    if entry.get("repost"):
+        entry["repost"] = {key: str(entry["repost"].get(key) or "")[:MAX_NAME_CHARS] for key in ("name", "handle")}
     if entry.get("quote"):
         entry["quote"] = {**entry["quote"], "html": (entry["quote"].get("html") or "")[:MAX_ENTRY_HTML]}
     return entry

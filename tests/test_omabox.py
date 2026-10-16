@@ -2991,6 +2991,30 @@ class StateBudgetTest(unittest.TestCase):
         self.assertTrue(0 < len(state["items"]) < 10)
         self.assertEqual(state["items"][-1]["id"], f"{9:016x}")
 
+    def test_read_later_posts_go_last(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"] = [{**self.post(n, True, 10), "title": "t" * 50_000, "later": n == 0} for n in range(10)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            omabox.fit_state(state, 200_000)
+        self.assertIn(f"{0:016x}", [item["id"] for item in state["items"]])
+        self.assertLess(len(state["items"]), 10)
+
+    def test_a_hostile_entry_cannot_crowd_out_stored_posts(self):
+        state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
+        state["items"] = [{**self.post(n, True, 10), "later": True} for n in range(3)]
+        heading = "<h2>" + "Fixes " * 1000 + "</h2><ul><li>x</li></ul>"
+        entry = {"guid": "g" * 5_000_000, "title": "x", "link": "", "published": "2099-01-01T00:00:00Z",
+                 "html": heading * 200, "repost": {"name": "n" * 100_000, "handle": "h" * 100_000}}
+        omabox.merge(state, "Blog", [entry], "2026-09-26T08:00:00Z")
+        new = state["items"][-1]
+        self.assertTrue(new["guid"].startswith("sha1:") and len(new["guid"]) == 45)
+        self.assertLessEqual(len(new["summary"]), omabox.MAX_SUMMARY_CHARS)
+        self.assertLessEqual(len(new["repost"]["name"]) + len(new["repost"]["handle"]), 2 * omabox.MAX_NAME_CHARS)
+        self.assertLess(len(omabox.fit_state(state)), 3_000_000)
+        self.assertEqual(len(state["items"]), 4)
+        omabox.merge(state, "Blog", [entry], "2026-09-27T08:00:00Z")
+        self.assertEqual(len(state["items"]), 4)
+
     def test_a_small_state_is_written_as_it_is(self):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "none.json")
         state["items"] = [self.post(1, True, 10)]
