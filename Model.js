@@ -708,3 +708,28 @@ function readableShade(fg, bg, alpha, minRatio) {
 function readShade(fg, bg) {
   return readableShade(fg, bg, 0, Math.min(4.5, Math.max(2.4, contrastRatio(fg, bg) * 0.55)))
 }
+
+// Editing for InputField, which is read-only to Qt (see there): replaces start..end with insert, control characters
+// and line breaks become spaces, and the text stays within limit characters. Returns the text and the cursor.
+function spliceField(text, start, end, insert, limit) {
+  var value = String(text || "")
+  var from = Math.max(0, Math.min(value.length, Math.min(start, end)))
+  var to = Math.max(from, Math.min(value.length, Math.max(start, end)))
+  var added = String(insert || "").replace(/[\u0000-\u001f\u007f]+/g, " ")
+  added = added.slice(0, Math.max(0, limit - (value.length - (to - from))))
+  if (/[\ud800-\udbff]$/.test(added)) added = added.slice(0, -1)
+  return { text: value.slice(0, from) + added + value.slice(to), cursor: from + added.length }
+}
+
+// One character back or forward from pos, never splitting a surrogate pair.
+function charStep(text, pos, forward) {
+  var value = String(text || "")
+  if (forward) return Math.min(value.length, pos + (/^[\ud800-\udbff][\udc00-\udfff]/.test(value.slice(pos)) ? 2 : 1))
+  return Math.max(0, pos - (/[\ud800-\udbff][\udc00-\udfff]$/.test(value.slice(0, pos)) ? 2 : 1))
+}
+
+// Start of the word before pos, with the spaces after it (Ctrl+Backspace).
+function wordStart(text, pos) {
+  var before = String(text || "").slice(0, pos)
+  return before.length - before.match(/\S*\s*$/)[0].length
+}

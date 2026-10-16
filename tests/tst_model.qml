@@ -118,4 +118,19 @@ TestCase {
     var high = Model.contrastRatio(Model.readShade(Qt.rgba(0, 0, 0, 1), Qt.rgba(1, 1, 1, 1)), Qt.rgba(1, 1, 1, 1))
     verify(high >= 4.5 && high < 4.7, high)
   }
+
+  function test_input_field_editing() {
+    compare(Model.spliceField("hello", 5, 5, " world", 100), { text: "hello world", cursor: 11 })
+    compare(Model.spliceField("hello", 1, 4, "", 100), { text: "ho", cursor: 1 })
+    compare(Model.spliceField("ab", 1, 1, "x\ny\tz", 100), { text: "ax y zb", cursor: 6 })
+    compare(Model.spliceField("abc", 3, 3, "defgh", 5), { text: "abcde", cursor: 5 })
+    compare(Model.spliceField("abc", 3, 0, "Z", 5), { text: "Z", cursor: 1 })
+    compare(Model.spliceField("", 0, 0, "a\ud83d\ude00", 2), { text: "a", cursor: 1 })
+    compare(Model.charStep("a\ud83d\ude00b", 3, false), 1)
+    compare(Model.charStep("a\ud83d\ude00b", 1, true), 3)
+    compare(Model.charStep("ab", 0, false), 0)
+    compare(Model.wordStart("foo bar  ", 9), 4)
+    compare(Model.wordStart("foo ", 4), 0)
+    compare(Model.wordStart("foo bar", 3), 0)
+  }
 }
