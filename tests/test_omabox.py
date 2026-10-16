@@ -2718,6 +2718,31 @@ class FeedRedirectTest(unittest.TestCase):
         self.assertEqual(omabox.download(f"http://127.0.0.1:{other}/feed.xml")[1], RSS_FEED)
         self.assertEqual(self.lan_seen, ["/feed.xml", "/moved.xml"])
 
+    def test_a_redirect_body_is_not_read(self):
+        sent = []
+
+        class Endless(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{lan}/moved.xml")
+                self.send_header("Content-Length", str(64 * 1024 * 1024))
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    for _ in range(1024):
+                        self.wfile.write(b"x" * 65536)
+                        sent.append(65536)
+
+            def log_message(self, *args):
+                pass
+
+        lan = self.lan
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Endless)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertEqual(omabox.download(f"http://127.0.0.1:{server.server_port}/feed.xml")[1], RSS_FEED)
+        self.assertLess(sum(sent), omabox.MAX_FEED_BYTES)
+
     def resolving(self, answers):
         real = socket.getaddrinfo
 

@@ -378,7 +378,11 @@ class WebRedirects(urllib.request.HTTPRedirectHandler):
             raise ValueError(f"redirect to a non-web address refused: {newurl}")
         if req.full_url.startswith("https://") and not newurl.startswith("https://"):
             raise ValueError(f"redirect from https to http refused: {newurl}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        # http_error_302 reads the 3xx body to its end, past read_capped; a closed response reads as b""
+        if fp is not None:
+            fp.close()
+        return new
 
 
 class PublicOnlyRedirects(WebRedirects):
