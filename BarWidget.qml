@@ -396,6 +396,7 @@ BarWidget {
 
   // Posts are read only after `omabox plain-cache`: Qt inflates PNG text chunks of pictures an older version cached.
   property bool cachePlain: false
+  readonly property bool cacheReady: ownsState ? cachePlain : stateOwner.cacheReady
 
   function plainCache() {
     if (ownsState && !cachePlain && !plainProc.running) plainProc.running = true

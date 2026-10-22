@@ -3194,7 +3194,9 @@ Panel {
           SourceIcon {
             id: sourceIcon
             anchors.verticalCenter: parent.verticalCenter
-            icon: source.modelData.icon || ({})
+            // `omabox sources` lists favicon paths without waiting for the widget's plain-cache run
+            icon: root.hostWidget && root.hostWidget.cacheReady ? source.modelData.icon || ({})
+              : ({ glyph: (source.modelData.icon || {}).glyph })
             color: String(source.modelData.cadence) === "paused" ? source.faintColor : root.fg
             fontFamily: root.fontFamily
             size: Style.font.subtitle
