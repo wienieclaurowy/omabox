@@ -2444,6 +2444,10 @@ class RsshubTest(unittest.TestCase):
         patcher = mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(self.runtime)})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.state = Path(tempfile.mkdtemp()) / "state" / "items.json"
+        patcher = mock.patch.object(omabox, "STATE_PATH", self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_x_profile_urls_map_to_local_route(self):
         self.assertEqual(omabox.x_profile_feed("https://x.com/rowanvale"), f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale")
@@ -2709,6 +2713,26 @@ class RsshubTest(unittest.TestCase):
             (shared / "omabox-rsshub.lock").mkdir()
             omabox.stop_stale_rsshub(lambda *a, **k: self.fail("nothing to stop"))
         self.assertFalse((state.parent / omabox.RSSHUB_MARKER).exists())
+
+    def test_a_runtime_dir_others_can_enter_is_not_used(self):
+        self.assertEqual(omabox.runtime_dir(), self.runtime)
+        loose = Path(tempfile.mkdtemp())
+        private = Path(tempfile.mkdtemp())
+        link = Path(tempfile.mkdtemp()) / "run"
+        link.symlink_to(private)
+        cases = [(loose, 0o777), (loose, 0o1777), (loose, 0o750), (loose, 0o701), (link, None), ("relative", None)]
+        for path, mode in cases:
+            if mode is not None:
+                path.chmod(mode)
+            with self.subTest(path=path, mode=mode), mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(path)}):
+                self.assertEqual(omabox.runtime_dir(), self.state.parent)
+        loose.chmod(0o700)
+        with mock.patch.dict(omabox.os.environ, {"XDG_RUNTIME_DIR": str(loose)}):
+            self.assertEqual(omabox.runtime_dir(), loose)
+            other = os.getuid() + 4242
+            with mock.patch.object(omabox.os, "getuid", lambda: other):
+                self.assertEqual(omabox.runtime_dir(), self.state.parent)
+        self.assertEqual(self.state.parent.stat().st_mode & 0o777, 0o700)
 
     def test_fetch_goes_on_when_the_stale_container_check_fails(self):
         args = argparse.Namespace(offline=True, all=False, only=None, notify=False, retry=False)
