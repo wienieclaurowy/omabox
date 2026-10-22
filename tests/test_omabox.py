@@ -1186,7 +1186,7 @@ class ImageTest(unittest.TestCase):
         self.assertIsNone(omabox.png_pixel_chunks(png(4, 4)[:-20]))
         self.assertFalse(omabox.plain_picture(b"GIF89a" + b"\x00" * 20))
 
-    def test_a_cache_from_an_older_version_is_re_encoded_once(self):
+    def test_a_cache_from_an_older_version_is_re_encoded_and_rechecked_after_it(self):
         icons = self.dir.parent / "icons"
         self.dir.mkdir(parents=True)
         icons.mkdir()
@@ -1205,9 +1205,17 @@ class ImageTest(unittest.TestCase):
         self.assertFalse((self.dir / "0123456789abcdef0125.png").exists())
         self.assertEqual(omabox.image_info((icons / "fav.png").read_bytes()), ("png", 128, 128))
         self.assertTrue(mark.exists())
-        (self.dir / "0123456789abcdef0126.png").write_bytes(raw)
+        # an older version run after the mark: only what changed since the last run is read again
+        old, new = self.dir / "0123456789abcdef0126.png", self.dir / "0123456789abcdef0127.png"
+        old.write_bytes(raw)
+        os.utime(old, (mark.stat().st_mtime - 60,) * 2)
+        new.write_bytes(raw)
+        os.utime(new, (mark.stat().st_mtime + 1,) * 2)
+        (self.dir / "0123456789abcdef0128.png").symlink_to(new)
         omabox.plain_cache(((self.dir, omabox.PICTURE_BOX), (icons, omabox.AVATAR_BOX)), mark)
-        self.assertEqual((self.dir / "0123456789abcdef0126.png").read_bytes(), raw)
+        self.assertEqual(old.read_bytes(), raw)
+        self.assertTrue(omabox.plain_picture(new.read_bytes()))
+        self.assertFalse((self.dir / "0123456789abcdef0128.png").is_symlink())
 
     def test_a_post_has_one_pixel_budget(self):
         side = 2000

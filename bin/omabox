@@ -909,31 +909,40 @@ PLAIN_CACHE_MARK = ".plain-pictures"
 
 
 def plain_cache(directories=None, mark=None):
-    """Re-encodes, in place, pictures cached before every picture was (reencode_picture), each directory's into
-    its box; once, then a mark file."""
+    """Re-encodes, in place, cached pictures not written as reencode_picture writes them, each directory's into its
+    box: every one on the first run, then those changed since the last run (an older version run in between)."""
     directories = directories or ((IMAGE_DIR, PICTURE_BOX), (ICON_DIR, AVATAR_BOX))
     mark = Path(mark or CACHE_DIR / PLAIN_CACHE_MARK)
-    if mark.exists():
-        return
     app_dir(mark.parent)
-    # the widget's start and the first tick both run it; a second run waits, then finds the mark
+    # the widget's start and every tick run it; the mark's time is when the last finished run began
     with open_private(mark.with_name(mark.name + ".lock"), os.O_WRONLY | os.O_CREAT) as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        if not mark.exists():
-            plain_directories(directories)
-            write_private(mark, b"")
+        started = time.time()
+        try:
+            since = mark.stat().st_mtime
+        except FileNotFoundError:
+            since = None
+        plain_directories(directories, since)
+        write_private(mark, b"")
+        os.utime(mark, (started, started))
 
 
-def plain_directories(directories):
+def plain_directories(directories, since=None):
     for directory, box in directories:
         directory = Path(directory)
         if not directory.is_dir():
             continue
         for path in directory.iterdir():
-            if path.name.startswith(".") or not path.is_file() or path.is_symlink():
+            if path.name.startswith("."):
                 continue
             with contextlib.suppress(OSError):
-                data = path.read_bytes() if path.stat().st_size <= MAX_IMAGE_BYTES else b""
+                if path.is_symlink():
+                    path.unlink()
+                    continue
+                st = path.stat()
+                if not stat.S_ISREG(st.st_mode) or (since is not None and st.st_mtime < since):
+                    continue
+                data = path.read_bytes() if st.st_size <= MAX_IMAGE_BYTES else b""
                 if data and plain_picture(data):
                     continue
                 kind = "ico" if data[:4] == b"\x00\x00\x01\x00" else (image_info(data) or ("",))[0]
