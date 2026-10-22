@@ -2783,6 +2783,19 @@ class RsshubTest(unittest.TestCase):
             omabox.rsshub_lock(self.runtime)
         self.assertEqual((victim.read_text(), victim.stat().st_mode & 0o777), ("precious", 0o644))
 
+    def test_fetch_and_tick_locks_do_not_follow_a_symlink(self):
+        victim = Path(tempfile.mkdtemp()) / "victim"
+        victim.write_text("precious")
+        victim.chmod(0o644)
+        for name in ("omabox-fetch.lock", "omabox-tick.lock"):
+            (self.runtime / name).symlink_to(victim)
+        self.assertFalse(omabox.fetching())
+        with self.assertRaises(OSError), omabox.fetch_lock():
+            pass
+        with self.assertRaises(OSError):
+            omabox.cmd_tick(None)
+        self.assertEqual((victim.read_text(), victim.stat().st_mode & 0o777), ("precious", 0o644))
+
     def test_fetch_goes_on_when_the_stale_container_check_fails(self):
         args = argparse.Namespace(offline=True, all=False, only=None, notify=False, retry=False)
         with mock.patch.object(omabox, "stop_stale_rsshub", side_effect=PermissionError("lock")), \

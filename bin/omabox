@@ -4360,15 +4360,13 @@ def prune(state, sources):
 
 
 def fetch_lock_path():
-    return Path(os.environ.get("XDG_RUNTIME_DIR") or STATE_PATH.parent) / "omabox-fetch.lock"
+    return runtime_dir() / "omabox-fetch.lock"
 
 
 @contextlib.contextmanager
 def fetch_lock():
     """True while this process holds the one fetch at a time, False when another fetch runs."""
-    path = fetch_lock_path()
-    private_dir(path.parent)
-    with open_private(path, os.O_WRONLY | os.O_CREAT) as handle:
+    with open_private(fetch_lock_path(), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW) as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -4379,10 +4377,11 @@ def fetch_lock():
 
 def fetching():
     """Whether a fetch runs right now."""
-    path = fetch_lock_path()
-    if not path.exists():
+    try:
+        handle = os.fdopen(os.open(fetch_lock_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK))
+    except OSError:
         return False
-    with open(path) as handle:
+    with handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -5600,8 +5599,7 @@ def cmd_tick(args):
     """One step of the plugin's scheduler: archive notifications, deliver or retry when due, then print the seconds
     until the next tick. It runs every few minutes, so items.json is read once and version commands wait for a
     delivery."""
-    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR") or private_dir(STATE_PATH.parent)) / "omabox-tick.lock"
-    with open_private(lock_path, os.O_WRONLY | os.O_CREAT) as handle:
+    with open_private(runtime_dir() / "omabox-tick.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW) as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
