@@ -31,11 +31,15 @@ Ui.TextField {
 
   Process {
     id: paster
-    command: ["timeout", "-k", "1", "2", "sh", "-c", "wl-paste --no-newline --type text 2>/dev/null | head -c 16384"]
-    stdout: StdioCollector { id: pasted }
-    onExited: {
-      var clip = pasted.text.replace(/�+$/, "")
-      if (clip !== "" && field.activeFocus && field.enabled) field.edit(field.selectionStart, field.selectionEnd, clip)
+    command: Model.bounded(["wl-paste", "--no-newline", "--type", "text"], 16384, 2)
+    stdout: StdioCollector {
+      waitForEnd: true
+      // stderr is merged, so only a clean exit is clipboard text; past the cap nothing is pasted
+      onStreamFinished: {
+        var end = text.match(/::exit 0$/)
+        var clip = end ? text.slice(0, end.index) : ""
+        if (clip !== "" && field.activeFocus && field.enabled) field.edit(field.selectionStart, field.selectionEnd, clip)
+      }
     }
   }
 
