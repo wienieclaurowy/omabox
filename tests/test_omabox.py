@@ -653,7 +653,8 @@ class PrivateFilesTest(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         config, cache = self.root / "config" / "omabox", self.root / "cache" / "omabox"
         for name, path in (("CONFIG_PATH", config / "sources.toml"), ("CACHE_DIR", cache), ("IMAGE_DIR", cache / "images"),
-                           ("ICON_DIR", cache / "icons"), ("DISCOVER_DIR", cache / "discover"),):
+                           ("ICON_DIR", cache / "icons"), ("DISCOVER_DIR", cache / "discover"),
+                           ("STATE_PATH", self.root / "state" / "omabox" / "items.json")):
             patcher = mock.patch.object(omabox, name, path)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1245,6 +1246,27 @@ class ImageTest(unittest.TestCase):
         omabox.plain_cache(((self.dir, omabox.PICTURE_BOX),), mark)
         self.assertTrue(omabox.plain_picture(cached.read_bytes()))
         self.assertTrue(mark.exists())
+
+    def test_stored_parts_fit_one_budget_whichever_came_last(self):
+        def picture(n, side=3000, kind="img"):
+            return f'<p><img src="omabox-{kind}:0123456789abcdef{n:04d}.png" width="{side}" height="{side}"></p>'
+        item = {"id": "a", "html": "<p>link</p>", "full_html": picture(1) + picture(2),
+                "replies_html": picture(3) + picture(4, 1000) + f'<a href="https://v.example/1.mp4">{picture(5, 2000, "poster")}</a>'}
+        omabox.fit_pixel_budget(item)
+        self.assertEqual(item["full_html"], picture(1) + picture(2))
+        self.assertEqual(omabox.pixels_shown(item["replies_html"]), 1_000_000 + 4_000_000)
+        self.assertIn("▢ image", item["replies_html"])
+        self.assertIn('<a href="https://v.example/1.mp4"><p>', item["replies_html"])
+        heavy = {"id": "b", "html": "".join(picture(n) for n in range(3))}
+        omabox.fit_pixel_budget(heavy)
+        self.assertEqual(omabox.pixels_shown(heavy["html"]), 18_000_000)
+        state_path = Path(tempfile.mkdtemp()) / "items.json"
+        with mock.patch.object(omabox, "STATE_PATH", state_path):
+            omabox.save_state({"items": [{"id": "a", "html": "", "full_html": picture(1) + picture(2)}]})
+            fields = {"replies_html": picture(3) + picture(4)}
+            omabox.store_part("a", fields)
+            self.assertEqual(fields["replies_html"], "<p>▢ image</p><p>▢ image</p>")
+            self.assertEqual(omabox.load_state()["items"][0]["replies_html"], fields["replies_html"])
 
     def test_comments_and_the_article_share_the_post_pixel_budget(self):
         shown = '<p><img src="omabox-img:0123456789abcdef0123.png" width="4000" height="5000"></p>'

@@ -572,6 +572,8 @@ Panel {
     var post = root.readingPost
     if (!root.opened || !reading || view !== "feed" || !Model.articleAvailable(post, feedState.profiles)) return
     if (post.full_html || !Model.linkOnly(post) || root.articleLoadingId !== "" || root.articleFailed[post.id]) return
+    // one at a time: each run charges the post's picture budget with what the other had stored when it began
+    if (repliesProc.running) return
     fetchArticle(post)
   }
 
@@ -580,6 +582,7 @@ Panel {
     note(Tr.t("reader.fetchingArticle"))
     runCli(["article", "--json", "--", post.id], function(code, text) {
       root.articleLoadingId = ""
+      if (reading) repliesDelay.restart()
       var result = null
       try { result = JSON.parse(text) } catch (e) {}
       if (code !== 0 || !result || result.error || !result.full_html) {
@@ -613,7 +616,8 @@ Panel {
 
   // repliesDelay's end: fetch the open post's replies when none are stored and no fetch runs or failed for it.
   function autoFetchReplies() {
-    if (root.opened && repliesState() === "waiting" && !repliesProc.running) fetchReplies(root.readingPost, false)
+    if (root.opened && repliesState() === "waiting" && !repliesProc.running && root.articleLoadingId === "")
+      fetchReplies(root.readingPost, false)
   }
 
   function refreshReplies() {

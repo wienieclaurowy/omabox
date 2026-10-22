@@ -676,6 +676,43 @@ def post_pixels(item):
     return max(pixels_shown(item.get("html")), pixels_shown(item.get("full_html")))
 
 
+SHOWN_PICTURE_RE = re.compile(r'<img src="omabox-(img|poster):[0-9a-f]{20}\.(?:png|jpg|gif|webp)" width="(\d+)" height="(\d+)"[^>]*>')
+
+
+def trim_pictures(markup, allowed):
+    """markup with the pictures past allowed pixels, in reading order, swapped for their placeholder text."""
+    kept = 0
+
+    def keep(match):
+        nonlocal kept
+        pixels = int(match[2]) * int(match[3])
+        if kept + pixels > allowed:
+            return "▶ video" if match[1] == "poster" else "▢ image"
+        kept += pixels
+        return match[0]
+    return SHOWN_PICTURE_RE.sub(keep, markup)
+
+
+def fit_pixel_budget(item):
+    """The article and the comments are fetched by separate runs, and posts stored by older versions were never
+    charged as a whole: the comments' pictures give way first, so the reader's sum stays one MAX_PIXELS_PER_ITEM."""
+    for key in ("html", "full_html"):
+        if pixels_shown(item.get(key)) > MAX_PIXELS_PER_ITEM:
+            item[key] = trim_pictures(item[key], MAX_PIXELS_PER_ITEM)
+    allowed = MAX_PIXELS_PER_ITEM - post_pixels(item)
+    if pixels_shown(item.get("replies_html")) > allowed:
+        item["replies_html"] = trim_pictures(item["replies_html"], allowed)
+
+
+def store_part(item_id, fields):
+    """Stores an article's or the comments' fields on the post; fields then holds what was stored."""
+    def change(stored):
+        stored.update(fields)
+        fit_pixel_budget(stored)
+        fields.update({key: stored[key] for key in fields})
+    update_items([item_id], change)
+
+
 class ImageFetcher:
     """Sanitizer image hook for one item: downloads to the cache at fetch time, emits omabox-img: refs."""
 
@@ -2208,6 +2245,8 @@ def save_state(state, path=None):
         state.pop("recovered")
     tmp = path.with_suffix(".tmp")
     # errors="replace": one string UTF-8 cannot hold must not lose the whole delivery
+    for item in state.get("items", []):
+        fit_pixel_budget(item)
     text = fit_state(state)
     with open_private(tmp, errors="replace") as f:
         f.write(text)
@@ -5066,7 +5105,7 @@ def load_article(item_id, refresh=False, fetch=download_public, image_fetch=down
     except Exception as error:
         raise ValueError(article_error(error)) from None
     fields["full_fetched"] = now_iso()
-    update_items([item_id], lambda stored: stored.update(fields))
+    store_part(item_id, fields)
     return fields, False
 
 
@@ -5456,7 +5495,7 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
               "replies_count": len(shown), "replies_fetched": stamp}
     if item.get("repost"):
         fields["repost_avatar"] = avatars.get(face, "")
-    update_items([item_id], lambda stored: stored.update(fields))
+    store_part(item_id, fields)
     return fields, False
 
 
@@ -5515,7 +5554,7 @@ def store_replies(item, threads, author, site, image_fetch=download_limited):
     fields = {"replies_html": replies_markup(threads, author, stamp,
                                              ImageFetcher(item["link"], image_fetch, spent=post_pixels(item)), avatars, site),
               "replies_count": len(shown), "replies_fetched": stamp}
-    update_items([item["id"]], lambda stored: stored.update(fields))
+    store_part(item["id"], fields)
     return fields
 
 
@@ -5656,6 +5695,15 @@ def cmd_tick(args):
 def cmd_plain_cache(args):
     try:
         plain_cache()
+        # save_state fits every post's pictures into one budget; posts an older version stored are fitted here,
+        # before the widget reads them
+        with locked():
+            state = load_state()
+            before = state_text(state)
+            for item in state["items"]:
+                fit_pixel_budget(item)
+            if state_text(state) != before:
+                save_state(state)
     except OSError as error:
         sys.exit(str(error))
 
