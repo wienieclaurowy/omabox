@@ -3607,7 +3607,7 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, check=
     runtime = runtime_dir()
     engine = engine or container_engine()
     # fetch and `omabox replies` share the container: without the lock one run stops it under the other
-    with open(runtime / "omabox-rsshub.lock", "w") as lock:
+    with rsshub_lock(runtime) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
         if engine:
@@ -3626,6 +3626,10 @@ def runtime_dir():
             if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
                 return Path(path)
     return private_dir(STATE_PATH.parent)
+
+
+def rsshub_lock(runtime):
+    return open_private(runtime / "omabox-rsshub.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW)
 
 
 RSSHUB_MARKER = "omabox-rsshub.running"
@@ -3656,7 +3660,7 @@ def stop_stale_rsshub(run=subprocess.run, runtime=None):
     marker = runtime / RSSHUB_MARKER
     if not marker.exists():
         return
-    with open(runtime / "omabox-rsshub.lock", "w") as lock:
+    with rsshub_lock(runtime) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

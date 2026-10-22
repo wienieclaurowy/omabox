@@ -2734,6 +2734,22 @@ class RsshubTest(unittest.TestCase):
                 self.assertEqual(omabox.runtime_dir(), self.state.parent)
         self.assertEqual(self.state.parent.stat().st_mode & 0o777, 0o700)
 
+    def test_rsshub_lock_neither_truncates_nor_follows_a_symlink(self):
+        lock = self.runtime / "omabox-rsshub.lock"
+        lock.write_text("kept")
+        lock.chmod(0o644)
+        with omabox.rsshub_lock(self.runtime):
+            pass
+        self.assertEqual((lock.read_text(), lock.stat().st_mode & 0o777), ("kept", 0o600))
+        victim = Path(tempfile.mkdtemp()) / "victim"
+        victim.write_text("precious")
+        victim.chmod(0o644)
+        lock.unlink()
+        lock.symlink_to(victim)
+        with self.assertRaises(OSError):
+            omabox.rsshub_lock(self.runtime)
+        self.assertEqual((victim.read_text(), victim.stat().st_mode & 0o777), ("precious", 0o644))
+
     def test_fetch_goes_on_when_the_stale_container_check_fails(self):
         args = argparse.Namespace(offline=True, all=False, only=None, notify=False, retry=False)
         with mock.patch.object(omabox, "stop_stale_rsshub", side_effect=PermissionError("lock")), \
@@ -2752,7 +2768,7 @@ class RsshubTest(unittest.TestCase):
         omabox.stop_stale_rsshub(run)
         self.assertEqual(calls, [])
         (runtime / omabox.RSSHUB_MARKER).write_text("podman\n")
-        with open(runtime / "omabox-rsshub.lock", "w") as busy:
+        with omabox.rsshub_lock(runtime) as busy:
             omabox.fcntl.flock(busy, omabox.fcntl.LOCK_EX)
             omabox.stop_stale_rsshub(run)
         self.assertEqual(calls, [])
