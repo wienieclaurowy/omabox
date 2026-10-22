@@ -664,14 +664,27 @@ def declared_size(attrs, key):
         return None
 
 
+PICTURE_SIZE_RE = re.compile(r'omabox-(?:img|poster):[0-9a-f]{20}\.(?:png|jpg|gif|webp)" width="(\d+)" height="(\d+)"')
+
+
+def pixels_shown(markup):
+    return sum(int(w) * int(h) for w, h in PICTURE_SIZE_RE.findall(markup or ""))
+
+
+def post_pixels(item):
+    """The reader shows a post or its article above the comments, all decoded at once: one MAX_PIXELS_PER_ITEM."""
+    return max(pixels_shown(item.get("html")), pixels_shown(item.get("full_html")))
+
+
 class ImageFetcher:
     """Sanitizer image hook for one item: downloads to the cache at fetch time, emits omabox-img: refs."""
 
-    def __init__(self, base_url="", fetch=download_limited, directory=None):
+    def __init__(self, base_url="", fetch=download_limited, directory=None, spent=0):
         self.base_url = base_url
         self.fetch = fetch
         self.directory = Path(directory or IMAGE_DIR)
-        self.count = self.avatars = self.pixels = self.placeholders = 0
+        self.count = self.avatars = self.placeholders = 0
+        self.pixels = spent
 
     def within_budget(self, picture):
         """Charges the picture's pixels to the post; False once MAX_PIXELS_PER_ITEM would be passed."""
@@ -1419,7 +1432,7 @@ def extract_article(page, base_url, title=""):
     raise ValueError("no article text found on the page")
 
 
-def fetch_article(url, title="", fetch=download_public, image_fetch=download_limited, image_dir=None):
+def fetch_article(url, title="", fetch=download_public, image_fetch=download_limited, image_dir=None, spent=0):
     """The post's web page reduced to its article: full_html (pictures cached like feed ones), full_summary and
     full_minutes shaped by structure(). ValueError when the page is not HTML or holds no article."""
     final_url, content_type, data = fetch(url, MAX_PAGE_BYTES)
@@ -1427,7 +1440,7 @@ def fetch_article(url, title="", fetch=download_public, image_fetch=download_lim
     if kind and "html" not in kind:
         raise ValueError(f"not a web page ({kind})")
     markup = extract_article(decode_page(data, content_type), final_url, title)
-    body, text = sanitize(markup, ImageFetcher(final_url, image_fetch, image_dir))
+    body, text = sanitize(markup, ImageFetcher(final_url, image_fetch, image_dir, spent))
     if len(text) < MIN_ARTICLE_CHARS:
         raise ValueError("no article text found on the page")
     body = BLOCK_GAP_RE.sub("", body)
@@ -5037,7 +5050,8 @@ def load_article(item_id, refresh=False, fetch=download_public, image_fetch=down
     feed = next((source["url"] for source in sources if source["name"] == item["source"]), "")
     try:
         with plain_http_content(plain_http_feed(feed)):
-            fields = fetch_article(item["link"], item.get("title", ""), fetch, image_fetch)
+            fields = fetch_article(item["link"], item.get("title", ""), fetch, image_fetch,
+                                   spent=pixels_shown(item.get("replies_html", "")))
     except Exception as error:
         raise ValueError(article_error(error)) from None
     fields["full_fetched"] = now_iso()
@@ -5426,7 +5440,8 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     # the reposted author's face first: fetch_avatars keeps the first MAX_AVATARS_PER_ITEM
     avatars = fetch_avatars(([face] if face else []) + [reply["avatar"] for reply in shown if reply["avatar"]], image_fetch)
     stamp = now_iso()
-    fields = {"replies_html": replies_markup(threads, ref[0], stamp, ImageFetcher(item["link"], image_fetch), avatars),
+    fields = {"replies_html": replies_markup(threads, ref[0], stamp, ImageFetcher(item["link"], image_fetch,
+                                                                                  spent=post_pixels(item)), avatars),
               "replies_count": len(shown), "replies_fetched": stamp}
     if item.get("repost"):
         fields["repost_avatar"] = avatars.get(face, "")
@@ -5486,7 +5501,8 @@ def store_replies(item, threads, author, site, image_fetch=download_limited):
     shown = [reply for thread in threads for reply in thread]
     avatars = fetch_avatars([reply["avatar"] for reply in shown if reply["avatar"]], image_fetch)
     stamp = now_iso()
-    fields = {"replies_html": replies_markup(threads, author, stamp, ImageFetcher(item["link"], image_fetch), avatars, site),
+    fields = {"replies_html": replies_markup(threads, author, stamp,
+                                             ImageFetcher(item["link"], image_fetch, spent=post_pixels(item)), avatars, site),
               "replies_count": len(shown), "replies_fetched": stamp}
     update_items([item["id"]], lambda stored: stored.update(fields))
     return fields

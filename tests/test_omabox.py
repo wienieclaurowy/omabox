@@ -1217,6 +1217,15 @@ class ImageTest(unittest.TestCase):
         self.assertTrue(omabox.plain_picture(new.read_bytes()))
         self.assertFalse((self.dir / "0123456789abcdef0128.png").is_symlink())
 
+    def test_comments_and_the_article_share_the_post_pixel_budget(self):
+        shown = '<p><img src="omabox-img:0123456789abcdef0123.png" width="4000" height="5000"></p>'
+        item = {"html": shown, "full_html": shown + shown.replace("0123.png", "0124.png")}
+        self.assertEqual(omabox.post_pixels(item), 40_000_000)
+        self.assertEqual(omabox.pixels_shown('<img src="omabox-poster:0123456789abcdef0125.jpg" width="10" height="20" depth="2">'), 200)
+        fetcher = omabox.ImageFetcher(spent=omabox.post_pixels(item))
+        self.assertFalse(fetcher.within_budget(("png", 1, 1)))
+        self.assertTrue(omabox.ImageFetcher(spent=omabox.pixels_shown(shown)).within_budget(("png", 1000, 1000)))
+
     def test_a_post_has_one_pixel_budget(self):
         side = 2000
         count = omabox.MAX_PIXELS_PER_ITEM // (1600 * 1600) + 2
