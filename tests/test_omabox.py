@@ -2505,9 +2505,9 @@ class FakeEngine:
     def __init__(self, name="podman"):
         self.name, self.calls, self.containers = name, [], {}
 
-    def add(self, labels=(), name="omabox-rsshub"):
+    def add(self, labels=(), name="omabox-rsshub", inspected=None):
         cid = os.urandom(32).hex()
-        self.containers[cid] = {"labels": dict(labels), "name": name}
+        self.containers[cid] = {"labels": dict(labels), "name": name, "inspected": inspected or {}}
         return cid
 
     def __call__(self, argv, **kwargs):
@@ -2527,6 +2527,11 @@ class FakeEngine:
             gone = self.containers.pop(argv[-1], None) is None
             code = 1 if gone and (verb == "stop" or self.name == "docker") else 0
             return subprocess.CompletedProcess(argv, code, "", "no such container" if code else "")
+        if argv[1:3] == ["container", "inspect"]:
+            found = [{"id": cid, **box["inspected"]} for cid, box in self.containers.items() if box["name"] == argv[-1]]
+            if not found:
+                return subprocess.CompletedProcess(argv, 125, "", f"Error: no such container {argv[-1]}")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(found[0]) + "\n", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
@@ -2938,7 +2943,7 @@ class RsshubTest(unittest.TestCase):
             engine.calls.clear()
             omabox.rsshub_marker().write_text("podman\n")
             omabox.stop_stale_rsshub(engine)
-            self.assertEqual(engine.calls, [])
+            self.assertEqual([argv for argv in engine.calls if argv[1] in ("stop", "rm")], [])
             self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
             # an engine that gives no answer keeps the marker for the next tick
             omabox.write_rsshub_marker({"engine": "podman", "label": "2" * 32})
@@ -2974,6 +2979,77 @@ class RsshubTest(unittest.TestCase):
         with self.assertRaises(OSError):
             omabox.write_rsshub_marker({"engine": "podman", "label": "4" * 32})
         self.assertIn("3" * 32, victim.read_text())
+
+    def leave_an_old_container(self, engine, folder=None, **changes):
+        """What a run of a release before labelled containers leaves when killed: its plain marker and its container."""
+        marker = (folder or self.runtime) / omabox.RSSHUB_MARKER
+        marker.write_text(engine.name + "\n")
+        started = datetime.fromtimestamp(marker.stat().st_mtime - 20, timezone.utc)
+        # docker reports the start in UTC, podman in local time; both with nanoseconds
+        created = (started.strftime("%Y-%m-%dT%H:%M:%S.%f123Z") if engine.name == "docker" else
+                   started.astimezone().isoformat(timespec="microseconds").replace("+", "789+", 1))
+        inspected = {"image": omabox.OLD_RSSHUB_IMAGE, "labels": {"org.opencontainers.image.title": "RSSHub"},
+                     "created": created, "rm": True,
+                     "readonly": True, "ports": {"1200/tcp": [{"HostIp": "127.0.0.1", "HostPort": "41234"}]}}
+        return marker, engine.add(name=omabox.RSSHUB_CONTAINER, inspected={**inspected, **changes})
+
+    def test_a_container_an_older_release_left_is_removed(self):
+        with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+            for name in ("podman", "docker"):
+                with self.subTest(engine=name):
+                    engine = FakeEngine(name)
+                    mine = engine.add({omabox.RSSHUB_LABEL: "5" * 32}, name="omabox-rsshub-0a1b2c3d")
+                    marker, old = self.leave_an_old_container(engine)
+                    omabox.stop_stale_rsshub(engine)
+                    self.assertEqual(set(engine.containers), {mine})
+                    self.assertIn([name, "rm", "-f", "--", old], engine.calls)
+                    self.assertFalse(os.path.lexists(marker))
+            # a fetch run clears it too, and with no runtime folder the old marker sat in the state folder
+            engine = FakeEngine("docker")
+            marker, old = self.leave_an_old_container(engine, omabox.private_dir(self.state.parent))
+            with mock.patch.object(omabox, "rsshub_container", lambda *a: contextlib.nullcontext()):
+                del omabox.os.environ["XDG_RUNTIME_DIR"]
+                with omabox.rsshub_session(True, run=engine, engine="docker"):
+                    pass
+            self.assertNotIn(old, engine.containers)
+            self.assertFalse(os.path.lexists(marker))
+
+    def test_an_older_release_marker_removes_only_a_container_it_proves(self):
+        stale = 20 + omabox.OLD_RSSHUB_START_SECONDS
+        unproven = [{"image": "docker.io/library/nginx:latest"}, {"labels": {omabox.RSSHUB_LABEL: "6" * 32}},
+                    {"rm": False}, {"readonly": False}, {"ports": {"1200/tcp": [{"HostIp": "0.0.0.0", "HostPort": "1"}]}},
+                    {"ports": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "1"}]}},
+                    {"created": datetime.fromtimestamp(time.time() - stale, timezone.utc).isoformat()},
+                    {"created": datetime.fromtimestamp(time.time() + 60, timezone.utc).isoformat()},
+                    {"id": "omabox-rsshub"}, {"created": "yesterday"}]
+        with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+            for changes in unproven:
+                with self.subTest(changes=changes):
+                    engine = FakeEngine("docker")
+                    marker, old = self.leave_an_old_container(engine, **changes)
+                    omabox.stop_stale_rsshub(engine)
+                    self.assertIn(old, engine.containers)
+                    self.assertEqual([argv for argv in engine.calls if argv[1] in ("stop", "rm")], [])
+                    self.assertFalse(os.path.lexists(marker))
+            # an engine that gives no answer keeps the marker for the next tick
+            marker, old = self.leave_an_old_container(FakeEngine("docker"))
+            omabox.stop_stale_rsshub(lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "daemon down"))
+            self.assertTrue(marker.exists())
+            marker.unlink()
+            # a link, a second name for another file or other contents are no marker of Omabox's
+            victim = Path(tempfile.mkdtemp()) / "victim"
+            victim.write_text("docker\n")
+            engine = FakeEngine("docker")
+            self.leave_an_old_container(engine)[0].unlink()
+            for plant in (marker.symlink_to, marker.hardlink_to):
+                plant(victim)
+                omabox.stop_stale_rsshub(engine)
+                self.assertEqual(engine.calls, [])
+                marker.unlink()
+            marker.write_text("docker; rm -rf ~\n")
+            omabox.stop_stale_rsshub(engine)
+            self.assertEqual((engine.calls, marker.exists()), ([], True))
+            self.assertEqual(victim.read_text(), "docker\n")
 
 
 

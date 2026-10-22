@@ -3673,6 +3673,7 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, check=
     with rsshub_lock(runtime) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
+        remove_old_rsshub(run, runtime)
         remove_stale_rsshub(run)
         with rsshub_container(run, wait, token_path, engine, runtime, check):
             yield
@@ -3792,16 +3793,90 @@ def remove_stale_rsshub(run):
         rsshub_marker().unlink(missing_ok=True)
 
 
+# Releases before labelled containers ran one unlabelled container named RSSHUB_CONTAINER from this image and wrote
+# only the engine's name to RSSHUB_MARKER in the runtime folder, right after `run -d` (given 300s) returned.
+OLD_RSSHUB_IMAGE = "docker.io/diygod/rsshub@sha256:c354046cb6c1fdffedabcf45144b9aa2dbf45a663ae2720932d7f4ef5393b8fb"
+OLD_RSSHUB_START_SECONDS = 360
+
+
+def read_old_rsshub_marker(path):
+    """The engine and write time in a marker an older release left, or None for anything else."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            return None
+        engine = {b"podman\n": "podman", b"docker\n": "docker"}.get(handle.read(16))
+    return (engine, info.st_mtime) if engine else None
+
+
+def old_rsshub_container(run, engine, written):
+    """The id of the container an older release started, when the one named RSSHUB_CONTAINER has that release's
+    image, no Omabox label, its launch options and a start just before `written`; "" when there is none; None when
+    the engine gave no answer. The template leaves the environment, which holds the X token, out of the answer."""
+    template = ('{"id":{{json .ID}},"image":{{json .Config.Image}},"labels":{{json .Config.Labels}},'
+                '"created":{{json .Created}},"rm":{{json .HostConfig.AutoRemove}},'
+                '"readonly":{{json .HostConfig.ReadonlyRootfs}},"ports":{{json .HostConfig.PortBindings}}}')
+    try:
+        found = run([engine, "container", "inspect", "--format", template, "--", RSSHUB_CONTAINER],
+                    capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if found.returncode != 0:
+        return "" if re.search(r"no such (container|object)", found.stderr or "", re.I) else None
+    try:
+        (box,) = [json.loads(line) for line in (found.stdout or "")[:65536].splitlines() if line.strip()]
+        created = datetime.fromisoformat(box["created"]).timestamp()
+        (binding,) = box["ports"]["1200/tcp"]
+        ours = (isinstance(box["id"], str) and RSSHUB_ID_RE.fullmatch(box["id"])
+                and box["image"].removeprefix("docker.io/") in
+                {image.removeprefix("docker.io/") for image in (OLD_RSSHUB_IMAGE, RSSHUB_IMAGE)}
+                and RSSHUB_LABEL not in (box["labels"] or {}) and box["rm"] is True and box["readonly"] is True
+                and list(box["ports"]) == ["1200/tcp"] and binding["HostIp"] == "127.0.0.1"
+                and str(binding["HostPort"]).isdigit()
+                and -2 <= written - created <= OLD_RSSHUB_START_SECONDS)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return ""
+    return box["id"] if ours else ""
+
+
+def remove_old_rsshub(run, runtime):
+    """Under the RSSHub lock: removes the container an older release's killed run left up, then its marker. The
+    marker stays only while the engine gives no answer."""
+    for path in dict.fromkeys((runtime / RSSHUB_MARKER, rsshub_marker())):
+        old = read_old_rsshub_marker(path)
+        if old is None:
+            continue
+        engine, written = old
+        if shutil.which(engine):
+            cid = old_rsshub_container(run, engine, written)
+            if cid is None:
+                continue
+            if cid:
+                try:
+                    removed = run([engine, "rm", "-f", "--", cid], capture_output=True, text=True, timeout=60)
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if removed.returncode != 0 and not re.search(r"no such container", removed.stderr or "", re.I):
+                    continue
+        path.unlink(missing_ok=True)
+
+
 def stop_stale_rsshub(run=subprocess.run, runtime=None):
     """Removes a container left up, holding the X token, by a run killed before it could stop it. Cheap when there
-    is none: only a marker file is checked."""
-    if not os.path.lexists(rsshub_marker()):
+    is none: only marker files are checked."""
+    runtime = Path(runtime or runtime_dir())
+    if not any(os.path.lexists(path) for path in (rsshub_marker(), runtime / RSSHUB_MARKER)):
         return
-    with rsshub_lock(Path(runtime or runtime_dir())) as lock:
+    with rsshub_lock(runtime) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
+        remove_old_rsshub(run, runtime)
         remove_stale_rsshub(run)
 
 
