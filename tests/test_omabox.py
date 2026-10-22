@@ -296,6 +296,7 @@ class ParseTest(unittest.TestCase):
             self.assertEqual(omabox.feed_title(feed.encode()), "Tern +AGE-", name)
             self.assertEqual(omabox.decode_page(b"+AGE- caf\xc3\xa9", f"text/html; charset={name}"), "+AGE- caf\u00e9")
         self.assertEqual(omabox.text_codec("Windows-1250"), "cp1250")
+        self.assertEqual(omabox.text_codec(" Windows-874"), "cp874")
         self.assertEqual(omabox.decode_page("\u017c\u00f3\u0142w".encode("iso-8859-2"), "text/html; charset=ISO-8859-2"), "\u017c\u00f3\u0142w")
         started = time.monotonic()
         with self.assertRaises(omabox.ET.ParseError):

@@ -1586,13 +1586,14 @@ TEXT_ENCODINGS = {codecs.lookup(name).name for name in (
     "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "ascii", "latin-1", "cp866", "koi8-r", "koi8-u",
     "mac-roman", "mac-cyrillic", "gbk", "gb2312", "gb18030", "big5", "big5hkscs", "euc-jp", "iso-2022-jp", "shift_jis",
     "cp932", "euc-kr", "cp949", *(f"iso-8859-{n}" for n in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16)),
-    *(f"windows-{n}" for n in (874, 1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258)))}
+    # windows-874 is an alias only from Python 3.12
+    "cp874", *(f"windows-{n}" for n in (1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258)))}
 
 
 def text_codec(name):
     """The codec for an encoding a document names, utf-8 when it names none or one not in TEXT_ENCODINGS."""
     try:
-        codec = codecs.lookup(name).name
+        codec = codecs.lookup({"windows-874": "cp874"}.get(name.strip().lower(), name)).name
     except (LookupError, ValueError):
         return "utf-8"
     return codec if codec in TEXT_ENCODINGS else "utf-8"
