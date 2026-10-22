@@ -3691,6 +3691,12 @@ class ViewerTest(unittest.TestCase):
         while Path(f"/proc/{child}").exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse(Path(f"/proc/{child}").exists())
+        self.assertIsNone(omabox.run_bounded(f'sleep 93 & echo $! > {pidfile}', seconds=0.5, shell=True))
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{child}").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(Path(f"/proc/{child}").exists())
         self.assertEqual(omabox.installed_version("echo 4.0.4-1"), "4.0.4")
         self.assertIsNone(omabox.run_bounded("yes", limit=1000, shell=True))
 
@@ -3710,6 +3716,9 @@ class ViewerTest(unittest.TestCase):
         self.env = None
 
         class Player:
+            # past PID_MAX_LIMIT: end_session's killpg finds no such group
+            pid = 2 ** 22 + 1
+
             def poll(self):
                 return exits
 
@@ -3757,6 +3766,8 @@ class ViewerTest(unittest.TestCase):
             received["argv"], received["fd"] = argv, os.dup(pass_fds[0])
 
             class Player:
+                pid = 2 ** 22 + 1
+
                 def poll(self):
                     return None
 

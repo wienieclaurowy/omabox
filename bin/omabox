@@ -5649,17 +5649,30 @@ def viewing_copies(paths, folder):
 
 def end_session(process, grace=5):
     """TERM, then KILL after grace seconds, to the session a start_new_session child leads; the child is not yet
-    reaped, so its id still names that session's group."""
-    if process.poll() is not None:
-        return
-    with contextlib.suppress(OSError):
-        os.killpg(process.pid, signal.SIGTERM)
+    reaped, so its id still names that session's group. Children a leader left behind are ended too."""
     try:
-        process.wait(grace)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
         process.wait()
+        return
+    until = time.monotonic() + grace
+    while time.monotonic() < until and (process.poll() is None or session_alive(process.pid)):
+        time.sleep(0.05)
+    with contextlib.suppress(OSError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def session_alive(group):
+    """Whether a process other than a zombie is still in the group (Model.js group_alive)."""
+    for entry in os.listdir("/proc"):
+        try:
+            fields = Path("/proc", entry, "stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[2]) == group and fields[0] != "Z":
+            return True
+    return False
 
 
 def cmd_view(args, windows=None, run=subprocess.Popen):
