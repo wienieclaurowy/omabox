@@ -5164,10 +5164,11 @@ printf '%s\\n' "$@" > "{self.dir}/args"; cat > "{self.dir}/text"
         self.assertEqual((code, copied), (0, "https://example.com/p"))
         self.assertNotIn("--sensitive", args)
 
-    def test_old_wl_copy_without_the_flag_still_copies(self):
+    def test_old_wl_copy_without_the_flag_refuses_a_private_copy(self):
         code, args, copied = self.copy("code 482913", supports_sensitive=False)
-        self.assertEqual((code, copied), (0, "code 482913"))
-        self.assertNotIn("--sensitive", args)
+        self.assertEqual((code, copied), (3, None))
+        code, args, copied = self.copy("https://example.com/p", mode="plain", supports_sensitive=False)
+        self.assertEqual((code, copied), (0, "https://example.com/p"))
 
     def test_a_failing_wl_copy_is_not_retried_unmarked(self):
         code, args, copied = self.copy("code 482913", fails=True)
