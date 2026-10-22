@@ -2438,6 +2438,38 @@ class ShortPostTest(unittest.TestCase):
         self.assertLessEqual(len(item["title"]), 111)
 
 
+class FakeEngine:
+    """podman or docker as Omabox drives them: run -d prints the new id, ps filters by label and id, a --rm container
+    goes once stopped. docker's rm -f fails for a gone id, podman's does not."""
+
+    def __init__(self, name="podman"):
+        self.name, self.calls, self.containers = name, [], {}
+
+    def add(self, labels=(), name="omabox-rsshub"):
+        cid = os.urandom(32).hex()
+        self.containers[cid] = {"labels": dict(labels), "name": name}
+        return cid
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        verb = argv[1]
+        if verb == "run":
+            labels = [argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "--label"]
+            cid = self.add(labels, argv[argv.index("--name") + 1])
+            return subprocess.CompletedProcess(argv, 0, cid + "\n", "")
+        if verb == "ps":
+            filters = [argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "--filter"]
+            found = [cid for cid, box in self.containers.items()
+                     if all(cid.startswith(value) if kind == "id" else
+                            tuple(value.split("=", 1)) in box["labels"].items() for kind, value in filters)]
+            return subprocess.CompletedProcess(argv, 0, "".join(cid + "\n" for cid in found), "")
+        if verb in ("stop", "rm"):
+            gone = self.containers.pop(argv[-1], None) is None
+            code = 1 if gone and (verb == "stop" or self.name == "docker") else 0
+            return subprocess.CompletedProcess(argv, code, "", "no such container" if code else "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
 class RsshubTest(unittest.TestCase):
     def setUp(self):
         self.runtime = Path(tempfile.mkdtemp())
@@ -2460,31 +2492,30 @@ class RsshubTest(unittest.TestCase):
         self.assertTrue(omabox.needs_rsshub(f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale"))
         self.assertFalse(omabox.needs_rsshub("https://world.hey.com/rowanvale/feed.atom"))
 
-    def run_session(self, token="secret-token", start_code=0, check=lambda: None):
-        calls, seen_env = [], {}
+    def run_session(self, token="secret-token", start_code=0, check=lambda: None, engine=None):
+        seen_env = {}
+        engine = engine or FakeEngine()
         token_path = Path(tempfile.mkdtemp()) / "x-token"
         if token is not None:
             token_path.write_text(token + "\n")
 
-        class Result:
-            def __init__(self, code):
-                self.returncode, self.stderr, self.stdout = code, "boom" if code else "", ""
-
         def run(argv, **kwargs):
-            calls.append(argv)
             if argv[:2] == ["podman", "run"]:
                 env_file = Path(argv[argv.index("--env-file") + 1])
                 seen_env["mode"] = env_file.stat().st_mode & 0o777
                 seen_env["text"] = env_file.read_text()
                 seen_env["path"] = env_file
-                return Result(start_code)
-            return Result(0)
+                if start_code:
+                    engine.calls.append(argv)
+                    return subprocess.CompletedProcess(argv, start_code, "", "boom")
+            return engine(argv)
 
+        seen_env["engine"] = engine
         with omabox.rsshub_session(True, run=run, wait=lambda: None, check=check, token_path=token_path, engine="podman"):
-            seen_env["marker"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
+            seen_env["marker"] = omabox.read_rsshub_marker()
             seen_env["live"] = (omabox.RSSHUB_LIVE_PORT, omabox.RSSHUB_KEY)
-        seen_env["marker_after"] = (self.runtime / omabox.RSSHUB_MARKER).exists()
-        return calls, seen_env
+        seen_env["marker_after"] = os.path.lexists(omabox.rsshub_marker())
+        return engine.calls, seen_env
 
     def test_session_passes_token_by_private_file_and_stops(self):
         calls, env = self.run_session()
@@ -2494,8 +2525,10 @@ class RsshubTest(unittest.TestCase):
         self.assertTrue(all("secret-token" not in " ".join(argv) for argv in calls))
         started = next(argv for argv in calls if argv[:2] == ["podman", "run"])
         self.assertIn("--log-driver=none", started)
-        self.assertEqual(calls[-1][:2], ["podman", "stop"])
-        self.assertEqual((env["marker"], env["marker_after"]), (True, False))
+        (stop,) = [argv for argv in calls if argv[:2] == ["podman", "stop"]]
+        self.assertEqual(stop[-1], env["marker"]["id"])
+        self.assertEqual(env["engine"].containers, {})
+        self.assertFalse(env["marker_after"])
 
     def test_session_never_uses_a_listener_it_did_not_start(self):
         seen = []
@@ -2670,7 +2703,7 @@ class RsshubTest(unittest.TestCase):
         token_path = Path(tempfile.mkdtemp()) / "x-token"
         token_path.write_text("secret-token\n")
         token_path.chmod(0o644)
-        with omabox.rsshub_session(True, run=lambda argv, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
+        with omabox.rsshub_session(True, run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
                                    wait=lambda: None, check=lambda: None, token_path=token_path, engine="podman"):
             pass
         self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
@@ -2757,25 +2790,96 @@ class RsshubTest(unittest.TestCase):
                 mock.patch.object(omabox, "fetch_lock", lambda: contextlib.nullcontext(True)):
             self.assertEqual(omabox.cmd_fetch(args), "fetched")
 
-    def test_a_container_left_by_a_killed_run_is_removed(self):
-        runtime = self.runtime
-        calls = []
+    def leave_a_container(self, engine):
+        """A session as a run killed mid-fetch leaves it: the container still up and its marker in place."""
+        token_path = Path(tempfile.mkdtemp()) / "x-token"
+        token_path.write_text("secret-token\n")
+        with omabox.rsshub_session(True, run=engine, wait=lambda: None, check=lambda: None, token_path=token_path,
+                                   engine=engine.name):
+            marker = omabox.rsshub_marker()
+            self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((self.runtime / omabox.RSSHUB_MARKER).exists())
+            record, left = marker.read_bytes(), dict(engine.containers)
+        marker.write_bytes(record)
+        engine.containers.update(left)
+        engine.calls.clear()
+        (cid,) = left
+        return cid
 
-        def run(argv, **kwargs):
-            calls.append(argv)
-            return type("Result", (), {"returncode": 0})()
+    def test_a_container_left_by_a_killed_run_is_removed_after_logout(self):
+        omabox.stop_stale_rsshub(lambda *a, **k: self.fail("no marker, nothing to ask"))
+        for name in ("podman", "docker"):
+            with self.subTest(engine=name):
+                engine = FakeEngine(name)
+                cid = self.leave_a_container(engine)
+                with omabox.rsshub_lock(self.runtime) as busy:
+                    omabox.fcntl.flock(busy, omabox.fcntl.LOCK_EX)
+                    omabox.stop_stale_rsshub(engine)
+                self.assertEqual(engine.calls, [])
+                # logout empties the runtime folder; the marker in the state folder still names the container
+                shutil.rmtree(self.runtime)
+                self.runtime.mkdir(mode=0o700)
+                with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+                    omabox.stop_stale_rsshub(engine)
+                self.assertEqual(engine.containers, {})
+                self.assertIn([name, "rm", "-f", "--", cid], engine.calls)
+                self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
 
-        omabox.stop_stale_rsshub(run)
-        self.assertEqual(calls, [])
-        (runtime / omabox.RSSHUB_MARKER).write_text("podman\n")
-        with omabox.rsshub_lock(runtime) as busy:
-            omabox.fcntl.flock(busy, omabox.fcntl.LOCK_EX)
-            omabox.stop_stale_rsshub(run)
-        self.assertEqual(calls, [])
-        with mock.patch.object(omabox.shutil, "which", lambda name: f"/usr/bin/{name}"):
-            omabox.stop_stale_rsshub(run)
-        self.assertEqual(calls, [["podman", "rm", "-f", omabox.RSSHUB_CONTAINER]])
-        self.assertFalse((runtime / omabox.RSSHUB_MARKER).exists())
+    def test_only_containers_the_run_labelled_are_removed(self):
+        engine = FakeEngine()
+        named = engine.add(name=omabox.RSSHUB_CONTAINER)
+        other = engine.add({omabox.RSSHUB_LABEL: "0" * 32})
+        calls, env = self.run_session(engine=engine)
+        self.assertEqual(set(engine.containers), {named, other})
+        self.assertEqual([argv[-1] for argv in calls if argv[1] in ("stop", "rm")], [env["marker"]["id"]])
+        started = next(argv for argv in calls if argv[1] == "run")
+        self.assertNotEqual(started[started.index("--name") + 1], omabox.RSSHUB_CONTAINER)
+        with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+            # a recorded id that now carries another label is not ours
+            omabox.write_rsshub_marker({"engine": "podman", "label": "1" * 32, "id": other})
+            omabox.stop_stale_rsshub(engine)
+            self.assertEqual(set(engine.containers), {named, other})
+            self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
+            # a marker without a record never leads to a removal by name
+            engine.calls.clear()
+            omabox.rsshub_marker().write_text("podman\n")
+            omabox.stop_stale_rsshub(engine)
+            self.assertEqual(engine.calls, [])
+            self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
+            # an engine that gives no answer keeps the marker for the next tick
+            omabox.write_rsshub_marker({"engine": "podman", "label": "2" * 32})
+            omabox.stop_stale_rsshub(lambda argv, **kw: subprocess.CompletedProcess(argv, 125, "", "down"))
+            self.assertTrue(omabox.rsshub_marker().exists())
+
+    def test_a_start_that_failed_leaves_no_labelled_container(self):
+        class Busy(FakeEngine):
+            def __call__(self, argv, **kwargs):
+                result = super().__call__(argv, **kwargs)
+                if argv[1] == "run" and sum(call[1] == "run" for call in self.calls) == 1:
+                    return subprocess.CompletedProcess(argv, 125, "", "port is already allocated")
+                return result
+
+        engine = Busy("docker")
+        token_path = Path(tempfile.mkdtemp()) / "x-token"
+        token_path.write_text("secret-token\n")
+        with omabox.rsshub_session(True, run=engine, wait=lambda: None, check=lambda: None, token_path=token_path,
+                                   engine="docker"):
+            self.assertEqual(len(engine.containers), 1)
+        self.assertEqual(sum(call[1] == "run" for call in engine.calls), 2)
+        self.assertEqual(engine.containers, {})
+
+    def test_a_planted_marker_link_is_dropped_not_followed(self):
+        victim = Path(tempfile.mkdtemp()) / "victim"
+        victim.write_text('{"engine": "podman", "label": "%s"}' % ("3" * 32))
+        private = omabox.private_dir(self.state.parent)
+        (private / omabox.RSSHUB_MARKER).symlink_to(victim)
+        with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+            omabox.stop_stale_rsshub(lambda *a, **k: self.fail("a link is no record"))
+        self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
+        (private / (omabox.RSSHUB_MARKER + ".new")).symlink_to(victim)
+        with self.assertRaises(OSError):
+            omabox.write_rsshub_marker({"engine": "podman", "label": "4" * 32})
+        self.assertIn("3" * 32, victim.read_text())
 
 
 

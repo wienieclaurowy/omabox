@@ -3610,8 +3610,7 @@ def rsshub_session(needed=True, run=subprocess.run, wait=wait_for_rsshub, check=
     with rsshub_lock(runtime) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Under the lock no other run uses it, so a container of ours still up was left by a killed run: it goes.
-        if engine:
-            remove_container(run, engine, runtime)
+        remove_stale_rsshub(run)
         with rsshub_container(run, wait, token_path, engine, runtime, check):
             yield
 
@@ -3637,39 +3636,110 @@ RSSHUB_MARKER = "omabox-rsshub.running"
 RSSHUB_MAX_SECONDS = 1800
 
 
-def remove_container(run, engine, runtime, graceful=False):
-    """Removes our container, after a stop when graceful; True once it is gone. The marker that says it may be up
-    goes with it."""
-    attempts = [[engine, "rm", "-f", RSSHUB_CONTAINER]]
-    if graceful:
-        attempts.insert(0, [engine, "stop", "-t", "5", RSSHUB_CONTAINER])
-    for argv in attempts:
+# Each run labels its container with a fresh random value kept only in the 0600 marker: a container is ours, and
+# removed, only when it carries that label. Names prove nothing, any container can take one.
+RSSHUB_LABEL = "io.github.wienieclaurowy.omabox"
+RSSHUB_ID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def rsshub_marker():
+    """In the state folder, not the runtime one: logout empties that, and a container docker keeps running past it
+    would then go unnoticed."""
+    return STATE_PATH.parent / RSSHUB_MARKER
+
+
+def write_rsshub_marker(record):
+    marker = private_dir(STATE_PATH.parent) / RSSHUB_MARKER
+    fresh = marker.with_name(RSSHUB_MARKER + ".new")
+    with open_private(fresh, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW) as handle:
+        json.dump(record, handle)
+    os.replace(fresh, marker)
+
+
+def read_rsshub_marker():
+    """The engine, label and container id a run recorded; None without a marker, {} for one that holds no record."""
+    try:
+        descriptor = os.open(rsshub_marker(), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {}
+    with os.fdopen(descriptor, "rb") as handle:
         try:
-            if run(argv, capture_output=True, timeout=60).returncode == 0:
-                (runtime / RSSHUB_MARKER).unlink(missing_ok=True)
-                return True
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return False
+            record = json.loads(handle.read(4096))
+        except ValueError:
+            return {}
+    if not isinstance(record, dict) or not isinstance(record.get("engine"), str) or \
+            Path(record["engine"]).name not in ("podman", "docker"):
+        return {}
+    label, cid = record.get("label"), record.get("id")
+    if not isinstance(label, str) or not re.fullmatch(r"[0-9a-f]{32}", label):
+        return {}
+    if cid is not None and not (isinstance(cid, str) and RSSHUB_ID_RE.fullmatch(cid)):
+        return {}
+    return record
+
+
+def labelled_containers(run, record):
+    """Ids of the containers that carry the run's label, and its recorded id when there is one; None when the
+    engine gave no answer."""
+    argv = [record["engine"], "ps", "-aq", "--no-trunc", "--filter", f"label={RSSHUB_LABEL}={record['label']}"]
+    if record.get("id"):
+        argv += ["--filter", f"id={record['id']}"]
+    try:
+        listed = run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0:
+        return None
+    return [cid for cid in (listed.stdout or "").split() if RSSHUB_ID_RE.fullmatch(cid)]
+
+
+def remove_container(run, record, graceful=False):
+    """Removes the run's containers, after a stop when graceful; True once none is left. The marker that says one
+    may be up goes with them."""
+    ids = labelled_containers(run, record)
+    if ids is None:
+        return False
+    engine = record["engine"]
+    for cid in ids:
+        # podman's rm -f succeeds for a gone id, docker's may not: what is left is asked again below
+        attempts = ([[engine, "stop", "-t", "5", "--", cid]] if graceful else []) + [[engine, "rm", "-f", "--", cid]]
+        for argv in attempts:
+            try:
+                if run(argv, capture_output=True, timeout=60).returncode == 0:
+                    break
+            except (OSError, subprocess.SubprocessError):
+                pass
+    if ids and labelled_containers(run, record) != []:
+        return False
+    rsshub_marker().unlink(missing_ok=True)
+    return True
+
+
+def remove_stale_rsshub(run):
+    """Under the RSSHub lock: removes what the marker records. A marker without a record, or for an engine no
+    longer installed, only goes itself."""
+    record = read_rsshub_marker()
+    if record is None:
+        return
+    if record and shutil.which(record["engine"]):
+        remove_container(run, record)
+    else:
+        rsshub_marker().unlink(missing_ok=True)
 
 
 def stop_stale_rsshub(run=subprocess.run, runtime=None):
     """Removes a container left up, holding the X token, by a run killed before it could stop it. Cheap when there
     is none: only a marker file is checked."""
-    runtime = Path(runtime or runtime_dir())
-    marker = runtime / RSSHUB_MARKER
-    if not marker.exists():
+    if not os.path.lexists(rsshub_marker()):
         return
-    with rsshub_lock(runtime) as lock:
+    with rsshub_lock(Path(runtime or runtime_dir())) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        engine = marker.read_text().strip() or container_engine()
-        if engine in ("podman", "docker") and shutil.which(engine):
-            remove_container(run, engine, runtime)
-        else:
-            marker.unlink(missing_ok=True)
+        remove_stale_rsshub(run)
 
 
 class XTokenMissing(RuntimeError):
@@ -3785,10 +3855,13 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
         # jsdelivr is blocked so the X query ids come from the pinned image, not a third-party file fetched at start.
         lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
         user = container_user(run, engine)
+        record = {"engine": engine, "label": secrets.token_hex(16)}
+        write_rsshub_marker(record)
         # a port taken between free_port() and the start makes the engine fail to publish it; another port is tried
         for _ in range(3):
             port = free_port()
-            started = run([engine, "run", "-d", "--rm", "--name", RSSHUB_CONTAINER, *lifetime,
+            started = run([engine, "run", "-d", "--rm", "--name", f"{RSSHUB_CONTAINER}-{secrets.token_hex(4)}",
+                           "--label", f"{RSSHUB_LABEL}={record['label']}", *lifetime,
                            "-p", f"127.0.0.1:{port}:1200", "--read-only", "--tmpfs", "/tmp", "--cap-drop=ALL",
                            "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m",
                            "--log-driver=none", "--user", user, "--add-host", "cdn.jsdelivr.net:127.0.0.1",
@@ -3797,20 +3870,24 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
             if started.returncode == 0 or not re.search(r"address already in use|port is already allocated",
                                                         started.stderr or "", re.I):
                 break
-            remove_container(run, engine, runtime)
+            remove_container(run, record)
     finally:
         env_file.unlink(missing_ok=True)
     if started.returncode != 0:
+        remove_container(run, record)
         raise RuntimeError(f"{engine} run failed: {(started.stderr or '').strip()[-300:]}")
-    (runtime / RSSHUB_MARKER).write_text(engine + "\n")
     try:
+        printed = (started.stdout or "").split()
+        if printed and RSSHUB_ID_RE.fullmatch(printed[-1]):
+            record["id"] = printed[-1]
+            write_rsshub_marker(record)
         RSSHUB_KEY, RSSHUB_LIVE_PORT = key, port
         wait()
         check()
         yield
     finally:
         RSSHUB_KEY, RSSHUB_LIVE_PORT = "", 0
-        remove_container(run, engine, runtime, graceful=True)
+        remove_container(run, record, graceful=True)
 
 
 def home_relative(path):
