@@ -5820,19 +5820,35 @@ def viewing_copies(paths, folder):
 
 
 def end_session(process, grace=5):
-    """TERM, then KILL after grace seconds, to the session a start_new_session child leads; the child is not yet
-    reaped, so its id still names that session's group. Children a leader left behind are ended too."""
+    """TERM, then KILL after grace seconds, to the session a start_new_session child leads. Children a leader left
+    behind are ended too. The leader is reaped only here, so until then its id cannot name another process's group;
+    callers check it with exit_status, never poll()."""
+    if getattr(process, "returncode", None) is not None and not session_alive(process.pid):
+        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except OSError:
         process.wait()
         return
     until = time.monotonic() + grace
-    while time.monotonic() < until and (process.poll() is None or session_alive(process.pid)):
+    while time.monotonic() < until and (exit_status(process) is None or session_alive(process.pid)):
         time.sleep(0.05)
     with contextlib.suppress(OSError):
         os.killpg(process.pid, signal.SIGKILL)
     process.wait()
+
+
+def exit_status(process):
+    """The child's exit code, negative for a signal, or None while it runs. It is not reaped (WNOWAIT)."""
+    if getattr(process, "returncode", None) is not None:
+        return process.returncode
+    try:
+        info = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return process.poll()
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
 
 
 def session_alive(group):
@@ -5872,7 +5888,7 @@ def cmd_view(args, windows=None, run=subprocess.Popen):
             sys.exit(viewer.wait())
         window, deadline = None, time.monotonic() + 10
         while window is None:
-            if time.monotonic() > deadline or (viewer.poll() not in (None, 0)):
+            if time.monotonic() > deadline or (exit_status(viewer) not in (None, 0)):
                 sys.exit(f"{argv[0]} opened no window")
             time.sleep(0.2)
             window = next(iter((windows() or before) - before), None)
@@ -6129,7 +6145,7 @@ def cmd_play(args, run=subprocess.Popen, windows=window_addresses, poll_every=0.
             if window:
                 break
             # exit 0 before a window is a single-instance player handing the videos to its running copy
-            if player.poll() not in (None, 0):
+            if exit_status(player) not in (None, 0):
                 sys.exit(shown(f"{argv[0]} could not play {urls[start]}"))
             if time.monotonic() > deadline:
                 sys.exit(f"{argv[0]} opened no window")

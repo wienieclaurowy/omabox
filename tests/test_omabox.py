@@ -2530,6 +2530,27 @@ class FakeEngine:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
+class SessionEndTest(unittest.TestCase):
+    def test_the_leader_stays_unreaped_until_its_group_is_signalled(self):
+        child = subprocess.Popen(["true"], start_new_session=True)
+        deadline = time.monotonic() + 10
+        while omabox.exit_status(child) is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(omabox.exit_status(child), 0)
+        # still a zombie: its id cannot name another process's group yet
+        self.assertEqual(os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT).si_pid, child.pid)
+        omabox.end_session(child, grace=0.2)
+        self.assertEqual(child.returncode, 0)
+
+    def test_a_reaped_leader_with_no_group_left_gets_no_signal(self):
+        child = subprocess.Popen(["true"], start_new_session=True)
+        child.wait()
+        sent = []
+        with mock.patch.object(omabox.os, "killpg", lambda group, sig: sent.append((group, sig))):
+            omabox.end_session(child, grace=0.2)
+        self.assertEqual(sent, [])
+
+
 class RsshubTest(unittest.TestCase):
     def setUp(self):
         self.runtime = Path(tempfile.mkdtemp())
