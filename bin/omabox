@@ -918,7 +918,8 @@ def plain_icon(data):
     return (picture[0], picture[1][0]) if picture else None
 
 
-PLAIN_CACHE_MARK = ".plain-pictures"
+# renamed when the rule for a plain picture tightens, so every install checks its whole cache once more
+PLAIN_CACHE_MARK = ".plain-pictures-boxed"
 
 
 def plain_cache(directories=None, mark=None):
@@ -935,12 +936,17 @@ def plain_cache(directories=None, mark=None):
             since = mark.stat().st_mtime
         except FileNotFoundError:
             since = None
-        plain_directories(directories, since)
+        failed = plain_directories(directories, since)
+        # the mark stays put, so the next run looks at the files this one could not fix
+        if failed:
+            raise OSError(f"{failed} cached pictures could neither be re-encoded nor removed")
         write_private(mark, b"")
         os.utime(mark, (started, started))
 
 
 def plain_directories(directories, since=None):
+    """The number of files that are still not plain pictures inside their directory's box."""
+    failed = 0
     for directory, box in directories:
         directory = Path(directory)
         if not directory.is_dir():
@@ -948,7 +954,7 @@ def plain_directories(directories, since=None):
         for path in directory.iterdir():
             if path.name.startswith("."):
                 continue
-            with contextlib.suppress(OSError):
+            try:
                 if path.is_symlink():
                     path.unlink()
                     continue
@@ -956,16 +962,21 @@ def plain_directories(directories, since=None):
                 if not stat.S_ISREG(st.st_mode) or (since is not None and st.st_mtime < since):
                     continue
                 data = path.read_bytes() if st.st_size <= MAX_IMAGE_BYTES else b""
-                if data and plain_picture(data):
-                    continue
                 kind = "ico" if data[:4] == b"\x00\x00\x01\x00" else (image_info(data) or ("",))[0]
                 info = image_info(data) if kind != "ico" else None
+                if data and plain_picture(data) and info and not oversized(info[1], info[2], box):
+                    continue
                 fits = kind and (info is None or info[1] * info[2] <= MAX_PICTURE_PIXELS)
                 picture = reencode_picture(data, kind, box) if fits else None
                 if picture:
                     store_picture(path, picture[0])
                 else:
                     path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed += 1
+    return failed
 
 
 # Fetches, `omabox article` and `omabox replies` download pictures before taking the state lock to store their refs.
@@ -5643,7 +5654,10 @@ def cmd_tick(args):
 
 
 def cmd_plain_cache(args):
-    plain_cache()
+    try:
+        plain_cache()
+    except OSError as error:
+        sys.exit(str(error))
 
 
 def cmd_delivery(args):

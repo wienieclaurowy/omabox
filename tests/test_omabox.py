@@ -653,7 +653,7 @@ class PrivateFilesTest(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         config, cache = self.root / "config" / "omabox", self.root / "cache" / "omabox"
         for name, path in (("CONFIG_PATH", config / "sources.toml"), ("CACHE_DIR", cache), ("IMAGE_DIR", cache / "images"),
-                           ("ICON_DIR", cache / "icons"), ("DISCOVER_DIR", cache / "discover")):
+                           ("ICON_DIR", cache / "icons"), ("DISCOVER_DIR", cache / "discover"),):
             patcher = mock.patch.object(omabox, name, path)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1216,6 +1216,35 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(old.read_bytes(), raw)
         self.assertTrue(omabox.plain_picture(new.read_bytes()))
         self.assertFalse((self.dir / "0123456789abcdef0128.png").is_symlink())
+
+    def test_plain_pictures_past_their_box_are_re_encoded_into_it(self):
+        icons = self.dir.parent / "icons"
+        self.dir.mkdir(parents=True)
+        icons.mkdir()
+        (self.dir / "0123456789abcdef0123.png").write_bytes(png(2000, 100))
+        (self.dir / "0123456789abcdef0124.png").write_bytes(png(4000, 4000))
+        (icons / "fav.png").write_bytes(png(300, 300))
+        omabox.plain_cache(((self.dir, omabox.PICTURE_BOX), (icons, omabox.AVATAR_BOX)), self.dir.parent / "mark")
+        self.assertEqual(omabox.image_info((self.dir / "0123456789abcdef0123.png").read_bytes()), ("png", 1600, 80))
+        self.assertEqual(omabox.image_info((self.dir / "0123456789abcdef0124.png").read_bytes()), ("png", 1600, 1600))
+        self.assertEqual(omabox.image_info((icons / "fav.png").read_bytes()), ("png", 128, 128))
+
+    def test_the_mark_waits_while_a_picture_can_be_neither_fixed_nor_removed(self):
+        self.dir.mkdir(parents=True)
+        cached = self.dir / "0123456789abcdef0123.png"
+        raw = png(40, 30, png_chunk(b"zTXt", b"c\0\0" + zlib.compress(b"\0" * 1000)))
+        cached.write_bytes(raw)
+        mark = self.dir.parent / "mark"
+
+        def full(path, data):
+            raise OSError(28, "No space left on device")
+        with mock.patch.object(omabox, "store_picture", full), self.assertRaises(OSError):
+            omabox.plain_cache(((self.dir, omabox.PICTURE_BOX),), mark)
+        self.assertFalse(mark.exists())
+        self.assertEqual(cached.read_bytes(), raw)
+        omabox.plain_cache(((self.dir, omabox.PICTURE_BOX),), mark)
+        self.assertTrue(omabox.plain_picture(cached.read_bytes()))
+        self.assertTrue(mark.exists())
 
     def test_comments_and_the_article_share_the_post_pixel_budget(self):
         shown = '<p><img src="omabox-img:0123456789abcdef0123.png" width="4000" height="5000"></p>'
