@@ -44,6 +44,7 @@
   "common.listSeparator": "、",
   "common.noWlCopy": "コピーできません: wl-copy がインストールされていません。",
   "common.wlCopyFailed": "コピーできません: wl-copy が失敗しました。",
+  "common.wlCopyNotPrivate": "コピーできません: この wl-copy は非公開でコピーできません (2.3 以降が必要)。",
   "bar.unread": {
     "other": "Omabox: 未読 %1 件"
   },

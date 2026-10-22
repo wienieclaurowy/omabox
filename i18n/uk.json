@@ -44,6 +44,7 @@
   "common.listSeparator": ", ",
   "common.noWlCopy": "Не скопійовано: wl-copy не встановлено.",
   "common.wlCopyFailed": "Не скопійовано: помилка wl-copy.",
+  "common.wlCopyNotPrivate": "Не скопійовано: ця версія wl-copy не вміє копіювати приватно (потрібна 2.3 або новіша).",
   "bar.unread": {
     "one": "Omabox: %1 непрочитаний",
     "few": "Omabox: %1 непрочитані",

@@ -44,6 +44,7 @@
   "common.listSeparator": ", ",
   "common.noWlCopy": "Не скопировано: wl-copy не установлен.",
   "common.wlCopyFailed": "Не скопировано: ошибка wl-copy.",
+  "common.wlCopyNotPrivate": "Не скопировано: эта версия wl-copy не умеет копировать приватно (нужна 2.3 или новее).",
   "bar.unread": {
     "one": "Omabox: %1 непрочитанная",
     "few": "Omabox: %1 непрочитанные",

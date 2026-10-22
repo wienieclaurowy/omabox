@@ -44,6 +44,7 @@
   "common.listSeparator": "、",
   "common.noWlCopy": "未复制：未安装 wl-copy。",
   "common.wlCopyFailed": "未复制：wl-copy 执行失败。",
+  "common.wlCopyNotPrivate": "未复制：此 wl-copy 无法私密复制（需要 2.3 或更高版本）。",
   "bar.unread": {
     "other": "Omabox：%1 条未读"
   },

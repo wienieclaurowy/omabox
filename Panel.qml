@@ -1426,8 +1426,8 @@ Panel {
     property string text: ""
     property bool plain: false
     environment: ({ OMABOX_COPY: plain ? "plain" : "sensitive" })
-    // wl-copy before 2.3 rejects --sensitive: only then is the copy retried without it.
-    readonly property string script: "command -v wl-copy >/dev/null || exit 127; text=$(cat; printf x); text=${text%x}; t='text/plain;charset=utf-8'; if [ \"$OMABOX_COPY\" != plain ]; then printf %s \"$text\" | wl-copy --sensitive --type \"$t\" >/dev/null 2>&1 && exit 0; s=$?; wl-copy --help </dev/null 2>&1 | grep -q -- --sensitive && exit $s; fi; printf %s \"$text\" | wl-copy --type \"$t\" >/dev/null 2>&1"
+    // wl-copy before 2.3 has no --sensitive: a private copy is refused (3) rather than kept in clipboard history.
+    readonly property string script: "command -v wl-copy >/dev/null || exit 127; t='text/plain;charset=utf-8'; if [ \"$OMABOX_COPY\" = plain ]; then exec wl-copy --type \"$t\" >/dev/null 2>&1; fi; wl-copy --help </dev/null 2>&1 | grep -q -- --sensitive || exit 3; exec wl-copy --sensitive --type \"$t\" >/dev/null 2>&1"
     command: Model.bounded(["bash", "-c", script], Model.SMALL_OUTPUT_BYTES, 10)
     // Turning stdin off closes it, the EOF the copy waits for.
     onStarted: {
@@ -1445,7 +1445,8 @@ Panel {
           return
         }
         root.messageError = true
-        root.message = code === 127 ? Tr.t("common.noWlCopy") : Tr.t("common.wlCopyFailed")
+        root.message = code === 127 ? Tr.t("common.noWlCopy")
+          : code === 3 ? Tr.t("common.wlCopyNotPrivate") : Tr.t("common.wlCopyFailed")
       }
     }
   }

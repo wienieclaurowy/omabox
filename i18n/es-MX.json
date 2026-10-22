@@ -44,6 +44,7 @@
   "common.listSeparator": ", ",
   "common.noWlCopy": "No se copió: wl-copy no está instalado.",
   "common.wlCopyFailed": "No se copió: wl-copy falló.",
+  "common.wlCopyNotPrivate": "No se copió: este wl-copy no puede copiar en privado (requiere 2.3 o posterior).",
   "bar.unread": {
     "one": "Omabox: %1 sin leer",
     "many": "Omabox: %1 de sin leer",
