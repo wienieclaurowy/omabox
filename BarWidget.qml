@@ -256,7 +256,10 @@ BarWidget {
     if (!firstCopy) ipcOwner = false
     else Qt.callLater(function() { root.ipcOwner = root.scheduler() })
   }
-  Component.onCompleted: Qt.callLater(function() { root.ipcOwner = root.scheduler() })
+  Component.onCompleted: {
+    plainCache()
+    Qt.callLater(function() { root.ipcOwner = root.scheduler() })
+  }
 
   IpcHandler {
     enabled: root.ipcOwner
@@ -391,11 +394,39 @@ BarWidget {
     onFileChanged: root.readState()
   }
 
-  readonly property bool readsState: stateDirReady && ownsState
+  // Posts are read only after `omabox plain-cache`: Qt inflates PNG text chunks of pictures an older version cached.
+  property bool cachePlain: false
+
+  function plainCache() {
+    if (ownsState && !cachePlain && !plainProc.running) plainProc.running = true
+  }
+
+  onOwnsStateChanged: plainCache()
+
+  Process {
+    id: plainProc
+    command: Model.bounded([root.omaboxBin, "plain-cache"], Model.SMALL_OUTPUT_BYTES, Model.CLI_SECONDS)
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (Model.splitCliOutput(text, Tr).code === 0) root.cachePlain = true
+        else plainRetry.start()
+      }
+    }
+  }
+
+  Timer {
+    id: plainRetry
+    interval: 30000
+    onTriggered: root.plainCache()
+  }
+
+  readonly property bool readsState: stateDirReady && cachePlain && ownsState
   onReadsStateChanged: if (readsState) readState()
   property bool stateStale: false
 
   function readState() {
+    if (!readsState) return
     if (stateReader.running) stateStale = true
     else stateReader.running = true
   }

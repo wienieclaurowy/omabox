@@ -1,6 +1,7 @@
 import argparse
 import codecs
 import contextlib
+import fcntl
 import functools
 import html
 import http.server
@@ -657,6 +658,28 @@ class PrivateFilesTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(os.umask, os.umask(0o022))
+
+    def test_the_cache_is_re_encoded_once_a_running_pass_ends(self):
+        omabox.IMAGE_DIR.mkdir(parents=True)
+        cached = omabox.IMAGE_DIR / "0123456789abcdef0123.png"
+        raw = png(40, 30, png_chunk(b"zTXt", b"c\0\0" + zlib.compress(b"\0" * 1000)))
+        cached.write_bytes(raw)
+        mark = omabox.CACHE_DIR / omabox.PLAIN_CACHE_MARK
+        omabox.app_dir(omabox.CACHE_DIR)
+        with omabox.open_private(mark.with_name(mark.name + ".lock"), os.O_WRONLY | os.O_CREAT) as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            waiting = threading.Thread(target=omabox.plain_cache)
+            waiting.start()
+            waiting.join(0.5)
+            self.assertTrue(waiting.is_alive())
+            self.assertFalse(omabox.plain_picture(cached.read_bytes()))
+        waiting.join(30)
+        self.assertTrue(omabox.plain_picture(cached.read_bytes()))
+        self.assertTrue(mark.exists())
+        mark.unlink()
+        cached.write_bytes(raw)
+        omabox.main(["plain-cache"])
+        self.assertTrue(omabox.plain_picture(cached.read_bytes()))
 
     def test_config_and_cache_are_private_from_creation(self):
         created = []

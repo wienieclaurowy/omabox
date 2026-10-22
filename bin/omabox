@@ -915,6 +915,16 @@ def plain_cache(directories=None, mark=None):
     mark = Path(mark or CACHE_DIR / PLAIN_CACHE_MARK)
     if mark.exists():
         return
+    app_dir(mark.parent)
+    # the widget's start and the first tick both run it; a second run waits, then finds the mark
+    with open_private(mark.with_name(mark.name + ".lock"), os.O_WRONLY | os.O_CREAT) as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        if not mark.exists():
+            plain_directories(directories)
+            write_private(mark, b"")
+
+
+def plain_directories(directories):
     for directory, box in directories:
         directory = Path(directory)
         if not directory.is_dir():
@@ -934,8 +944,6 @@ def plain_cache(directories=None, mark=None):
                     store_picture(path, picture[0])
                 else:
                     path.unlink()
-    app_dir(mark.parent)
-    write_private(mark, b"")
 
 
 # Fetches, `omabox article` and `omabox replies` download pictures before taking the state lock to store their refs.
@@ -5524,6 +5532,10 @@ def cmd_tick(args):
         print(tick_plan(state)[1])
 
 
+def cmd_plain_cache(args):
+    plain_cache()
+
+
 def cmd_delivery(args):
     # read-only without arguments: the panel asks on every open and must not queue behind a write
     with locked() if args.time or args.weekly_day else contextlib.nullcontext():
@@ -6254,6 +6266,9 @@ def main(argv=None):
     tick = sub.add_parser("tick", help="what the bar widget runs every few minutes: deliver or retry when due, "
                                        "archive notifications, print the seconds until the next tick")
     tick.set_defaults(func=cmd_tick)
+    plain = sub.add_parser("plain-cache", help="what the bar widget runs before it reads the feed: re-encode "
+                                               "pictures cached by an older version, once")
+    plain.set_defaults(func=cmd_plain_cache)
     notes = sub.add_parser("notifications", help="archive new notifications, then print the stored ones for the panel")
     notes.set_defaults(func=cmd_notifications)
     archive = sub.add_parser("archive-notifications", help="copy new Omarchy notifications into the 7-day archive")
