@@ -3994,9 +3994,10 @@ def rsshub_container(run, wait, token_path, engine, runtime, check=check_rsshub)
         lifetime = ["--timeout", str(RSSHUB_MAX_SECONDS)] if Path(engine).name == "podman" else []
         user = container_user(run, engine)
         record = {"engine": engine, "label": secrets.token_hex(16)}
-        write_rsshub_marker(record)
         # a port taken between free_port() and the start makes the engine fail to publish it; another port is tried
         for _ in range(3):
+            # removing a failed try drops the marker; each start needs it first, or a kill leaves a container unfound
+            write_rsshub_marker(record)
             port = free_port()
             started = run([engine, "run", "-d", "--rm", "--name", f"{RSSHUB_CONTAINER}-{secrets.token_hex(4)}",
                            "--label", f"{RSSHUB_LABEL}={record['label']}", *lifetime,

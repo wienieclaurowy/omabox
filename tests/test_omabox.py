@@ -2967,6 +2967,34 @@ class RsshubTest(unittest.TestCase):
         self.assertEqual(sum(call[1] == "run" for call in engine.calls), 2)
         self.assertEqual(engine.containers, {})
 
+    def test_every_retried_start_is_recorded_before_it_runs(self):
+        test = self
+
+        class Retried(FakeEngine):
+            def __call__(self, argv, **kwargs):
+                if argv[1] != "run":
+                    return super().__call__(argv, **kwargs)
+                test.assertEqual(omabox.read_rsshub_marker()["label"], argv[argv.index("--label") + 1].split("=")[1])
+                result = super().__call__(argv, **kwargs)
+                if sum(call[1] == "run" for call in self.calls) == 1:
+                    return subprocess.CompletedProcess(argv, 125, "", "Error: address already in use")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+        engine = Retried()
+        token_path = Path(tempfile.mkdtemp()) / "x-token"
+        token_path.write_text("secret-token\n")
+        with omabox.rsshub_session(True, run=engine, wait=lambda: None, check=lambda: None, token_path=token_path,
+                                   engine="podman"):
+            # a run killed here, with no id printed, still leaves a record that finds its container
+            record, left = omabox.rsshub_marker().read_bytes(), dict(engine.containers)
+        self.assertEqual((sum(call[1] == "run" for call in engine.calls), len(left)), (2, 1))
+        omabox.rsshub_marker().write_bytes(record)
+        engine.containers.update(left)
+        with mock.patch.object(omabox.shutil, "which", lambda tool: f"/usr/bin/{tool}"):
+            omabox.stop_stale_rsshub(engine)
+        self.assertEqual(engine.containers, {})
+        self.assertFalse(os.path.lexists(omabox.rsshub_marker()))
+
     def test_a_planted_marker_link_is_dropped_not_followed(self):
         victim = Path(tempfile.mkdtemp()) / "victim"
         victim.write_text('{"engine": "podman", "label": "%s"}' % ("3" * 32))
