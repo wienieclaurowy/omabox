@@ -81,6 +81,7 @@
   "feed.fetching": "Fetching new posts…",
   "feed.recovered": "Omabox could not read its saved posts and started over. The old file is %1.",
   "feed.deliveryFailed": "Delivery failed: %1",
+  "feed.cacheFailed": "Posts wait for the picture cache: %1",
   "feed.pausedUntil": "Deliveries paused until %1",
   "feed.nothingDelivered": "Nothing delivered yet. The first delivery starts within a minute.",
   "feed.failedSources": "failed: %1",

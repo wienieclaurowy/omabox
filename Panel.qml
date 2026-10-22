@@ -1680,7 +1680,9 @@ Panel {
 
           Text {
             id: headerStatus
-            readonly property bool failed: root.view === "feed" && root.hostWidget !== null && root.hostWidget.tickProblem !== ""
+            readonly property string cacheProblem: root.hostWidget ? root.hostWidget.cacheProblem : ""
+            readonly property bool failed: root.view === "feed" && root.hostWidget !== null
+              && (cacheProblem !== "" || root.hostWidget.tickProblem !== "")
             anchors.left: tabRow.right
             anchors.leftMargin: Style.space(8)
             anchors.right: toolRow.left
@@ -1692,7 +1694,8 @@ Panel {
             maximumLineCount: 2
             elide: Text.ElideRight
             text: root.view === "feed"
-              ? [Model.deliveryNotice(root.feedState, root.now, hostWidget ? hostWidget.tickProblem : "", Tr).split("  ·  ").join("\n"),
+              ? [cacheProblem !== "" ? Model.fill(Tr.t("feed.cacheFailed"), [cacheProblem])
+                   : Model.deliveryNotice(root.feedState, root.now, hostWidget ? hostWidget.tickProblem : "", Tr).split("  ·  ").join("\n"),
                  root.errorSources.length > 0 ? Model.fill(Tr.t("feed.failedSources"), [root.errorSources.join(Tr.t("common.listSeparator"))]) : ""]
                 .filter(function(part) { return part !== "" }).join("\n")
               : root.view === "sources" && root.sourcesLoaded

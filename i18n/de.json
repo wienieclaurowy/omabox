@@ -81,6 +81,7 @@
   "feed.fetching": "Neue Beiträge werden geholt…",
   "feed.recovered": "Omabox konnte seine gespeicherten Beiträge nicht lesen und hat neu angefangen. Die alte Datei ist %1.",
   "feed.deliveryFailed": "Zustellung fehlgeschlagen: %1",
+  "feed.cacheFailed": "Beiträge warten auf den Bildercache: %1",
   "feed.pausedUntil": "Zustellung pausiert bis %1",
   "feed.nothingDelivered": "Noch nichts zugestellt. Die erste Zustellung beginnt innerhalb einer Minute.",
   "feed.failedSources": "fehlgeschlagen: %1",

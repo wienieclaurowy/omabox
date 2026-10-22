@@ -81,6 +81,7 @@
   "feed.fetching": "Nieuwe berichten ophalen…",
   "feed.recovered": "Omabox kon de opgeslagen berichten niet lezen en is opnieuw begonnen. Het oude bestand is %1.",
   "feed.deliveryFailed": "Bezorging mislukt: %1",
+  "feed.cacheFailed": "Berichten wachten op de afbeeldingscache: %1",
   "feed.pausedUntil": "Bezorging gepauzeerd tot %1",
   "feed.nothingDelivered": "Nog niets bezorgd. De eerste bezorging begint binnen een minuut.",
   "feed.failedSources": "mislukt: %1",

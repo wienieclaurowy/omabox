@@ -397,6 +397,8 @@ BarWidget {
   // Posts are read only after `omabox plain-cache`: Qt inflates PNG text chunks of pictures an older version cached.
   property bool cachePlain: false
   readonly property bool cacheReady: ownsState ? cachePlain : stateOwner.cacheReady
+  property string ownCacheProblem: ""
+  readonly property string cacheProblem: ownsState ? ownCacheProblem : stateOwner.cacheProblem
 
   function plainCache() {
     if (ownsState && !cachePlain && !plainProc.running) plainProc.running = true
@@ -410,15 +412,23 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (Model.splitCliOutput(text, Tr).code === 0) root.cachePlain = true
-        else plainRetry.start()
+        var result = Model.splitCliOutput(text, Tr)
+        root.ownCacheProblem = result.code === 0 ? "" : result.text || "exit " + result.code
+        if (result.code === 0) {
+          root.cachePlain = true
+        } else {
+          plainRetry.interval = root.plainWait
+          plainRetry.start()
+          root.plainWait = Math.min(root.plainWait * 2, 600000)
+        }
       }
     }
   }
 
+  property int plainWait: 30000
+
   Timer {
     id: plainRetry
-    interval: 30000
     onTriggered: root.plainCache()
   }
 

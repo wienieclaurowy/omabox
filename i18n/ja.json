@@ -76,6 +76,7 @@
   "feed.fetching": "新しい投稿を取得中…",
   "feed.recovered": "Omabox は保存済みの投稿を読み込めず、最初からやり直しました。古いファイル: %1",
   "feed.deliveryFailed": "配信に失敗しました: %1",
+  "feed.cacheFailed": "投稿は画像キャッシュの処理待ちです: %1",
   "feed.pausedUntil": "配信は %1 まで一時停止中",
   "feed.nothingDelivered": "まだ何も配信されていません。最初の配信は1分以内に始まります。",
   "feed.failedSources": "失敗: %1",

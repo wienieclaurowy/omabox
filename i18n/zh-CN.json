@@ -76,6 +76,7 @@
   "feed.fetching": "正在获取新文章…",
   "feed.recovered": "Omabox 无法读取已保存的文章，已重新开始。旧文件为 %1。",
   "feed.deliveryFailed": "投递失败：%1",
+  "feed.cacheFailed": "帖子正在等待图片缓存：%1",
   "feed.pausedUntil": "投递已暂停，至 %1",
   "feed.nothingDelivered": "尚未投递任何内容。首次投递将在一分钟内开始。",
   "feed.failedSources": "失败：%1",

@@ -86,6 +86,7 @@
   "feed.fetching": "Obteniendo publicaciones nuevas…",
   "feed.recovered": "Omabox no pudo leer sus publicaciones guardadas y empezó de nuevo. El archivo anterior es %1.",
   "feed.deliveryFailed": "Falló la entrega: %1",
+  "feed.cacheFailed": "Las publicaciones esperan a la caché de imágenes: %1",
   "feed.pausedUntil": "Entregas pausadas hasta %1",
   "feed.nothingDelivered": "Aún no se entrega nada. La primera entrega empieza en menos de un minuto.",
   "feed.failedSources": "fallaron: %1",

@@ -91,6 +91,7 @@
   "feed.fetching": "Pobieram nowe wpisy…",
   "feed.recovered": "Omabox nie mógł odczytać zapisanych wpisów i zaczął od nowa. Stary plik: %1.",
   "feed.deliveryFailed": "Dostawa nie powiodła się: %1",
+  "feed.cacheFailed": "Wpisy czekają na pamięć podręczną obrazów: %1",
   "feed.pausedUntil": "Dostawy wstrzymane do %1",
   "feed.nothingDelivered": "Jeszcze nic nie dostarczono. Pierwsza dostawa ruszy w ciągu minuty.",
   "feed.failedSources": "błąd: %1",
