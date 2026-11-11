@@ -1,0 +1,10 @@
+# Rules written out so a newer ruff does not bring in its wider defaults.
+line-length = 120
+target-version = "py311"
+
+# The CLI must start on Python 3.11; the test suite needs 3.12.
+[per-file-target-version]
+"tests/*.py" = "py312"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Fast checks for a change: prints only what fails, exit 1 on any failure.
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+fail=0
+
+step() {
+    local name=$1 out
+    shift
+    if ! out=$("$@" 2>&1); then
+        printf '== %s failed\n%s\n' "$name" "$(tail -n 40 <<<"$out")"
+        fail=1
+    fi
+}
+
+# shellcheck disable=SC2329  # called through step
+qml_syntax() {
+    local lint
+    lint=$(command -v qmllint || command -v qmllint6 || echo /usr/lib/qt6/bin/qmllint)
+    [[ -x $lint ]] || { echo 'qmllint not found'; return 1; }
+    # Only these categories: the rest fire on every file, since qmllint cannot resolve the shell's imports.
+    ! "$lint" "$@" 2>&1 | grep -E -A2 '\[(syntax[a-z.-]*|duplicate-property-binding)\]$'
+}
+
+step ruff ruff check --quiet --output-format concise bin/omabox bin/omabox-ytdl tests tools
+step qml qml_syntax ./*.qml tests/*.qml tools/screenshots/*.qml
+step manifest python3 -m json.tool manifest.json
+# The suite also runs tests/i18n_check.py over the catalogs and tst_model.qml over Model.js.
+step tests python3 -m unittest discover -q -s tests
+step shellcheck shellcheck verify
+exit "$fail"
