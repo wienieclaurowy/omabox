@@ -353,7 +353,9 @@ class ParseTest(unittest.TestCase):
     def test_youtube_thumbnail_goes_through_the_image_cache(self):
         state = omabox.load_state(Path(tempfile.mkdtemp()) / "missing.json")
         directory = Path(tempfile.mkdtemp())
-        fetch = lambda url, limit: jpeg(480, 360)
+        def fetch(url, limit):
+            return jpeg(480, 360)
+
         omabox.merge(state, "Quarry", list(omabox.parse_feed(YOUTUBE_FEED)), "2026-09-27T08:00:00Z",
                      lambda entry: omabox.ImageFetcher(entry["link"], fetch, directory))
         (item,) = state["items"]
@@ -1339,7 +1341,9 @@ class ImageTest(unittest.TestCase):
 
     def test_avatars_are_few_and_small(self):
         sizes = {"https://a.example/small.png": png(400, 400), "https://a.example/tall.png": png(1600, 4000)}
-        fetch = lambda url, limit: sizes.get(url, png(48, 48))
+        def fetch(url, limit):
+            return sizes.get(url, png(48, 48))
+
         self.assertEqual(omabox.cache_avatar("https://a.example/small.png", fetch, self.dir)[1:], (128, 128))
         self.assertEqual(omabox.cache_avatar("https://a.example/tall.png", fetch, self.dir)[1:], (51, 128))
         urls = [f"https://a.example/{n}.png" for n in range(omabox.MAX_AVATARS_PER_ITEM + 20)]
@@ -2976,7 +2980,7 @@ class RsshubTest(unittest.TestCase):
                 if argv[1] != "run":
                     return super().__call__(argv, **kwargs)
                 test.assertEqual(omabox.read_rsshub_marker()["label"], argv[argv.index("--label") + 1].split("=")[1])
-                result = super().__call__(argv, **kwargs)
+                super().__call__(argv, **kwargs)
                 if sum(call[1] == "run" for call in self.calls) == 1:
                     return subprocess.CompletedProcess(argv, 125, "", "Error: address already in use")
                 return subprocess.CompletedProcess(argv, 0, "", "")
@@ -3759,11 +3763,11 @@ class LinkTest(unittest.TestCase):
         self.assertIn('<span class="meta">Omarchy</span>', result)
 
     def test_no_card_without_title_or_trailing_url(self):
-        self.assertEqual(omabox.attach_card("a https://x.org/ b", "a https://x.org/ b", None, lambda u, l: b""), "a https://x.org/ b")
+        self.assertEqual(omabox.attach_card("a https://x.org/ b", "a https://x.org/ b", None, lambda u, n: b""), "a https://x.org/ b")
         original = omabox.public_host
         omabox.public_host = lambda url: True
         try:
-            self.assertEqual(omabox.attach_card("see https://x.org/", "see https://x.org/", None, lambda u, l: b"<html></html>"),
+            self.assertEqual(omabox.attach_card("see https://x.org/", "see https://x.org/", None, lambda u, n: b"<html></html>"),
                              "see https://x.org/")
         finally:
             omabox.public_host = original
@@ -5332,7 +5336,9 @@ class SearchPickTest(unittest.TestCase):
         ]
 
     def test_search_matches_every_word_in_title_source_and_text(self):
-        ids = lambda query: [i["id"] for i in omabox.search_items(self.items(), query)]
+        def ids(query):
+            return [i["id"] for i in omabox.search_items(self.items(), query)]
+
         self.assertEqual(ids(""), ["new", "mid", "old"])
         self.assertEqual(ids("HYPRLAND"), ["new", "old"])
         self.assertEqual(ids("omarchy"), ["new", "mid"])
