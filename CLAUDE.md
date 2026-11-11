@@ -26,7 +26,7 @@ the catalog check (`tests/i18n_check.py i18n --sources .`) and `tests/tst_model.
   a change to imports, codecs or stdlib calls needs one real run of the CLI in a Python 3.11 container.
 - Never drive the live panel with synthetic keystrokes. Only one popout is open at a time, so when the panel
   closes mid-test the keys land in another window. Use the IPC calls above.
-- Plain `qml` and `qmltestrunner` cannot load `qs.Commons`, and Quickshell cannot `grabToImage` off-screen.
+- Plain `qml` and `qmltestrunner` cannot load `qs.Commons`, so the panel itself has no off-screen test.
   Logic that needs a test goes into `Model.js`; looks are checked in the live or the sandboxed shell.
 - The reading font tags every file as weight 80: set `font.styleName` ("Regular" or "Bold") or Qt draws bold.
 - By design, not bugs: no live or instant mode, no counters of likes or views, arrow keys swallowed in the
