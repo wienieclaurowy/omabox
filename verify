@@ -14,11 +14,16 @@ step() {
 
 # shellcheck disable=SC2329  # called through step
 qml_syntax() {
-    local lint
+    local lint out status
     lint=$(command -v qmllint || command -v qmllint6 || echo /usr/lib/qt6/bin/qmllint)
     [[ -x $lint ]] || { echo 'qmllint not found'; return 1; }
+    out=$("$lint" "$@" 2>&1)
+    status=$?
     # Only these categories: the rest fire on every file, since qmllint cannot resolve the shell's imports.
-    ! "$lint" "$@" 2>&1 | grep -E -A2 '\[(syntax[a-z.-]*|duplicate-property-binding)\]$'
+    if grep -E -A2 '\[(syntax[a-z.-]*|duplicate-property-binding)\]$' <<<"$out"; then
+        return 1
+    fi
+    [[ $status -eq 0 ]] || { tail -n 5 <<<"$out"; return 1; }
 }
 
 step ruff ruff check --quiet --output-format concise bin/omabox bin/omabox-ytdl tests tools
