@@ -41,6 +41,18 @@ Ui.TextField {
     copier.running = true
   }
 
+  // Qt copies a mouse selection to the primary selection on release, with no sensitive hint and even read-only, so
+  // the field never sees mouse events: a click only places the cursor.
+  MouseArea {
+    anchors.fill: parent
+    cursorShape: Qt.IBeamCursor
+    onPressed: function(mouse) {
+      field.forceActiveFocus()
+      field.deselect()
+      field.cursorPosition = field.positionAt(mouse.x, mouse.y)
+    }
+  }
+
   Process {
     id: copier
     property string text: ""
