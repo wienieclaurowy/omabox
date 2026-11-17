@@ -176,7 +176,7 @@ settings. Press `t` in Sources to replace or remove the saved token.
 
 The first X fetch downloads the RSSHub image (about a minute). If X later rejects the token, Omabox sends one
 notification; press `t` in Sources to paste a new one. Omabox fetches each X source once per delivery, and
-replies only when you open a post.
+replies only when you open one of its posts; a link to X inside another feed's post never uses your token.
 
 ## Privacy
 
