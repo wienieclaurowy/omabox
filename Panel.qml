@@ -608,7 +608,7 @@ Panel {
   // or another post's fetch), or "unavailable".
   function repliesState() {
     var post = root.readingPost
-    if (!reading || view !== "feed" || !Model.repliesAvailable(post)) return "unavailable"
+    if (!reading || view !== "feed" || !Model.repliesAvailable(post, feedState.profiles)) return "unavailable"
     if (root.repliesLoadingId === post.id) return "loading"
     if (post.replies_html !== undefined) return "shown"
     return root.repliesFailed[post.id] ? "failed" : "waiting"

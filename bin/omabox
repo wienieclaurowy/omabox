@@ -5631,6 +5631,10 @@ def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session,
     ref = x_post_ref(item.get("link"))
     if not ref:
         raise ValueError("only X, Reddit, Hacker News, Bluesky and Mastodon posts have comments to show")
+    # RSSHub fetches with the user's X token: only for posts of the user's X sources, never another feed's link
+    source = next((s for s in load_sources() if s["name"] == item["source"]), None)
+    if source is None or not x_route(source["url"]):
+        raise ValueError("X replies are shown only for posts of X sources")
     # JSON, not RSS: only JSON Feed keeps each reply's avatar and the post it answers
     url = f"{RSSHUB_BASE}/twitter/tweet/{ref[0]}/status/{ref[1]}?format=json&sorted=false"
     try:

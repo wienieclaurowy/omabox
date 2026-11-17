@@ -39,6 +39,15 @@ TestCase {
     verify(Model.MESSAGE_CHARS >= Model.ACTION_SHOWN_MAX + 200)
   }
 
+  function test_x_replies_only_for_posts_of_x_sources() {
+    var profiles = { "Rowan on X": { name: "Rowan" } }
+    var link = "https://x.com/rowanvale/status/100"
+    verify(Model.repliesAvailable({ source: "Rowan on X", link: link }, profiles))
+    verify(!Model.repliesAvailable({ source: "Blog", link: link }, profiles))
+    verify(!Model.repliesAvailable({ source: "Rowan on X", link: link }, undefined))
+    verify(Model.repliesAvailable({ source: "Blog", link: "https://news.ycombinator.com/item?id=1" }, profiles))
+  }
+
   function test_bounded_output_past_its_limit_is_an_error() {
     compare(Model.splitCliOutput("::overflow", english).code, 1)
     compare(Model.splitCliOutput("::overflow", english).text, english.t("cli.outputTooLarge"))

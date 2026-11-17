@@ -695,10 +695,12 @@ function articleView(item, feedVersion) {
 
 // `omabox replies` reads the post from the link: X status, Reddit comment-page, Bluesky post and Mastodon status
 // links qualify (bin/omabox X_POST_RE, REDDIT_POST_RE, BLUESKY_POST_RE, MASTODON_POST_RE), and Hacker News items
-// by link or by hn_entry's discussion link (hn_item_ref).
-function repliesAvailable(item) {
+// by link or by hn_entry's discussion link (hn_item_ref). X replies use the user's token, so only posts of X sources
+// (profiles: X sources only) get them, never another feed's link to X.
+function repliesAvailable(item, profiles) {
   var link = String(item && item.link || "")
-  return !!item && !item.note && (/^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/\w{1,15}\/status\/\d+/i.test(link)
+  var xSource = !!(item && profiles && profiles[item.source])
+  return !!item && !item.note && (xSource && /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/\w{1,15}\/status\/\d+/i.test(link)
     || /^https?:\/\/((www|old|new|np)\.)?reddit\.com\/r\/\w+\/comments\/\w+/i.test(link)
     || /^https:\/\/bsky\.app\/profile\/[\w.:-]+\/post\/\w+\/?$/i.test(link)
     || /^https:\/\/[\w.-]+\/@\w+(@[\w.-]+)?\/\d+\/?$/i.test(link)

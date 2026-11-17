@@ -4807,8 +4807,11 @@ REPLIES_FEED = json.dumps({"version": "https://jsonfeed.org/version/1.1", "items
 class RepliesTest(unittest.TestCase):
     def setUp(self):
         root = Path(tempfile.mkdtemp())
-        self.saved = {key: getattr(omabox, key) for key in ("STATE_PATH", "IMAGE_DIR")}
+        self.saved = {key: getattr(omabox, key) for key in ("STATE_PATH", "IMAGE_DIR", "CONFIG_PATH")}
         omabox.STATE_PATH, omabox.IMAGE_DIR = root / "items.json", root / "images"
+        omabox.CONFIG_PATH = root / "sources.toml"
+        omabox.save_sources([{"name": "Rowan on X", "url": f"{omabox.RSSHUB_BASE}/twitter/user/rowanvale", "cadence": "daily"},
+                             {"name": "Blog", "url": "https://blog.example/feed.xml", "cadence": "daily"}])
         state = omabox.load_state()
         day = "2026-09-26T16:13:00Z"
         state["items"] = [
@@ -4837,6 +4840,14 @@ class RepliesTest(unittest.TestCase):
 
     def picture(self, url, limit):
         return png(64, 48)
+
+    def test_another_feeds_link_to_x_gets_no_replies_and_no_token(self):
+        state = omabox.load_state()
+        state["items"][1]["link"] = "https://x.com/rowanvale/status/100"
+        omabox.save_state(state)
+        with self.assertRaisesRegex(ValueError, "only for posts of X sources"):
+            omabox.load_replies("blog", fetch=self.fetch, session=self.session)
+        self.assertEqual((self.sessions, self.urls), (0, []))
 
     def test_post_ref_from_status_links_only(self):
         self.assertEqual(omabox.x_post_ref("https://x.com/rowanvale/status/100"), ("rowanvale", "100"))
