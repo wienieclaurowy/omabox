@@ -140,6 +140,10 @@ Panel {
   // repliesFailed: ids whose fetch errored this session; only C retries them.
   property string repliesLoadingId: ""
   property var repliesFailed: ({})
+  // r or C pressed while the other fetch runs: each run charges the post's picture budget with what the other had
+  // stored when it began, so the asked one waits and starts when the other ends (ids of the post asked for).
+  property string articleQueuedId: ""
+  property string repliesQueuedId: ""
   readonly property var readingItem: Model.withReplies(Model.articleView(readingPost, feedVersionId !== "" && feedVersionId === readingId),
     repliesLoadingId !== "" && repliesLoadingId === readingId, Tr)
   readonly property var scroller: reading ? reader.flick : list
@@ -563,7 +567,8 @@ Panel {
       return root.feedVersionId === post.id ? "feed" : "full"
     }
     if (root.articleLoadingId !== "") return "fetching"
-    fetchArticle(post)
+    if (repliesProc.running) root.articleQueuedId = post.id
+    else fetchArticle(post)
     return "fetching"
   }
 
@@ -582,7 +587,10 @@ Panel {
     note(Tr.t("reader.fetchingArticle"))
     runCli(["article", "--json", "--", post.id], function(code, text) {
       root.articleLoadingId = ""
-      if (reading) repliesDelay.restart()
+      var queued = root.repliesQueuedId
+      root.repliesQueuedId = ""
+      if (reading && queued === root.readingId) fetchReplies(root.readingPost, true)
+      else if (reading) repliesDelay.restart()
       var result = null
       try { result = JSON.parse(text) } catch (e) {}
       if (code !== 0 || !result || result.error || !result.full_html) {
@@ -624,7 +632,8 @@ Panel {
     var state = repliesState()
     if (state === "unavailable") return state
     if (repliesProc.running) return "fetching"
-    fetchReplies(root.readingPost, true)
+    if (root.articleLoadingId !== "") root.repliesQueuedId = root.readingPost.id
+    else fetchReplies(root.readingPost, true)
     return "fetching"
   }
 
@@ -658,8 +667,12 @@ Panel {
       hostWidget.override([result.id], { replies_html: result.replies_html, replies_count: result.replies_count,
         replies_fetched: result.replies_fetched })
     }
+    var queued = root.articleQueuedId
+    root.articleQueuedId = ""
+    var post = root.readingPost
+    if (reading && view === "feed" && queued === root.readingId && post && !post.full_html) fetchArticle(post)
     // The post open now may have been skipped while this fetch ran.
-    if (reading) repliesDelay.restart()
+    else if (reading) repliesDelay.restart()
   }
 
   function runUpdate(item) {
