@@ -1527,6 +1527,30 @@ class IconTest(unittest.TestCase):
         self.assertTrue(omabox.plain_picture(avatar))
         self.assertNotIn(b"zTXt", avatar)
 
+    def test_favicon_tries_only_the_first_icon_links_a_page_lists(self):
+        tried = []
+        page = "".join(f'<link rel="icon" href="/i{n}.png">' for n in range(5000)).encode()
+
+        def fetch(url, limit):
+            tried.append(url)
+            if len(tried) == 1:
+                return page
+            raise TimeoutError("slow")
+
+        self.assertEqual(omabox.fetch_favicon("https://tides.example/feed", fetch=fetch,
+                                              directory=Path(tempfile.mkdtemp())), "")
+        self.assertEqual(tried[1:], [f"https://tides.example/i{n}.png" for n in range(omabox.MAX_ICON_LINKS)]
+                         + ["https://tides.example/favicon.ico"])
+
+    def test_requests_in_a_time_budget_end_with_it(self):
+        with omabox.time_budget(5):
+            request = omabox.within(urllib.request.Request("https://tides.example/"), 60)
+            self.assertLessEqual(request.deadline.at - time.monotonic(), 5)
+        self.assertGreater(omabox.within(urllib.request.Request("https://tides.example/"), 60).deadline.at
+                           - time.monotonic(), 50)
+        with omabox.time_budget(0), self.assertRaises(TimeoutError):
+            omabox.within(urllib.request.Request("https://tides.example/"), 60)
+
     def test_favicon_from_page_link_then_rss_fallback(self):
         directory = Path(tempfile.mkdtemp())
         served = {
@@ -5105,6 +5129,22 @@ class FetchLockTest(unittest.TestCase):
             omabox.cmd_fetch(args)
         return errors.getvalue()
 
+    def test_a_fetch_ended_midway_keeps_the_sources_it_finished(self):
+        omabox.save_sources([{"name": "Tides", "url": self.url, "cadence": "daily", "icon": "*"},
+                             {"name": "Ferries", "url": self.url + "?ferries", "cadence": "daily", "icon": "*"}])
+        real = omabox.gather_source
+
+        def gather(snapshot, source, stamp, *rest):
+            if source["name"] == "Ferries":
+                raise KeyboardInterrupt
+            return real(snapshot, source, stamp, *rest)
+
+        with mock.patch.object(omabox, "gather_source", gather), self.assertRaises(KeyboardInterrupt):
+            self.fetch()
+        state = omabox.load_state()
+        self.assertIn("Tides", state["fetched"])
+        self.assertEqual(len(state["items"]), 2)
+
     def test_network_runs_outside_the_state_lock(self):
         free = []
 
@@ -5166,7 +5206,8 @@ class FetchLockTest(unittest.TestCase):
         omabox.save_sources([{"name": "Tides", "url": self.url, "cadence": "daily", "icon": "*",
                               "version_command": "echo v1.2.3"}])
         loads, versions, wait = self.tick()
-        self.assertEqual((loads, versions, self.requests), (2, 1, 1))
+        # the tick's own read, one per stored source, one to finish the delivery
+        self.assertEqual((loads, versions, self.requests), (3, 1, 1))
         self.assertEqual(omabox.load_state()["installed"], {"Tides": "1.2.3"})
         self.assertGreaterEqual(wait, omabox.TICK_MIN_SECONDS)
         loads, versions, wait = self.tick()

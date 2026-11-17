@@ -197,6 +197,11 @@ MAX_IMAGES_PER_ITEM = 12
 MAX_PLACEHOLDERS_PER_ITEM = 24
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_ICON_BYTES = 256 * 1024
+# a home page picks how many icon links it lists; each try may take a whole download's time
+MAX_ICON_LINKS = 4
+ICON_SECONDS = 60
+# every request one source's fetch makes; the bar ends a whole tick at an hour
+SOURCE_SECONDS = 300
 TRACKING_PIXEL_MAX = 2
 IMAGE_REF_RE = re.compile(r"omabox-(?:img|avatar|poster):([0-9a-f]{20}\.(?:png|jpg|gif|webp))")
 
@@ -281,17 +286,47 @@ class Deadline:
 
 # for a request whose caller gave it none (within)
 REQUEST_SECONDS = 60
+BUDGET = threading.local()
+
+
+@contextlib.contextmanager
+def time_budget(seconds=None, at=None):
+    """Requests started inside, on this thread, share one wall-clock end: a source's feed, pictures, cards,
+    articles and icon together, so a feed listing thousands of slow links cannot hold a fetch for hours.
+    at: a monotonic end taken from budget_end() on another thread, for its worker threads."""
+    outer = getattr(BUDGET, "at", None)
+    end = at if seconds is None else time.monotonic() + seconds
+    BUDGET.at = end if outer is None or end is None else min(outer, end)
+    try:
+        yield
+    finally:
+        BUDGET.at = outer
+
+
+def budget_end():
+    return getattr(BUDGET, "at", None)
+
+
+def budgeted(seconds):
+    """seconds, or less when the thread's time budget ends sooner."""
+    end = budget_end()
+    if end is None:
+        return seconds
+    left = end - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("the source's time budget ran out")
+    return min(seconds, left)
 
 
 def within(request, seconds):
     """request with a Deadline of seconds starting now."""
-    request.deadline = Deadline(seconds)
+    request.deadline = Deadline(budgeted(seconds))
     return request
 
 
 def request_deadline(req):
     if getattr(req, "deadline", None) is None:
-        req.deadline = Deadline(REQUEST_SECONDS)
+        req.deadline = Deadline(budgeted(REQUEST_SECONDS))
     return req.deadline
 
 
@@ -329,7 +364,7 @@ class DeadlineConnection:
 
     def __init__(self, *args, deadline=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.deadline, self.per_read = deadline or Deadline(REQUEST_SECONDS), per_read(self.timeout)
+        self.deadline, self.per_read = deadline or Deadline(budgeted(REQUEST_SECONDS)), per_read(self.timeout)
         self.response_class = functools.partial(DeadlineResponse, deadline=self.deadline, timeout=self.per_read)
 
     def clamp(self):
@@ -2331,18 +2366,22 @@ def feed_home(data):
 
 def fetch_favicon(feed_url, feed_data=b"", fetch=download_limited, directory=None):
     """Saves the site's favicon (never SVG) under the cache and returns its path, or "" when none works."""
-    directory = Path(directory or ICON_DIR)
+    with time_budget(ICON_SECONDS):
+        return find_favicon(feed_url, feed_data, fetch, Path(directory or ICON_DIR))
+
+
+def find_favicon(feed_url, feed_data, fetch, directory):
     parts = urllib.parse.urlparse(feed_url)
     home = feed_home(feed_data) or f"{parts.scheme}://{parts.netloc}/"
     candidates = []
     try:
         finder = IconLinkFinder()
         finder.feed(fetch(home, 1024 * 1024).decode("utf-8", "replace"))
-        candidates += [urllib.parse.urljoin(home, href) for href in finder.links]
+        candidates += [urllib.parse.urljoin(home, href) for href in finder.links[:MAX_ICON_LINKS]]
     except Exception:
         pass
     candidates.append(urllib.parse.urljoin(home, "/favicon.ico"))
-    for url in candidates:
+    for url in dict.fromkeys(candidates):
         if not url.startswith(("https://", "http://")):
             continue
         try:
@@ -4271,7 +4310,7 @@ def gather_source(snapshot, source, stamp, get=download_feed, extract=fetch_arti
     """Downloads the source's feed and builds its new posts against snapshot, which it only reads."""
     name, url = source["name"], source["url"]
     try:
-        with plain_http_content(plain_http_feed(url)):
+        with plain_http_content(plain_http_feed(url)), time_budget(SOURCE_SECONDS):
             return gather_feed(snapshot, source, stamp, get, extract)
     except Exception as error:  # one broken feed must not block the others
         return Gathered(name, url, stamp, error=fetch_error(error, url))
@@ -4561,25 +4600,38 @@ def run_fetch(args, snapshot=None):
             version = installed_version(source["version_command"])
             if version:
                 versions[source["name"]] = version
-    gathered = [gather_source(snapshot, source, stamp) for source in due if not needs_rsshub(source["url"])]
+    added, stored = {}, set()
+
+    def store(result):
+        # each source is saved as it finishes: a tick ended at its deadline keeps them, and the next one skips
+        # them as fetched. sources.toml is read again so a source added, removed or renamed meanwhile stays as is.
+        with locked():
+            state = load_state()
+            if {source["name"]: source["url"] for source in load_sources()}.get(result.name) == result.url:
+                added[result.name] = result(state)
+                save_state(state)
+        stored.add(result.name)
+        return result
+
+    for source in due:
+        if not needs_rsshub(source["url"]):
+            store(gather_source(snapshot, source, stamp))
     via_rsshub = [source for source in due if needs_rsshub(source["url"])]
     if via_rsshub:
         try:
             with rsshub_session():
-                gathered += gather_via_rsshub(snapshot, via_rsshub, stamp)
+                gather_via_rsshub(snapshot, via_rsshub, stamp,
+                                  gather=lambda snapshot, source, stamp: store(gather_source(snapshot, source, stamp)))
         except Exception as error:
-            gathered += [Gathered(source["name"], source["url"], stamp, error=f"RSSHub: {error}") for source in via_rsshub]
+            for source in via_rsshub:
+                if source["name"] not in stored:
+                    store(Gathered(source["name"], source["url"], stamp, error=f"RSSHub: {error}"))
             print(shown(f"RSSHub: {error}"), file=sys.stderr)
-    added = {}
     with locked():
         state = load_state()
-        # sources.toml again: a source added, removed or renamed during the fetch is kept as it is now
         sources = load_sources()
-        current = {source["name"]: source["url"] for source in sources}
+        current = {source["name"] for source in sources}
         state["installed"].update({name: version for name, version in versions.items() if name in current})
-        for result in gathered:
-            if current.get(result.name) == result.url:
-                added[result.name] = result(state)
         prune(state, sources)
         if paused(state) and not args.all and not args.offline:
             print(f"paused until {state['paused_until']}")
@@ -5413,10 +5465,12 @@ def fetch_avatars(urls, fetch=download_limited, directory=None):
     """Avatar URL -> file name in the image cache, for those that download as pictures, the first
     MAX_AVATARS_PER_ITEM accounts only. In parallel: a post's replies come from dozens of accounts."""
     directory = Path(directory or IMAGE_DIR)
+    end = budget_end()
 
     def one(url):
         try:
-            picture = cache_avatar(url, fetch, directory)
+            with time_budget(at=end):
+                picture = cache_avatar(url, fetch, directory)
         except Exception:
             picture = None
         return url, picture[0] if picture else None
