@@ -29,6 +29,27 @@ Ui.TextField {
     cursorPosition = next.cursor
   }
 
+  // Qt's own copy sets no sensitive hint, and a field can hold a private feed URL with a token in it.
+  function copySelection() {
+    if (echoMode !== TextInput.Normal || selectionStart === selectionEnd || copier.running) return
+    copier.text = text.slice(selectionStart, selectionEnd)
+    copier.stdinEnabled = true
+    copier.running = true
+  }
+
+  Process {
+    id: copier
+    property string text: ""
+    environment: ({ OMABOX_COPY: "sensitive" })
+    command: Model.bounded(["bash", "-c", Model.COPY_SCRIPT], Model.SMALL_OUTPUT_BYTES, 10)
+    // Turning stdin off closes it, the EOF the copy waits for.
+    onStarted: {
+      write(text)
+      text = ""
+      stdinEnabled = false
+    }
+  }
+
   Process {
     id: paster
     command: Model.bounded(["wl-paste", "--no-newline", "--type", "text"], 16384, 2)
@@ -50,8 +71,10 @@ Ui.TextField {
     var alt = (event.modifiers & Qt.AltModifier) !== 0
     if (event.matches(StandardKey.Paste)) {
       if (!paster.running) paster.running = true
+    } else if (event.matches(StandardKey.Copy)) {
+      copySelection()
     } else if (event.matches(StandardKey.Cut)) {
-      copy()
+      copySelection()
       edit(from, to, "")
     } else if (event.key === Qt.Key_Backspace) {
       edit(from !== to ? from : ctrl ? Model.wordStart(text, from) : Model.charStep(text, from, false), to, "")

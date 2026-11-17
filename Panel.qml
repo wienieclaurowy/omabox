@@ -1443,9 +1443,7 @@ Panel {
     property string text: ""
     property bool plain: false
     environment: ({ OMABOX_COPY: plain ? "plain" : "sensitive" })
-    // wl-copy before 2.3 has no --sensitive: a private copy is refused (3) rather than kept in clipboard history.
-    readonly property string script: "command -v wl-copy >/dev/null || exit 127; t='text/plain;charset=utf-8'; if [ \"$OMABOX_COPY\" = plain ]; then exec wl-copy --type \"$t\" >/dev/null 2>&1; fi; wl-copy --help </dev/null 2>&1 | grep -q -- --sensitive || exit 3; exec wl-copy --sensitive --type \"$t\" >/dev/null 2>&1"
-    command: Model.bounded(["bash", "-c", script], Model.SMALL_OUTPUT_BYTES, 10)
+    command: Model.bounded(["bash", "-c", Model.COPY_SCRIPT], Model.SMALL_OUTPUT_BYTES, 10)
     // Turning stdin off closes it, the EOF the copy waits for.
     onStarted: {
       write(text)

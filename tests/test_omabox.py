@@ -5571,11 +5571,16 @@ class LoopbackOpenerTest(unittest.TestCase):
 
 
 class CopyScriptTest(unittest.TestCase):
-    """The panel's wl-copy script, run against a stand-in wl-copy that records its argv and stdin."""
+    """The panel's and the text fields' wl-copy script, run against a stand-in wl-copy that records its argv and
+    stdin."""
 
     def setUp(self):
-        text = (BIN.parent.parent / "Panel.qml").read_text()
-        self.command = ["bash", "-c", json.loads(re.search(r"id: copyProc.*?property string script: (\".*?\")\n", text, re.S).group(1))]
+        root = BIN.parent.parent
+        text = (root / "Model.js").read_text()
+        self.command = ["bash", "-c", json.loads(re.search(r"^var COPY_SCRIPT = (\".*?\")\n", text, re.M).group(1))]
+        for qml in ("Panel.qml", "InputField.qml"):
+            self.assertIn('Model.bounded(["bash", "-c", Model.COPY_SCRIPT]', (root / qml).read_text())
+        self.assertIn('OMABOX_COPY: "sensitive"', (root / "InputField.qml").read_text())
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, True)
 

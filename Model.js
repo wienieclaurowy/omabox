@@ -520,6 +520,10 @@ var CLI_OUTPUT_BYTES = 8 * 1024 * 1024
 var CLI_SECONDS = 600
 var SMALL_OUTPUT_BYTES = 64 * 1024
 
+// Copies stdin; OMABOX_COPY=plain for public text. wl-copy before 2.3 has no --sensitive: a private copy is refused
+// (exit 3) rather than kept in clipboard history.
+var COPY_SCRIPT = "command -v wl-copy >/dev/null || exit 127; t='text/plain;charset=utf-8'; if [ \"$OMABOX_COPY\" = plain ]; then exec wl-copy --type \"$t\" >/dev/null 2>&1; fi; wl-copy --help </dev/null 2>&1 | grep -q -- --sensitive || exit 3; exec wl-copy --sensitive --type \"$t\" >/dev/null 2>&1"
+
 // Characters of a source name (MAX_NAME_CHARS in bin/omabox) and of a message the panel lays out; a message holds a
 // whole command to confirm (ACTION_SHOWN_MAX) with room to spare.
 var NAME_CHARS = 200
