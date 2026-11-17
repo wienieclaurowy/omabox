@@ -4620,8 +4620,11 @@ def run_fetch(args, snapshot=None):
     if via_rsshub:
         try:
             with rsshub_session():
-                gather_via_rsshub(snapshot, via_rsshub, stamp,
-                                  gather=lambda snapshot, source, stamp: store(gather_source(snapshot, source, stamp)))
+                for result in gather_via_rsshub(
+                        snapshot, via_rsshub, stamp,
+                        gather=lambda snapshot, source, stamp: store(gather_source(snapshot, source, stamp))):
+                    if result.name not in stored:
+                        store(result)
         except Exception as error:
             for source in via_rsshub:
                 if source["name"] not in stored:

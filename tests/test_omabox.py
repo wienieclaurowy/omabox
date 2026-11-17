@@ -5145,6 +5145,20 @@ class FetchLockTest(unittest.TestCase):
         self.assertIn("Tides", state["fetched"])
         self.assertEqual(len(state["items"]), 2)
 
+    def test_x_sources_skipped_after_a_rejected_token_get_its_error(self):
+        base = omabox.RSSHUB_BASE
+        omabox.save_sources([{"name": "A", "url": f"{base}/twitter/user/a", "cadence": "daily", "icon": "*"},
+                             {"name": "B", "url": f"{base}/twitter/user/b", "cadence": "daily", "icon": "*"}])
+
+        def gather(snapshot, source, stamp, *rest):
+            return omabox.Gathered(source["name"], source["url"], stamp, omabox.X_TOKEN_ERROR)
+
+        with mock.patch.object(omabox, "gather_source", gather), \
+                mock.patch.object(omabox, "rsshub_session", contextlib.nullcontext), \
+                mock.patch.object(omabox, "wait_for_network", lambda hosts: True):
+            self.fetch()
+        self.assertEqual(omabox.load_state()["errors"], {"A": omabox.X_TOKEN_ERROR, "B": omabox.X_TOKEN_ERROR})
+
     def test_network_runs_outside_the_state_lock(self):
         free = []
 
