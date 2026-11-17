@@ -30,9 +30,13 @@ Ui.TextField {
   }
 
   // Qt's own copy sets no sensitive hint, and a field can hold a private feed URL with a token in it.
-  function copySelection() {
+  // cut: the selection is deleted only once the copy succeeded (the field has no undo), and only if it is unchanged.
+  function copySelection(cut) {
     if (echoMode !== TextInput.Normal || selectionStart === selectionEnd || copier.running) return
     copier.text = text.slice(selectionStart, selectionEnd)
+    copier.cut = cut === true
+    copier.cutFrom = selectionStart
+    copier.cutTo = selectionEnd
     copier.stdinEnabled = true
     copier.running = true
   }
@@ -40,6 +44,9 @@ Ui.TextField {
   Process {
     id: copier
     property string text: ""
+    property bool cut: false
+    property int cutFrom: 0
+    property int cutTo: 0
     environment: ({ OMABOX_COPY: "sensitive" })
     command: Model.bounded(["bash", "-c", Model.COPY_SCRIPT], Model.SMALL_OUTPUT_BYTES, 10)
     // Turning stdin off closes it, the EOF the copy waits for.
@@ -47,6 +54,15 @@ Ui.TextField {
       write(text)
       text = ""
       stdinEnabled = false
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (copier.cut && /::exit 0$/.test(text) && field.selectionStart === copier.cutFrom
+            && field.selectionEnd === copier.cutTo)
+          field.edit(copier.cutFrom, copier.cutTo, "")
+        copier.cut = false
+      }
     }
   }
 
@@ -74,8 +90,7 @@ Ui.TextField {
     } else if (event.matches(StandardKey.Copy)) {
       copySelection()
     } else if (event.matches(StandardKey.Cut)) {
-      copySelection()
-      edit(from, to, "")
+      copySelection(true)
     } else if (event.key === Qt.Key_Backspace) {
       edit(from !== to ? from : ctrl ? Model.wordStart(text, from) : Model.charStep(text, from, false), to, "")
     } else if (event.key === Qt.Key_Delete) {
