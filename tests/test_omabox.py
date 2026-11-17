@@ -498,6 +498,17 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual({i["title"]: i["read"] for i in state["items"]}, {"v4.0.3": True, "v4.0.4": False})
 
+    def test_a_far_future_date_falls_back_to_the_fetch_time(self):
+        feed = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+                b'<item><title>Pinned</title><guid>a</guid><link>https://tides.example/a</link>'
+                b'<pubDate>Fri, 31 Dec 2900 00:00:00 GMT</pubDate></item></channel></rss>')
+        (entry,) = omabox.parse_feed(feed)
+        self.assertEqual(entry["published"], "")
+        state = self.fresh()
+        omabox.merge(state, "S", [entry], "2026-09-26T08:00:00Z")
+        self.assertEqual(state["items"][0]["published"], "2026-09-26T08:00:00Z")
+        self.assertEqual(omabox.iso_utc("9999-12-31T23:59:59-05:00"), "")
+
     def test_trims_to_newest_per_source(self):
         state = self.fresh()
         entries = [
