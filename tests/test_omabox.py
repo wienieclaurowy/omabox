@@ -509,8 +509,9 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(state["items"][0]["published"], "2026-09-26T08:00:00Z")
         self.assertEqual(omabox.iso_utc("9999-12-31T23:59:59-05:00"), "")
         state["items"][0]["published"] = "2900-12-31T00:00:00Z"
-        omabox.merge(state, "S", [], "2026-09-27T08:00:00Z")
-        self.assertEqual(state["items"][0]["published"], "2026-09-26T08:00:00Z")
+        path = Path(tempfile.mkdtemp()) / "items.json"
+        omabox.save_state(state, path)
+        self.assertEqual(omabox.load_state(path)["items"][0]["published"], "2026-09-26T08:00:00Z")
 
     def test_trims_to_newest_per_source(self):
         state = self.fresh()
