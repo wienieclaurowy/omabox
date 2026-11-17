@@ -2662,9 +2662,12 @@ def store_merge(state, source, entries, built):
         known[entry["guid"]] = item
         # only unread posts are news: a first fetch stores the backlog as read
         added += not item["read"]
+    # a post the feed still serves stays: dropped, the next fetch adds it back unread (an X repost carries the
+    # original's date, so it sorts past the newest KEEP_PER_SOURCE while the feed keeps serving it)
+    served = {entry["guid"] for entry in entries}
     ours = sorted((i for i in items if i["source"] == source), key=lambda i: i["published"], reverse=True)
     dropped = {i["id"] for position, i in enumerate(ours) if position >= KEEP_PER_SOURCE and not i.get("later")
-               and (i["read"] or position >= KEEP_UNREAD_PER_SOURCE)}
+               and i.get("guid") not in served and (i["read"] or position >= KEEP_UNREAD_PER_SOURCE)}
     state["items"] = [i for i in items if i["id"] not in dropped]
     return added
 

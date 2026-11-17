@@ -525,6 +525,20 @@ class MergeTest(unittest.TestCase):
         self.assertIn("t1", titles)
         self.assertNotIn("t2", titles)
 
+    def test_an_old_dated_post_the_feed_still_serves_stays_read(self):
+        state = self.fresh()
+        newer = [entry(str(n), f"t{n}", published=f"2026-09-{n + 1:02d}T08:00:00Z")
+                 for n in range(omabox.KEEP_PER_SOURCE)]
+        omabox.merge(state, "S", newer, "2026-09-26T08:00:00Z")
+        repost = entry("repost", "Old post, reposted", published="2026-03-16T08:00:00Z")
+        served = newer[-5:] + [repost]
+        for day in range(27, 30):
+            omabox.merge(state, "S", served, f"2026-09-{day}T08:00:00Z")
+            for item in state["items"]:
+                item["read"] = True
+        self.assertEqual(omabox.merge(state, "S", served, "2026-09-30T08:00:00Z"), 0)
+        self.assertTrue(next(i for i in state["items"] if i["guid"] == "repost")["read"])
+
     def linked(self, *numbers):
         return [{"guid": f"tag:example.com,2026:{n}", "title": f"Tide report {n}", "link": f"https://example.com/{n}",
                  "published": f"2026-09-{10 + n:02d}T08:00:00Z", "html": f"<p>Report {n}</p>"} for n in numbers]
