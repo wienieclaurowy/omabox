@@ -801,7 +801,9 @@ Panel {
 
   function runNotificationAction(index) {
     var row = index >= 0 && index < noteRows.length ? noteRows[index] : null
-    var step = Model.actionStep(row, root.pendingAction, root.message, Tr)
+    // The strip can show "Looking…" or hide behind an overlay while root.message holds the prompt.
+    var shown = messageStrip.visible ? messageStrip.text : ""
+    var step = Model.actionStep(row, root.pendingAction, shown, Tr)
     root.pendingAction = step.pending
     if (!step.run) {
       note(step.message)
