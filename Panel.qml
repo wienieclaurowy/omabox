@@ -1640,8 +1640,9 @@ Panel {
             root.askClear()
             event.accepted = true
           }
-          // A held o would repeat into the second press that confirms a notification action.
-          else if (event.isAutoRepeat && event.text === "o")
+          // A held key must not repeat into a confirmation: o runs a notification action, a then a picks
+          // "all" in catch-up, x deletes a notification per repeat.
+          else if (event.isAutoRepeat && (event.text === "o" || event.text === "a" || event.text === "x" || event.key === Qt.Key_Delete))
             event.accepted = true
         }
       }
