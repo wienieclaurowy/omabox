@@ -1638,6 +1638,9 @@ Panel {
             root.askClear()
             event.accepted = true
           }
+          // A held o would repeat into the second press that confirms a notification action.
+          else if (event.isAutoRepeat && event.text === "o")
+            event.accepted = true
         }
       }
 
