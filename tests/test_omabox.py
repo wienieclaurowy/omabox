@@ -2,6 +2,7 @@
 # pyright: reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportOptionalIterable=false
 # Test doubles pass fakes (None bodies, dict headers, quiet log_message) and read results the test just made.
 import argparse
+import atexit
 import codecs
 import contextlib
 import fcntl
@@ -39,6 +40,13 @@ from typing import Any
 BIN = Path(__file__).resolve().parent.parent / "bin" / "omabox"
 # English whatever the machine's Omarchy language is; I18nTest points it elsewhere itself.
 os.environ["OMARCHY_LANGUAGE_FILE"] = os.devnull
+# Every path the CLI derives at import lands in a throwaway home: a test that patches only some of them (prune
+# deletes cache files the patched state does not name) must never reach the real cache, state or Omarchy files.
+SANDBOX_HOME = Path(tempfile.mkdtemp(prefix="omabox-test-home-"))
+atexit.register(shutil.rmtree, SANDBOX_HOME, True)
+os.environ["HOME"] = str(SANDBOX_HOME)
+for variable in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+    os.environ.pop(variable, None)
 loader = importlib.machinery.SourceFileLoader("omabox", str(BIN))
 spec = importlib.util.spec_from_loader("omabox", loader)
 assert spec is not None
@@ -4369,11 +4377,11 @@ class ViewerTest(unittest.TestCase):
 
             return Player()
 
-        with self.installed("mpv"), mock.patch.object(omabox, "default_desktop_file", lambda mime: None), \
-                contextlib.redirect_stdout(io.StringIO()):
+        with self.installed("mpv"), contextlib.redirect_stdout(io.StringIO()):
             omabox.cmd_play(argparse.Namespace(urls=self.URLS, start=1), run, lambda: None, poll_every=0,
                             relay=lambda urls: [f"http://127.0.0.1:9/t0k3n/{i}.mp4" for i in range(len(urls))],
-                            focus=lambda address: None)
+                            focus=lambda address: None,
+                            players=functools.partial(omabox.player_argv, desktop_file=lambda mime: None))
         argv = received["argv"]
         self.assertFalse(any("127.0.0.1" in arg or "example" in arg for arg in argv), argv)
         self.assertEqual(argv[:5], ["mpv", "--playlist-start=1", "--tls-verify=yes", "--ytdl=no", "--access-references=no"])
@@ -4402,10 +4410,10 @@ class ViewerTest(unittest.TestCase):
             log = root / f"mpv-{start}.log"
             (root / "mpv" / "mpv.conf").write_text(f"vo=null\nao=null\nframes=2\nlog-file={log}\n")
             with mock.patch.dict(omabox.os.environ, {"MPV_HOME": str(root / "mpv")}), \
-                    mock.patch.object(omabox, "default_desktop_file", lambda mime: None), \
                     contextlib.redirect_stdout(io.StringIO()):
                 omabox.cmd_play(argparse.Namespace(urls=self.URLS + ["https://video.twimg.com/c.mp4"], start=start),
                                 windows=lambda: None, focus=lambda address: None,
+                                players=functools.partial(omabox.player_argv, desktop_file=lambda mime: None),
                                 relay=lambda urls: omabox.start_relay([f"http://127.0.0.1:{port}/{i}.mp4" for i in range(3)], plain))
             played = re.findall(r"Playing: http://127\.0\.0\.1:\d+/[\w-]+/(\d)\.mp4", log.read_text())
             self.assertEqual(played, [str(index) for index in range(start, 3)], start)
