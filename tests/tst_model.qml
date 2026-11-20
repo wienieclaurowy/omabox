@@ -39,6 +39,13 @@ TestCase {
     verify(Model.MESSAGE_CHARS >= Model.ACTION_SHOWN_MAX + 200)
   }
 
+  function test_a_notification_with_a_bad_timestamp_still_opens() {
+    var row = { file: "1-1.json", app: "Chat", summary: "Hello", body: "Text" }
+    compare(Model.noteAsItem(Object.assign({ timestamp: 1700000000000 }, row), english).published, "2023-11-14T22:13:20.000Z")
+    compare(Model.noteAsItem(Object.assign({ timestamp: "not a date" }, row), english).published, "")
+    compare(Model.noteAsItem(Object.assign({ timestamp: 1e20 }, row), english).published, "")
+  }
+
   function test_x_replies_only_for_posts_of_x_sources() {
     var profiles = { "Rowan on X": { name: "Rowan" } }
     var link = "https://x.com/rowanvale/status/100"

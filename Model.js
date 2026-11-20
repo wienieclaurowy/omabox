@@ -247,6 +247,7 @@ function noteAsItem(row, Tr) {
   })
   var html = body.split(/\n{2,}/).map(function(paragraph) { return "<p>" + paragraph.replace(/\n/g, "<br>") + "</p>" }).join("")
   var words = String(row.body || "").split(/\s+/).filter(function(w) { return w !== "" }).length
+  var date = new Date(row.timestamp || 0)
   return {
     id: "note:" + row.file,
     note: true,
@@ -255,7 +256,7 @@ function noteAsItem(row, Tr) {
     title: row.summary || appLabel(row) || Tr.t("notifications.fallbackTitle"),
     html: html,
     link: "",
-    published: new Date(row.timestamp || 0).toISOString(),
+    published: isNaN(date.getTime()) ? "" : date.toISOString(),
     minutes: words > 230 ? Math.round(words / 230) : 0,
     read: true
   }
