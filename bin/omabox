@@ -2685,7 +2685,7 @@ def bounded_markup(markup, budget=STORED_COST, list_items=STORED_LIST_ITEMS, ima
                 cost += COST_SCRIPT_SWITCH if script else 0
                 script = 1
             if len(stretch) > budget - cost:
-                back = budget - cost
+                back = max(0, budget - cost)
                 while back > 0 and stretch[back] not in " \t\n\r":
                     back -= 1
                 cut_at = i + back

@@ -1458,6 +1458,7 @@ class ImageTest(unittest.TestCase):
         self.assertLessEqual(len(text), omabox.STORED_COST)
         emoji = omabox.capped_html("<p>" + "\U0001f600 " * 5000 + "</p>")
         self.assertLessEqual(emoji.count("\U0001f600"), omabox.STORED_COST // omabox.COST_EMOJI)
+        self.assertEqual(omabox.bounded_markup("<b>\u4e2d\u6587</b> word more", 66), "<b>\u4e2d\u6587</b>")
         wide = omabox.capped_html("<p>" + "\u4e2d" * 1_000_000 + "</p>")
         self.assertGreater(len(wide), omabox.STORED_COST // 4)
         self.assertLessEqual(len(wide), omabox.STORED_COST // 2 + 1000)

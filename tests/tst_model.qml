@@ -227,6 +227,8 @@ TestCase {
     verify(word.length > 300000 && word.length < Model.MARKUP_COST + 2000, word.length)
     compare(word.slice(-1), "\u200b")
     compare(Model.boundMarkup("<p>a</p><b"), "<p>a</p>")
+    var switched = Model.boundMarkup("<b>" + repeat("\u4e2d", (Model.MARKUP_COST - Model.COST_HEAVY_TAG) / 2) + "</b> word more")
+    compare(switched.slice(-5), "\u4e2d</b>")
   }
 
   function test_rendered_markup_bounds_a_post_of_an_older_release() {

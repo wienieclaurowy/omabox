@@ -912,7 +912,7 @@ function boundMarkup(html) {
         script = 1
       }
       if (stretch.length > MARKUP_COST - cost) {
-        var back = MARKUP_COST - cost
+        var back = Math.max(0, MARKUP_COST - cost)
         while (back > 0 && " \t\n\r".indexOf(stretch[back]) < 0) back--
         cutAt = i + back
         over = true
