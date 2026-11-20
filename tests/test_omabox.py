@@ -2559,7 +2559,7 @@ class NotificationArchiveTest(unittest.TestCase):
         (popup / names[5]).write_text('["not", "an", "object"]')
         omabox.archive_notifications(history, archive)
         self.assertEqual([p.name for p in archive.iterdir()], [names[0]])
-        rows = omabox.note_rows((history, archive, popup))
+        rows = omabox.note_rows((history, archive, popup), archive)
         self.assertEqual(rows, [names[0] + '\t{"summary": "fine", "body": "\\u017c"}'])
 
     def test_the_list_is_newest_first_and_capped(self):
@@ -2568,7 +2568,7 @@ class NotificationArchiveTest(unittest.TestCase):
         for n in range(50):
             (root / f"{stamp + n}-{n}.json").write_text(json.dumps({"summary": str(n), "body": "b" * 1000}))
         with mock.patch.object(omabox, "NOTE_LIST_MAX", 30), mock.patch.object(omabox, "NOTE_LIST_BYTES", 20_000):
-            rows = omabox.note_rows((root,))
+            rows = omabox.note_rows((root,), root)
         self.assertEqual([json.loads(row.split("\t")[1])["summary"] for row in rows], [str(n) for n in range(49, 30, -1)])
         self.assertLessEqual(sum(len(row) + 1 for row in rows), 20_000)
         self.assertTrue(all(row.isascii() for row in rows))
@@ -2600,10 +2600,12 @@ class NotificationArchiveTest(unittest.TestCase):
         (history / cleared).write_text('{"summary": "Sign-in code"}')
         omabox.archive_notifications(history, archive)
         self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [])
+        self.assertEqual(omabox.note_rows(), [])
         later = f"{stamp + 1000}-4.json"
         (history / later).write_text("{}")
         omabox.archive_notifications(history, archive)
         self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [later])
+        self.assertEqual(omabox.note_rows(), [f"{later}\t{{}}"])
 
 
 class HostileRunsTest(unittest.TestCase):

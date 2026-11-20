@@ -6589,15 +6589,16 @@ def cmd_later(args):
     update_items(args.ids, toggle)
 
 
-def note_rows(directories=None):
+def note_rows(directories=None, archive=None):
     """The panel's notifications: newest first, each name once (the first directory holding it wins), one
-    "name<TAB>json" line each, ASCII only, within NOTE_LIST_MAX and NOTE_LIST_BYTES."""
-    found = {}
-    for directory in map(Path, directories or (NOTE_HISTORY_DIR, NOTE_ARCHIVE_DIR, NOTE_POPUP_DIR)):
+    "name<TAB>json" line each, ASCII only, within NOTE_LIST_MAX and NOTE_LIST_BYTES. Cleared ones are left out."""
+    archive = Path(archive or NOTE_ARCHIVE_DIR)
+    found, cleared = {}, cleared_notes(archive)
+    for directory in map(Path, directories or (NOTE_HISTORY_DIR, archive, NOTE_POPUP_DIR)):
         with contextlib.suppress(OSError):
             for entry in os.scandir(directory):
                 match = NOTE_NAME_RE.match(entry.name)
-                if match and entry.name not in found:
+                if match and entry.name not in found and entry.name not in cleared:
                     found[entry.name] = (int(match.group(1)), Path(entry.path))
     rows, size = [], 0
     for name, (_, path) in sorted(found.items(), key=lambda pair: pair[1][0], reverse=True)[:NOTE_LIST_MAX]:
