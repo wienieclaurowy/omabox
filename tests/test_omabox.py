@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import tempfile
@@ -691,6 +692,14 @@ class PrivateFilesTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(os.umask, os.umask(0o022))
+
+    def test_every_folder_a_private_folder_makes_is_private(self):
+        self.root.chmod(0o755)
+        leaf = omabox.private_dir(self.root / "state" / "omabox" / "notifications")
+        modes = [stat.S_IMODE(path.stat().st_mode) for path in (leaf.parent.parent, leaf.parent, leaf)]
+        self.assertEqual(modes, [0o700] * 3)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o755)
+        self.assertEqual(omabox.private_dir(leaf), leaf)
 
     def test_the_cache_is_re_encoded_once_a_running_pass_ends(self):
         omabox.IMAGE_DIR.mkdir(parents=True)

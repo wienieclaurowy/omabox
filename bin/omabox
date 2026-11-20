@@ -2179,9 +2179,19 @@ SOURCE_STATE_KEYS = ("installed", "errors", "fetched", "icons", "profiles", "htt
 
 
 def private_dir(path):
-    """A directory only the owner can enter; one made with looser modes earlier is tightened."""
+    """A directory only the owner can enter; one made with looser modes earlier is tightened. Each missing parent
+    it makes is private too: mkdir(parents=True) gives them the umask's mode."""
     path = Path(path)
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    missing, part = [], path
+    while not os.path.lexists(part) and part != part.parent:
+        missing.append(part)
+        part = part.parent
+    for part in reversed(missing):
+        try:
+            part.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        part.chmod(0o700)
     if path.stat().st_mode & 0o077:
         path.chmod(0o700)
     return path
