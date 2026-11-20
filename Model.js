@@ -800,13 +800,233 @@ function readingTime(item, Tr) {
   return minutes > 0 ? Tr.tn("reader.minRead", minutes).arg(Tr.formatNumber(minutes)) : ""
 }
 
+// Qt lays rich text out on the GUI thread the whole shell shares. Cost units are about 0.5 microseconds of layout
+// and first frame, measured offscreen: list items grow quadratically, pictures in one line too, nested tables
+// exponentially, a tag costs more the deeper it sits, colour emoji are drawn one by one, a change of script splits a
+// shaping run, and a word longer than the line is broken by trial. bin/omabox bounded_markup splits MARKUP_COST and
+// the counts between a post (or its article) and its comments, so the two pass whole.
+var MARKUP_COST = 450000
+var MARKUP_LIST_ITEMS = 3000
+var MARKUP_IMAGES = 800
+var MARKUP_DEPTH = 80
+var MARKUP_TABLE_DEPTH = 3
+var MARKUP_RUN = 256
+var COST_TAG = 20
+var COST_HEAVY_TAG = 60
+var COST_TABLE = 150
+var COST_WIDE_CHAR = 2
+var COST_EMOJI = 300
+var COST_SCRIPT_SWITCH = 10
+var COST_PRE_LINE = 16
+var HEAVY_TAGS = { a: 1, b: 1, i: 1, em: 1, strong: 1, code: 1, span: 1, u: 1, s: 1, sub: 1, sup: 1, small: 1, font: 1,
+  mark: 1, img: 1, td: 1, th: 1, br: 1 }
+var INLINE_TAGS = { a: 1, b: 1, i: 1, em: 1, strong: 1, code: 1, span: 1, u: 1, s: 1, sub: 1, sup: 1, small: 1, font: 1,
+  mark: 1, img: 1 }
+var VOID_TAGS = { br: 1, img: 1, hr: 1, wbr: 1, input: 1, meta: 1, link: 1, source: 1, col: 1, area: 1, base: 1, embed: 1 }
+// Bulk skips: an ASCII word (no & or <), a CJK or Hangul run, and spaced ASCII text whose words fit in MARKUP_RUN.
+var ASCII_RUN = /[!-%'-;=-~]+/y
+var WIDE_RUN = /[\u3400-\u9fff\uac00-\ud7af]+/y
+var SPACED_TEXT = new RegExp("[ \\t\\n\\r]+(?:[!-%'-;=-~]{1," + MARKUP_RUN + "}[ \\t\\n\\r]+)*", "y")
+var SPACED_PRE = new RegExp("[ \\t]+(?:[!-%'-;=-~]{1," + MARKUP_RUN + "}[ \\t]+)*", "y")
+
+function heavyGlyph(code) {
+  return code >= 0x1F000 && code <= 0x1FAFF || code >= 0x2190 && code <= 0x2BFF || code === 0xFE0F || code === 0x20E3
+    || code === 0x3030 || code === 0x303D || code === 0x3297 || code === 0x3299
+}
+
+function scriptOf(code) {
+  if (code < 0x250) return 1
+  if (code >= 0x2E80 && code <= 0x9FFF || code >= 0xAC00 && code <= 0xD7AF || code >= 0xF900 && code <= 0xFAFF
+    || code >= 0xFF00 && code <= 0xFFEF) return 2
+  if (code >= 0x600 && code <= 0x8FF || code >= 0xFB50 && code <= 0xFDFF || code >= 0xFE70 && code <= 0xFEFF) return 3
+  return code >> 7
+}
+
+function alnum(code) {
+  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122
+}
+
+// Only before a base character: a zero-width space must not part a mark, a joined emoji or a surrogate pair.
+function breaksBefore(text, at, code) {
+  var prev = at > 0 ? text.charCodeAt(at - 1) : 0
+  if (prev === 0x200D || prev >= 0xD800 && prev <= 0xDBFF) return false
+  if (code >= 0xD800 && code <= 0xDBFF) {
+    var full = (code - 0xD800) * 0x400 + (text.charCodeAt(at + 1) - 0xDC00) + 0x10000
+    return !(full >= 0x1F3FB && full <= 0x1F3FF || full >= 0x1F1E6 && full <= 0x1F1FF || full >= 0xE0000 && full <= 0xE007F)
+  }
+  return code >= 0x21 && code <= 0x7E || code >= 0xC0 && code <= 0x24F || code >= 0x370 && code <= 0x482
+    || code >= 0x5D0 && code <= 0x5EA || code >= 0x621 && code <= 0x64A || code >= 0xE01 && code <= 0xE30
+    || code >= 0xE40 && code <= 0xE46 || code >= 0x3040 && code <= 0x3098 || code >= 0x309D && code <= 0x30FF
+    || code >= 0x3400 && code <= 0x9FFF || code >= 0xAC00 && code <= 0xD7AF || code >= 0xFF01 && code <= 0xFF60
+}
+
+// html cut at the last tag or line break before it passes the limits above, with a zero-width space (a line break Qt
+// honours) after every MARKUP_RUN characters without a break, counted across inline tags. One pass, no backtracking.
+function boundMarkup(html) {
+  var s = String(html || "")
+  var n = s.length
+  var out = []
+  var from = 0, cutAt = 0, cutFrom = 0, cutOut = 0
+  var cost = 0, items = 0, images = 0, depth = 0, tables = 0, pre = 0
+  var run = 0, overdue = 0, script = 0
+  var over = false
+  var i = 0
+  while (i < n) {
+    var c = s.charCodeAt(i)
+    if (c === 60) {
+      var end = s.indexOf(">", i)
+      if (end < 0) break
+      var closing = s.charCodeAt(i + 1) === 47
+      var j = closing ? i + 2 : i + 1
+      var k = j
+      while (k < end && alnum(s.charCodeAt(k))) k++
+      var name = s.slice(j, k).toLowerCase()
+      if (closing) {
+        if (depth > 0) depth--
+        if (name === "pre" && pre > 0) pre--
+        if (name === "table" && tables > 0) tables--
+      } else {
+        var empty = VOID_TAGS[name] === 1 || s.charCodeAt(end - 1) === 47
+        cost += (name === "table" ? COST_TABLE : HEAVY_TAGS[name] === 1 ? COST_HEAVY_TAG : COST_TAG) + depth
+        if (cost > MARKUP_COST || name === "li" && ++items > MARKUP_LIST_ITEMS || name === "img" && ++images > MARKUP_IMAGES
+          || name === "table" && ++tables > MARKUP_TABLE_DEPTH || !empty && depth >= MARKUP_DEPTH) break
+        if (!empty) depth++
+        if (name === "pre") pre++
+      }
+      if (INLINE_TAGS[name] !== 1) run = 0
+      i = end + 1
+      cutAt = i
+      cutFrom = from
+      cutOut = out.length
+      continue
+    }
+    if (c === 32 || c === 9 || pre === 0 && (c === 10 || c === 13)) {
+      var spaced = pre === 0 ? SPACED_TEXT : SPACED_PRE
+      spaced.lastIndex = i
+      var stretch = spaced.exec(s)[0]
+      cutAt = i
+      cutFrom = from
+      cutOut = out.length
+      if (script !== 1 && /[!-~]/.test(stretch)) {
+        if (script !== 0) cost += COST_SCRIPT_SWITCH
+        script = 1
+      }
+      if (stretch.length > MARKUP_COST - cost) {
+        var back = MARKUP_COST - cost
+        while (back > 0 && " \t\n\r".indexOf(stretch[back]) < 0) back--
+        cutAt = i + back
+        over = true
+        break
+      }
+      cost += stretch.length
+      run = 0
+      overdue = 0
+      i += stretch.length
+      continue
+    }
+    var bulk = null, bulkScript = 1, bulkWeight = 1
+    if (run < MARKUP_RUN) {
+      if (c > 32 && c < 127 && c !== 38) bulk = ASCII_RUN
+      else if (c >= 0x3400 && c <= 0x9FFF || c >= 0xAC00 && c <= 0xD7AF) {
+        bulk = WIDE_RUN
+        bulkScript = 2
+        bulkWeight = COST_WIDE_CHAR
+      }
+    }
+    if (bulk !== null) {
+      bulk.lastIndex = i
+      var length = bulk.exec(s)[0].length
+      if (script !== bulkScript) {
+        if (script !== 0) cost += COST_SCRIPT_SWITCH
+        script = bulkScript
+      }
+      var fits = Math.min(length, Math.max(0, Math.floor((MARKUP_COST - cost) / bulkWeight)))
+      for (var at = i + MARKUP_RUN - run; at < i + fits; at += MARKUP_RUN) {
+        out.push(s.slice(from, at), "\u200b")
+        from = cutAt = at
+        cutFrom = from
+        cutOut = out.length
+      }
+      if (fits < length) {
+        over = true
+        break
+      }
+      cost += length * bulkWeight
+      run += length
+      run -= MARKUP_RUN * Math.floor((run - 1) / MARKUP_RUN)
+      i += length
+      continue
+    }
+    var weight = 1, width = 1
+    if (c === 32 || c === 10 || c === 9 || c === 13 || c === 12 || c === 0x200B) {
+      if (c === 10 && pre > 0) weight = COST_PRE_LINE
+      cutAt = i
+      cutFrom = from
+      cutOut = out.length
+      run = 0
+      overdue = 0
+    } else {
+      var kind = script || 1
+      if (c === 38) {
+        var e = i + 1
+        if (e < n && s.charCodeAt(e) === 35) e++
+        while (e < n && e < i + 11 && alnum(s.charCodeAt(e))) e++
+        if (s.charCodeAt(e) === 59 && e > i + 1) width = e - i + 1
+        weight = COST_WIDE_CHAR
+      } else if (c >= 0x80) {
+        var code = c
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n) {
+          var second = s.charCodeAt(i + 1)
+          if (second >= 0xDC00 && second <= 0xDFFF) {
+            code = (c - 0xD800) * 0x400 + (second - 0xDC00) + 0x10000
+            width = 2
+          }
+        }
+        weight = heavyGlyph(code) ? COST_EMOJI : COST_WIDE_CHAR
+        kind = scriptOf(code)
+      } else {
+        kind = 1
+      }
+      if (kind !== script) {
+        if (script !== 0) weight += COST_SCRIPT_SWITCH
+        script = kind
+      }
+      if (run >= MARKUP_RUN) {
+        if (overdue >= 32 || breaksBefore(s, i, c)) {
+          out.push(s.slice(from, i), "\u200b")
+          from = cutAt = cutFrom = i
+          cutOut = out.length
+          run = 0
+          overdue = 0
+        } else {
+          overdue++
+        }
+      }
+      run++
+    }
+    cost += weight
+    if (cost > MARKUP_COST) {
+      over = true
+      break
+    }
+    i += width
+  }
+  if (over) {
+    out.length = cutOut
+    from = cutFrom
+    i = cutAt
+  }
+  out.push(s.slice(from, Math.min(i, n)))
+  return out.join("")
+}
+
 // bin/omabox stores pictures as <img src="omabox-img:NAME" width height> refs into its cache, video posters the same
 // way as omabox-poster:, comment avatars as <img src="omabox-avatar:NAME"> and quoted authors' with class="mini";
 // nothing else is an <img>. faces: {avatar, gap, pad} px for comments, mini for a quoted author.
 function renderHtml(html, imageDir, maxWidth, faces) {
   var column = faces.avatar + faces.gap
   // Picture paragraphs get their own class: the 150% reading line height would add half the picture's height below it.
-  return String(html || "").replace(/<p>(<img src="omabox-img:|<a href="[^"]*"><img src="omabox-poster:)/g, "<p class=\"pic\">$1")
+  return boundMarkup(html).replace(/<p>(<img src="omabox-img:|<a href="[^"]*"><img src="omabox-poster:)/g, "<p class=\"pic\">$1")
     .replace(/<img src="omabox-(?:img|poster):([0-9a-f]{20}\.(?:png|jpg|gif|webp))" width="(\d+)" height="(\d+)"(?: depth="(\d)")?>/g,
     function(match, name, width, height, depth) {
       var w = parseInt(width, 10), h = parseInt(height, 10)

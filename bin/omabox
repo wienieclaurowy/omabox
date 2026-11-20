@@ -2586,16 +2586,190 @@ MAX_ENTRY_HTML = 1_000_000
 MAX_STORED_HTML = 1_000_000
 ENTITY_TAIL_RE = re.compile(r"&[#\w]{0,10}$")
 
+# The reader lays a post out on the GUI thread of the shell every plugin shares. Model.js boundMarkup holds the whole
+# document to MARKUP_COST 450000 and explains the units; the post (or its article) and its comments split it so both
+# pass whole. 300 replies of 300 characters with avatars cost about 285000, a 10,000-word essay about 85000.
+STORED_COST = 140_000
+REPLIES_COST = 300_000
+STORED_LIST_ITEMS = 1500
+STORED_IMAGES = 400
+MARKUP_DEPTH = 80
+MARKUP_TABLE_DEPTH = 3
+MARKUP_RUN = 256
+COST_TAG, COST_HEAVY_TAG, COST_TABLE = 20, 60, 150
+COST_WIDE_CHAR, COST_EMOJI, COST_SCRIPT_SWITCH, COST_PRE_LINE = 2, 300, 10, 16
+HEAVY_MARKUP_TAGS = frozenset("a b i em strong code span u s sub sup small font mark img td th br".split())
+INLINE_MARKUP_TAGS = frozenset("a b i em strong code span u s sub sup small font mark img".split())
+VOID_MARKUP_TAGS = VOID_TAGS | {"col", "area", "base", "embed"}
+TAG_NAME_RE = re.compile(r"</?([A-Za-z0-9]*)")
+ENTITY_RE = re.compile(r"&(?:#[A-Za-z0-9]{0,9}|[A-Za-z0-9]{1,10});")
+ASCII_RUN_RE = re.compile(r"[!-%'-;=-~]+")
+WIDE_RUN_RE = re.compile(r"[\u3400-\u9fff\uac00-\ud7af]+")
+SPACED_TEXT_RE = re.compile(rf"[ \t\n\r]+(?:[!-%'-;=-~]{{1,{MARKUP_RUN}}}[ \t\n\r]+)*")
+SPACED_PRE_RE = re.compile(rf"[ \t]+(?:[!-%'-;=-~]{{1,{MARKUP_RUN}}}[ \t]+)*")
+BREAK_BASE_RANGES = ((0x21, 0x7E), (0xC0, 0x24F), (0x370, 0x482), (0x5D0, 0x5EA), (0x621, 0x64A), (0xE01, 0xE30),
+                     (0xE40, 0xE46), (0x3040, 0x3098), (0x309D, 0x30FF), (0x3400, 0x9FFF), (0xAC00, 0xD7AF),
+                     (0xFF01, 0xFF60))
+NO_BREAK_ASTRAL = ((0x1F3FB, 0x1F3FF), (0x1F1E6, 0x1F1FF), (0xE0000, 0xE007F))
 
-def capped_html(markup, limit=MAX_STORED_HTML):
-    """markup cut to limit characters, before a tag or character reference the cut would split; Qt's rich text
-    closes the tags left open."""
-    if len(markup) <= limit:
-        return markup
-    cut = markup[:limit]
-    if cut.rfind("<") > cut.rfind(">"):
-        cut = cut[:cut.rfind("<")]
-    return ENTITY_TAIL_RE.sub("", cut)
+
+def heavy_glyph(code):
+    return (0x1F000 <= code <= 0x1FAFF or 0x2190 <= code <= 0x2BFF or code in (0xFE0F, 0x20E3, 0x3030, 0x303D, 0x3297, 0x3299))
+
+
+def script_of(code):
+    if code < 0x250:
+        return 1
+    if 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF:
+        return 2
+    if 0x600 <= code <= 0x8FF or 0xFB50 <= code <= 0xFDFF or 0xFE70 <= code <= 0xFEFF:
+        return 3
+    return code >> 7
+
+
+def breaks_before(markup, at):
+    """Whether a zero-width space may go before markup[at] without parting a mark from its base or an emoji sequence."""
+    if at > 0 and markup[at - 1] == "\u200d":
+        return False
+    code = ord(markup[at])
+    if code > 0xFFFF:
+        return not any(low <= code <= high for low, high in NO_BREAK_ASTRAL)
+    return any(low <= code <= high for low, high in BREAK_BASE_RANGES)
+
+
+def bounded_markup(markup, budget=STORED_COST, list_items=STORED_LIST_ITEMS, images=STORED_IMAGES):
+    """markup cut at the last tag or line break before it passes the layout budget (Model.js boundMarkup weighs the
+    same), its open tags closed, with a zero-width space, a line break Qt honours, after every MARKUP_RUN characters
+    without one, counted across inline tags."""
+    out, stack = [], []
+    taken = cut_at = cut_taken = cut_out = 0
+    cost = items = pictures = tables = pre = run = overdue = script = 0
+    over = False
+    i, n = 0, len(markup)
+    while i < n:
+        char = markup[i]
+        if char == "<":
+            end = markup.find(">", i)
+            if end < 0:
+                break
+            name = TAG_NAME_RE.match(markup, i).group(1).lower()
+            if markup.startswith("</", i):
+                if name in stack:
+                    while stack:
+                        top = stack.pop()
+                        pre -= top == "pre"
+                        tables -= top == "table"
+                        if top == name:
+                            break
+            else:
+                empty = name in VOID_MARKUP_TAGS or markup[end - 1] == "/"
+                cost += (COST_TABLE if name == "table" else COST_HEAVY_TAG if name in HEAVY_MARKUP_TAGS else COST_TAG) + len(stack)
+                items += name == "li"
+                pictures += name == "img"
+                if (cost > budget or items > list_items or pictures > images or not empty and len(stack) >= MARKUP_DEPTH
+                        or name == "table" and tables >= MARKUP_TABLE_DEPTH):
+                    break
+                if not empty:
+                    stack.append(name)
+                    pre += name == "pre"
+                    tables += name == "table"
+            if name not in INLINE_MARKUP_TAGS:
+                run = 0
+            i = end + 1
+            cut_at, cut_taken, cut_out = i, taken, len(out)
+            continue
+        if char in " \t" or not pre and char in "\n\r":
+            stretch = (SPACED_PRE_RE if pre else SPACED_TEXT_RE).match(markup, i).group()
+            cut_at, cut_taken, cut_out = i, taken, len(out)
+            if script != 1 and stretch.strip():
+                cost += COST_SCRIPT_SWITCH if script else 0
+                script = 1
+            if len(stretch) > budget - cost:
+                back = budget - cost
+                while back > 0 and stretch[back] not in " \t\n\r":
+                    back -= 1
+                cut_at = i + back
+                over = True
+                break
+            cost += len(stretch)
+            run = overdue = 0
+            i += len(stretch)
+            continue
+        bulk = None
+        if run < MARKUP_RUN:
+            if "!" <= char <= "~" and char != "&":
+                bulk, kind, weight = ASCII_RUN_RE, 1, 1
+            elif "\u3400" <= char <= "\u9fff" or "\uac00" <= char <= "\ud7af":
+                bulk, kind, weight = WIDE_RUN_RE, 2, COST_WIDE_CHAR
+        if bulk:
+            length = bulk.match(markup, i).end() - i
+            if script != kind:
+                cost += COST_SCRIPT_SWITCH if script else 0
+                script = kind
+            fits = min(length, max(0, (budget - cost) // weight))
+            for at in range(i + MARKUP_RUN - run, i + fits, MARKUP_RUN):
+                out += [markup[taken:at], "\u200b"]
+                taken = cut_at = cut_taken = at
+                cut_out = len(out)
+            if fits < length:
+                over = True
+                break
+            cost += length * weight
+            run += length
+            run -= MARKUP_RUN * ((run - 1) // MARKUP_RUN)
+            i += length
+            continue
+        width = weight = 1
+        if char in " \t\n\r\f\u200b":
+            if char == "\n" and pre:
+                weight = COST_PRE_LINE
+            cut_at, cut_taken, cut_out = i, taken, len(out)
+            run = overdue = 0
+        else:
+            kind = script or 1
+            if char == "&":
+                entity = ENTITY_RE.match(markup, i)
+                width = len(entity.group()) if entity else 1
+                weight = COST_WIDE_CHAR
+            elif char >= "\x80":
+                weight = COST_EMOJI if heavy_glyph(ord(char)) else COST_WIDE_CHAR
+                kind = script_of(ord(char))
+            else:
+                kind = 1
+            if kind != script:
+                weight += COST_SCRIPT_SWITCH if script else 0
+                script = kind
+            if run >= MARKUP_RUN:
+                if overdue >= 32 or breaks_before(markup, i):
+                    out += [markup[taken:i], "\u200b"]
+                    taken = cut_at = cut_taken = i
+                    cut_out = len(out)
+                    run = overdue = 0
+                else:
+                    overdue += 1
+            run += 1
+        cost += weight
+        if cost > budget:
+            over = True
+            break
+        i += width
+    if over:
+        del out[cut_out:]
+        taken, i = cut_taken, cut_at
+    out.append(markup[taken:min(i, n)])
+    out += [f"</{name}>" for name in reversed(stack)]
+    return "".join(out)
+
+
+def capped_html(markup, limit=MAX_STORED_HTML, budget=STORED_COST):
+    """markup cut to limit characters, before a tag or character reference the cut would split, then bounded for
+    layout by bounded_markup, which closes the tags a cut left open."""
+    if len(markup) > limit:
+        markup = markup[:limit]
+        if markup.rfind("<") > markup.rfind(">"):
+            markup = markup[:markup.rfind("<")]
+        markup = ENTITY_TAIL_RE.sub("", markup)
+    return bounded_markup(markup, budget)
 
 
 def capped_entry(entry):
@@ -5607,7 +5781,7 @@ def replies_markup(threads, author, fetched, images=None, avatars=None, site="X"
     for first, *rest in threads:
         children = "".join(comment_markup(reply, author, images, avatars, 2) for reply in rest)
         parts.append(comment_markup(first, author, images, avatars, 1, children))
-    return capped_html("".join(parts))
+    return capped_html("".join(parts), budget=REPLIES_COST)
 
 
 def load_replies(item_id, refresh=False, fetch=download, session=rsshub_session, image_fetch=download_limited):

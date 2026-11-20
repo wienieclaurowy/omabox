@@ -161,4 +161,77 @@ TestCase {
     compare(Model.wordStart("foo ", 4), 0)
     compare(Model.wordStart("foo bar", 3), 0)
   }
+
+  function repeat(text, count) { return new Array(count + 1).join(text) }
+  function longestRun(html) {
+    var runs = html.replace(/<[^>]*>/g, "").split(/[ ​]/)
+    return Math.max.apply(null, runs.map(function(run) { return run.length }))
+  }
+
+  function test_rendered_markup_keeps_ordinary_posts_whole() {
+    var essay = repeat("<p>" + repeat("Calm words about a quiet river, <b>bold</b> and <a href=\"https://example.com/a\">linked</a>. ", 8)
+      + "</p>", 200)
+    compare(Model.boundMarkup(essay), essay)
+    var comment = "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" class=\"comment\"><tr><td class=\"face\" valign=\"top\">"
+      + "<img src=\"omabox-avatar:0123456789abcdef0123.png\"></td><td class=\"cell\" valign=\"top\"><p class=\"who\"><b>Fern</b> "
+      + "<span class=\"meta\">@fern · <a href=\"https://x.com/fern/status/1\">Sep 20, 14:05</a></span></p><p>"
+      + repeat("A reply of some length. ", 8) + "</p></td></tr></table>"
+    var thread = repeat(comment, 300)
+    compare(Model.boundMarkup(thread), thread)
+    compare(Model.boundMarkup("<p>café 中文 😀 &amp; done</p>"), "<p>café 中文 😀 &amp; done</p>")
+  }
+
+  function test_rendered_markup_breaks_long_runs_across_inline_tags() {
+    var word = Model.boundMarkup("<p>" + repeat("a", 600) + "</p>")
+    compare(word, "<p>" + repeat("a", 256) + "​" + repeat("a", 256) + "​" + repeat("a", 88) + "</p>")
+    var fragments = Model.boundMarkup("<p>" + repeat("<b>ab</b><i>cd</i>", 300) + "</p>")
+    verify(fragments.indexOf("​") > 0)
+    compare(longestRun(fragments), Model.MARKUP_RUN)
+    var spaced = "<p>" + repeat("<b>ab</b> <i>cd</i> ", 300) + "</p>"
+    compare(Model.boundMarkup(spaced), spaced)
+    var broken = "<p>" + repeat(repeat("a", 200) + "​", 5) + "</p>"
+    compare(Model.boundMarkup(broken), broken)
+    compare(longestRun(Model.boundMarkup("<p>" + repeat("&amp;", 600) + "</p>").replace(/&amp;/g, "&")), Model.MARKUP_RUN)
+    compare(longestRun(Model.boundMarkup("<p>" + repeat("中", 600) + "</p>")), Model.MARKUP_RUN)
+  }
+
+  function test_rendered_markup_never_parts_a_character_or_a_mark() {
+    var marks = Model.boundMarkup("<p>" + repeat("a", 256) + "́́b" + repeat("c", 10) + "</p>")
+    compare(marks, "<p>" + repeat("a", 256) + "́́​b" + repeat("c", 10) + "</p>")
+    var emoji = Model.boundMarkup("<p>" + repeat("😀", 300) + "</p>")
+    verify(!/[\ud800-\udbff]​|​[\udc00-\udfff]/.test(emoji))
+    verify(emoji.indexOf("​") > 0)
+    var family = Model.boundMarkup("<p>" + repeat("👩‍👧", 200) + "</p>")
+    verify(family.indexOf("‍​") < 0)
+    var skin = Model.boundMarkup("<p>" + repeat("a", 256) + "👋🏽" + "</p>")
+    compare(skin, "<p>" + repeat("a", 256) + "​👋🏽</p>")
+  }
+
+  function test_rendered_markup_is_cut_past_the_layout_limits() {
+    var items = Model.boundMarkup("<ul>" + repeat("<li>a</li>", Model.MARKUP_LIST_ITEMS + 500) + "</ul><p>after</p>")
+    compare(items.split("<li>").length - 1, Model.MARKUP_LIST_ITEMS)
+    verify(items.indexOf("after") < 0)
+    compare(Model.boundMarkup(repeat("<table><tr><td>", 6) + "x"), repeat("<table><tr><td>", 3))
+    compare(Model.boundMarkup(repeat("<div>", 100) + "x").split("<div>").length - 1, Model.MARKUP_DEPTH)
+    var pictures = Model.boundMarkup("<p>" + repeat("<img src=\"omabox-img:0123456789abcdef0123.png\" width=\"1\" height=\"1\">", 1000) + "</p>")
+    compare(pictures.split("<img").length - 1, Model.MARKUP_IMAGES)
+    var text = Model.boundMarkup("<p>" + repeat("word ", 200000) + "</p>")
+    verify(text.length < 500000)
+    verify(/^<p>word( word)+$/.test(text), text.slice(-20))
+    var wide = Model.boundMarkup("<p>" + repeat("\u4e2d", 1000000))
+    verify(wide.length > 100000 && wide.length < Model.MARKUP_COST / 2 + 1000, wide.length)
+    compare(longestRun(wide), Model.MARKUP_RUN)
+    var emoji = Model.boundMarkup("<p>" + repeat("😀 ", 5000) + "</p>")
+    verify((emoji.length / 3) <= Model.MARKUP_COST / Model.COST_EMOJI)
+    var word = Model.boundMarkup("<p>" + repeat("a", 2000000))
+    verify(word.length > 300000 && word.length < Model.MARKUP_COST + 2000, word.length)
+    compare(word.slice(-1), "\u200b")
+    compare(Model.boundMarkup("<p>a</p><b"), "<p>a</p>")
+  }
+
+  function test_rendered_markup_bounds_a_post_of_an_older_release() {
+    var old = "<ul>" + repeat("<li>a</li>", 25000) + "</ul>"
+    var rendered = Model.renderHtml(old, "/cache", 600, { avatar: 30, gap: 10, pad: 8, mini: 22 })
+    compare(rendered.split("<li>").length - 1, Model.MARKUP_LIST_ITEMS)
+  }
 }

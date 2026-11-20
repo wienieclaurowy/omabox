@@ -1418,8 +1418,8 @@ class ImageTest(unittest.TestCase):
     def test_stored_html_is_capped_between_tags(self):
         self.assertEqual(omabox.capped_html("<p>ab</p>", 100), "<p>ab</p>")
         self.assertEqual(omabox.capped_html("<p>abc</p><b>x</b>", 12), "<p>abc</p>")
-        self.assertEqual(omabox.capped_html("<p>a &amp; b</p>", 7), "<p>a ")
-        self.assertEqual(omabox.capped_html("<p>abcdef", 6), "<p>abc")
+        self.assertEqual(omabox.capped_html("<p>a &amp; b</p>", 7), "<p>a </p>")
+        self.assertEqual(omabox.capped_html("<p>abcdef", 6), "<p>abc</p>")
         entries = [{"guid": "g", "title": "Long", "link": "https://blog.example/" + "x" * 3000, "published": "2026-01-01T00:00:00Z",
                     "html": "<p>" + "word " * 190_000 + "</p><p>" + "&lt;more&gt; " * 50_000 + "</p>"}]
         state = {"items": []}
@@ -1427,6 +1427,65 @@ class ImageTest(unittest.TestCase):
         (item,) = state["items"]
         self.assertLessEqual(len(item["html"]), omabox.MAX_STORED_HTML)
         self.assertEqual(item["link"], "")
+
+    def test_stored_html_breaks_long_runs_across_inline_tags(self):
+        self.assertEqual(omabox.capped_html("<p>" + "a" * 600 + "</p>"), "<p>" + "a" * 256 + "\u200b" + "a" * 256 + "\u200b" + "a" * 88 + "</p>")
+        body = omabox.capped_html("<p>" + "<b>ab</b><i>cd</i>" * 300 + "</p>")
+        runs = re.split("[ \u200b]", re.sub("<[^>]*>", "", body))
+        self.assertEqual(max(map(len, runs)), omabox.MARKUP_RUN)
+        spaced = "<p>" + "<b>ab</b> <i>cd</i> " * 300 + "</p>"
+        self.assertEqual(omabox.capped_html(spaced), spaced)
+        self.assertEqual(omabox.capped_html("<p>" + "a" * 256 + "\u0301\u0301b</p>"), "<p>" + "a" * 256 + "\u0301\u0301\u200bb</p>")
+        self.assertEqual(omabox.capped_html("<p>" + "a" * 256 + "\U0001f44b\U0001f3fd</p>"), "<p>" + "a" * 256 + "\u200b\U0001f44b\U0001f3fd</p>")
+        self.assertNotIn("\u200d\u200b", omabox.capped_html("<p>" + "\U0001f469\u200d\U0001f467" * 200 + "</p>"))
+        url = "https://example.com/" + "p" * 400
+        linked = omabox.capped_html(omabox.linkify(f"<p>{url}</p>"))
+        self.assertIn(f'href="{url}"', linked)
+        self.assertIn("\u200b", linked)
+
+    def test_stored_html_is_bounded_for_layout(self):
+        items = omabox.capped_html("<ul>" + "<li>a</li>" * 2000 + "</ul><p>after</p>")
+        self.assertEqual(items.count("<li>"), omabox.STORED_LIST_ITEMS)
+        self.assertTrue(items.endswith("</li></ul>"))
+        self.assertNotIn("after", items)
+        self.assertEqual(omabox.capped_html("<table><tr><td>" * 6 + "x"), "<table><tr><td>" * 3 + "</td></tr></table>" * 3)
+        self.assertEqual(omabox.capped_html("<div>" * 100 + "x").count("<div>"), omabox.MARKUP_DEPTH)
+        pictures = omabox.capped_html("<p>" + '<img src="omabox-img:0123456789abcdef0123.png" width="1" height="1">' * 500 + "</p>")
+        self.assertEqual(pictures.count("<img"), omabox.STORED_IMAGES)
+        text = omabox.capped_html("<p>" + "word " * 100_000 + "</p>")
+        self.assertRegex(text, r"^<p>word( word)+</p>$")
+        self.assertGreater(len(text), omabox.STORED_COST // 2)
+        self.assertLessEqual(len(text), omabox.STORED_COST)
+        emoji = omabox.capped_html("<p>" + "\U0001f600 " * 5000 + "</p>")
+        self.assertLessEqual(emoji.count("\U0001f600"), omabox.STORED_COST // omabox.COST_EMOJI)
+        wide = omabox.capped_html("<p>" + "\u4e2d" * 1_000_000 + "</p>")
+        self.assertGreater(len(wide), omabox.STORED_COST // 4)
+        self.assertLessEqual(len(wide), omabox.STORED_COST // 2 + 1000)
+
+    def test_ordinary_long_posts_are_stored_whole(self):
+        essay = "".join(f"<h2>Part {n}</h2>" * (n % 20 == 0) + "<p>" + "Calm words about the quiet river and its old mills. " * 5
+                        + '<b>Bold</b> and <a href="https://example.com/a">linked</a>.</p>' for n in range(200))
+        entries = [{"guid": "g", "title": "Essay", "link": "https://example.com/essay", "published": "2026-01-01T00:00:00Z",
+                    "html": essay}]
+        state = {"items": []}
+        omabox.prepare_merge(state, "Blog", entries, "2026-01-02T00:00:00Z")(state)
+        (item,) = state["items"]
+        self.assertGreaterEqual(len(essay.split()), 10_000)
+        self.assertEqual(item["html"].count("<p>"), 200)
+        self.assertNotIn("\u200b", item["html"])
+        reply = {"name": "Fern", "handle": "fern", "id": "2", "avatar": "https://example.com/fern.png", "published": "",
+                 "html": "<p>" + "A reply of some length about the post. " * 8 + "</p>"}
+        threads = [[{**reply, "id": str(n * 3 + k)} for k in range(3)] for n in range(100)]
+        avatars = {"https://example.com/fern.png": "0123456789abcdef0123.png"}
+        markup = omabox.replies_markup(threads, "rowan", "2026-09-26T18:00:00Z", avatars=avatars)
+        self.assertEqual(markup.count('class="comment"'), 300)
+        self.assertEqual(markup.count("A reply of some length"), 2400)
+
+    def test_fetched_article_is_bounded_for_layout(self):
+        page = ("<html><body><article><p>" + "word " * 80 + "</p><ul>" + "<li>a</li>" * 25000 + "</ul></article></body></html>").encode()
+        fields = omabox.fetch_article("https://example.com/a", fetch=lambda url, limit: (url, "text/html", page),
+                                      image_fetch=lambda url, limit: b"")
+        self.assertEqual(fields["full_html"].count("<li>"), omabox.STORED_LIST_ITEMS)
 
     def test_without_hook_images_are_dropped(self):
         body, _ = omabox.sanitize('<img src="https://blog.example/a.png">')
@@ -5774,7 +5833,7 @@ class FeedEntityTest(unittest.TestCase):
         (item,) = state["items"]
         self.assertLessEqual(len(item["title"]), omabox.MAX_ENTRY_TITLE)
         self.assertLessEqual(len(item["html"]), 2 * omabox.MAX_ENTRY_HTML)
-        self.assertGreater(len(item["html"]), omabox.MAX_ENTRY_HTML // 2)
+        self.assertGreater(len(item["html"]), omabox.STORED_COST // 2)
 
 
 class LoneSurrogateTest(unittest.TestCase):
