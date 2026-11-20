@@ -356,8 +356,8 @@ BarWidget {
         var lines = result.text.trim().split("\n")
         var last = lines[lines.length - 1]
         if (result.code !== 0) {
-          root.tickProblem = result.overflow ? result.text : Model.cliProblem(result.code, last, Tr)
-            || Model.fill(Tr.t("bar.tickExited"), [result.code])
+          root.tickProblem = Model.clip(result.overflow ? result.text : Model.cliProblem(result.code, last, Tr)
+            || Model.fill(Tr.t("bar.tickExited"), [result.code]), Model.MESSAGE_CHARS)
           return
         }
         root.tickProblem = ""
@@ -413,7 +413,7 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         var result = Model.splitCliOutput(text, Tr)
-        root.ownCacheProblem = result.code === 0 ? "" : result.text || "exit " + result.code
+        root.ownCacheProblem = result.code === 0 ? "" : Model.clip(result.text || "exit " + result.code, Model.MESSAGE_CHARS)
         if (result.code === 0) {
           root.cachePlain = true
         } else {
