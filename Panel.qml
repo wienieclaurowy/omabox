@@ -3095,7 +3095,7 @@ Panel {
           width: Math.min(implicitWidth, parent.width - noteActions.width - Style.space(6))
           textFormat: Text.PlainText
           elide: Text.ElideRight
-          text: [Model.appLabel(note.modelData), Model.relativeTime(new Date(note.modelData.timestamp || 0).toISOString(), root.now, Tr)]
+          text: [Model.appLabel(note.modelData), Model.relativeTime(Model.noteTime(note.modelData), root.now, Tr)]
             .filter(function(part) { return part !== "" }).join("  ·  ").toUpperCase()
           color: note.dimColor
           font.family: root.fontFamily

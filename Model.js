@@ -239,6 +239,11 @@ function escapeHtml(text) {
 
 // A notification shaped like a feed item so the reader can show its full text: plain body, escaped, paragraphs
 // on blank lines, line breaks kept, bare URLs linked. Summary is the title; the app glyph stands in for a source icon.
+function noteTime(row) {
+  var date = new Date(row.timestamp || 0)
+  return isNaN(date.getTime()) ? "" : date.toISOString()
+}
+
 function noteAsItem(row, Tr) {
   var body = escapeHtml(plainBody(row.body))
   body = body.replace(/https?:\/\/[^\s<>"]+/g, function(url) {
@@ -247,7 +252,6 @@ function noteAsItem(row, Tr) {
   })
   var html = body.split(/\n{2,}/).map(function(paragraph) { return "<p>" + paragraph.replace(/\n/g, "<br>") + "</p>" }).join("")
   var words = String(row.body || "").split(/\s+/).filter(function(w) { return w !== "" }).length
-  var date = new Date(row.timestamp || 0)
   return {
     id: "note:" + row.file,
     note: true,
@@ -256,7 +260,7 @@ function noteAsItem(row, Tr) {
     title: row.summary || appLabel(row) || Tr.t("notifications.fallbackTitle"),
     html: html,
     link: "",
-    published: isNaN(date.getTime()) ? "" : date.toISOString(),
+    published: noteTime(row),
     minutes: words > 230 ? Math.round(words / 230) : 0,
     read: true
   }

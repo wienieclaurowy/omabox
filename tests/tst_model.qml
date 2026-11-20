@@ -44,6 +44,7 @@ TestCase {
     compare(Model.noteAsItem(Object.assign({ timestamp: 1700000000000 }, row), english).published, "2023-11-14T22:13:20.000Z")
     compare(Model.noteAsItem(Object.assign({ timestamp: "not a date" }, row), english).published, "")
     compare(Model.noteAsItem(Object.assign({ timestamp: 1e20 }, row), english).published, "")
+    compare(Model.relativeTime(Model.noteTime({ timestamp: 1e20 }), new Date(), english), "")
   }
 
   function test_x_replies_only_for_posts_of_x_sources() {
