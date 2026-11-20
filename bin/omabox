@@ -1913,11 +1913,16 @@ X_EPOCH_MS = 1288834974657
 
 def status_time(status):
     """The ISO UTC time an X post id encodes: ids since late 2010 hold milliseconds since X's epoch in their top
-    bits. "" for older, sequential ids."""
+    bits. "" for older, sequential ids and for anything longer than a 64-bit id."""
+    if not (status.isascii() and status.isdigit() and len(status) <= 20):
+        return ""
     value = int(status)
     if value < 1 << 42:
         return ""
-    moment = datetime.fromtimestamp(((value >> 22) + X_EPOCH_MS) / 1000, timezone.utc)
+    try:
+        moment = datetime.fromtimestamp(((value >> 22) + X_EPOCH_MS) / 1000, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return ""
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

@@ -4155,6 +4155,16 @@ class XFeedTest(unittest.TestCase):
     def test_status_ids_carry_their_time(self):
         self.assertEqual(omabox.status_time(str((1790000000000 - omabox.X_EPOCH_MS) << 22)), "2026-09-21T14:13:20Z")
         self.assertEqual(omabox.status_time("260"), "")
+        for status in ("9" * 21, "9" * 400, "9" * 5000):
+            self.assertEqual(omabox.status_time(status), "")
+
+    def test_a_quoted_post_with_an_absurd_id_keeps_the_rest_of_the_feed(self):
+        quoted = x_entry(320, "Neat.", "Neat." + QUOTE_RULE + '<div class="rsshub-quote">Kestrel: Shipped it.<br></div>',
+                         "2026-09-30T09:30:00.000Z", [{"url": f"https://x.com/kestrel/status/{'9' * 400}", "type": "quote"}])
+        plain = x_entry(321, "Fine.", "Fine.", "2026-09-30T10:30:00.000Z", [])
+        entries = list(omabox.parse_x_feed(json.dumps({"items": [quoted, plain]}).encode()))
+        self.assertEqual([entry["title"] for entry in entries], ["Neat.", "Fine."])
+        self.assertEqual(entries[0]["quote"]["published"], "")
 
     def test_user_timelines_ask_for_quoted_avatars(self):
         base = f"{omabox.RSSHUB_BASE}/twitter"
