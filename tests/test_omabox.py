@@ -579,6 +579,24 @@ class MergeTest(unittest.TestCase):
         self.assertLessEqual(before, {item["id"] for item in state["items"]})
         self.assertEqual(sum(item.get("later", False) for item in state["items"]), 2)
 
+    def test_a_rename_writes_the_list_while_it_holds_the_state(self):
+        root = Path(tempfile.mkdtemp())
+        for name, path in (("CONFIG_PATH", root / "sources.toml"), ("STATE_PATH", root / "items.json")):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        omabox.save_sources([{"name": "Tides", "url": "https://example.com/feed", "cadence": "daily"}])
+        held = []
+        save = omabox.save_sources
+
+        def saving(sources, path=None):
+            held.append(omabox.STATE_PATH.with_suffix(".lock") in omabox.HELD_LOCKS)
+            save(sources, path)
+
+        with mock.patch.object(omabox, "save_sources", saving), contextlib.redirect_stdout(io.StringIO()):
+            omabox.main(["rename", "Tides", "Harbour tides"])
+        self.assertEqual(held, [True])
+
     def test_posts_renamed_before_guids_were_stored_are_found_by_link(self):
         state = self.fresh()
         omabox.merge(state, "Tides", self.linked(1, 2), "2026-09-13T08:00:00Z")

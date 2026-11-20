@@ -5065,8 +5065,9 @@ def cmd_rename(args):
         if new != args.old and name_taken(sources, new):
             sys.exit(f"a source named {new!r} already exists")
         find_source(sources, args.old)["name"] = new
-        save_sources(sources)
+        # one step under the state lock: a fetch prunes, under it, the posts of names sources.toml no longer lists
         with locked():
+            save_sources(sources)
             state = load_state()
             for item in state["items"]:
                 if item["source"] == args.old:
