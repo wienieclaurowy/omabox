@@ -779,7 +779,7 @@ function localizeMarkup(html, now, Tr) {
         : "<p class=\"meta\">" + fill(escapeHtml(Tr.t("reader.repliesFetched")), [escapeHtml(text), localStamp(stamp, now, Tr)]) + "</p>"
     })
     .replace(/<span class="badge">AUTHOR<\/span>/g, "<span class=\"badge\">" + escapeHtml(Tr.t("reader.authorBadge")) + "</span>")
-    .replace(/<p class="replyto">Replying to (.*?)<\/p>/g, function(match, names) {
+    .replace(/<p class="replyto">Replying to (.*?)<\/p>/g, function(_match, names) {
       return "<p class=\"replyto\">" + replyingTo(names, Tr) + "</p>"
     })
     .replace(new RegExp("<span class=\"meta\">((?:[^<]* · )?)(<a href=\"[^\"]*\">)?(" + STAMP + "|open|on X)(</a>)?</span>", "g"),
@@ -789,7 +789,7 @@ function localizeMarkup(html, now, Tr) {
           : localStamp(when, now, Tr)
         return "<span class=\"meta\">" + label + (open || "") + text + (close || "") + "</span>"
       })
-    .replace(/(<a href="[^"]*">)Discussion on (Hacker News|Reddit)<\/a>/g, function(match, open, site) {
+    .replace(/(<a href="[^"]*">)Discussion on (Hacker News|Reddit)<\/a>/g, function(_match, open, site) {
       return open + fill(escapeHtml(Tr.t("reader.discussionOn")), [site]) + "</a>"
     })
     .replace(/>The quoted post is not available\.<\/p>/g, ">" + escapeHtml(Tr.t("reader.quoteUnavailable")) + "</p>")
@@ -1028,7 +1028,7 @@ function renderHtml(html, imageDir, maxWidth, faces) {
   // Picture paragraphs get their own class: the 150% reading line height would add half the picture's height below it.
   return boundMarkup(html).replace(/<p>(<img src="omabox-img:|<a href="[^"]*"><img src="omabox-poster:)/g, "<p class=\"pic\">$1")
     .replace(/<img src="omabox-(?:img|poster):([0-9a-f]{20}\.(?:png|jpg|gif|webp))" width="(\d+)" height="(\d+)"(?: depth="(\d)")?>/g,
-    function(match, name, width, height, depth) {
+    function(_match, name, width, height, depth) {
       var w = parseInt(width, 10), h = parseInt(height, 10)
       // A comment picture sits depth text columns in; 60% keeps a meme from outweighing the thread.
       // depth 0: a quoted post's picture, inside the card's padding.
@@ -1037,11 +1037,11 @@ function renderHtml(html, imageDir, maxWidth, faces) {
       var scaled = Math.max(1, Math.min(w, Math.floor(room)))
       return "<img src=\"file://" + imageDir + "/" + name + "\" width=\"" + scaled + "\" height=\"" + Math.round(h * scaled / w) + "\">"
     })
-    .replace(/<img src="omabox-avatar:([0-9a-f]{20}\.(?:png|jpg|gif|webp))">/g, function(match, name) {
+    .replace(/<img src="omabox-avatar:([0-9a-f]{20}\.(?:png|jpg|gif|webp))">/g, function(_match, name) {
       return "<img src=\"file://" + imageDir + "/" + name + "\" width=\"" + faces.avatar + "\" height=\"" + faces.avatar + "\">"
     })
     // A quoted author's face sits in the text line; Qt stands an inline image on the baseline unless told middle.
-    .replace(/<img src="omabox-avatar:([0-9a-f]{20}\.(?:png|jpg|gif|webp))" class="mini">/g, function(match, name) {
+    .replace(/<img src="omabox-avatar:([0-9a-f]{20}\.(?:png|jpg|gif|webp))" class="mini">/g, function(_match, name) {
       return "<img src=\"file://" + imageDir + "/" + name + "\" width=\"" + faces.mini + "\" height=\"" + faces.mini
         + "\" style=\"vertical-align: middle\">"
     })
