@@ -1,3 +1,6 @@
+# pyright: reportArgumentType=false, reportCallIssue=false, reportIncompatibleMethodOverride=false
+# pyright: reportOptionalMemberAccess=false, reportOptionalSubscript=false, reportOptionalIterable=false
+# Test doubles pass fakes (None bodies, dict headers, quiet log_message) and read results the test just made.
 import argparse
 import codecs
 import contextlib
@@ -25,18 +28,22 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "omabox"
 # English whatever the machine's Omarchy language is; I18nTest points it elsewhere itself.
 os.environ["OMARCHY_LANGUAGE_FILE"] = os.devnull
 loader = importlib.machinery.SourceFileLoader("omabox", str(BIN))
 spec = importlib.util.spec_from_loader("omabox", loader)
-omabox = importlib.util.module_from_spec(spec)
+assert spec is not None
+# Any: bin/omabox has no .py name, so checkers cannot see the attributes the tests read and patch.
+omabox: Any = importlib.util.module_from_spec(spec)
 loader.exec_module(omabox)
 
 ATOM_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -2548,7 +2555,9 @@ class I18nTest(unittest.TestCase):
 
     def test_plural_rules_match_the_checker(self):
         loader = importlib.machinery.SourceFileLoader("i18n_check", str(self.ROOT / "tests" / "i18n_check.py"))
-        check = importlib.util.module_from_spec(importlib.util.spec_from_loader("i18n_check", loader))
+        check_spec = importlib.util.spec_from_loader("i18n_check", loader)
+        assert check_spec is not None
+        check = importlib.util.module_from_spec(check_spec)
         loader.exec_module(check)
         for code in check.LANGUAGES + ["en"]:
             for n in list(range(250)) + [1000000, 2000001]:
@@ -6063,8 +6072,10 @@ class ShellCallTest(unittest.TestCase):
     def complete(data):
         try:
             stream = omabox.QtStream(data[1:])
-            stream.string(), stream.string()
-            [stream.string() for _ in range(stream.number(4))]
+            stream.string()
+            stream.string()
+            for _ in range(stream.number(4)):
+                stream.string()
             return stream.at == len(data) - 1
         except ValueError:
             return False
