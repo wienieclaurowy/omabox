@@ -2573,7 +2573,7 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertLessEqual(sum(len(row) + 1 for row in rows), 20_000)
         self.assertTrue(all(row.isascii() for row in rows))
 
-    def test_a_cleared_popup_is_not_archived_again(self):
+    def test_a_cleared_notification_is_not_archived_again(self):
         root = Path(tempfile.mkdtemp())
         popup, archive = root / "popup", root / "archive"
         history = popup / "history"
@@ -2592,10 +2592,18 @@ class NotificationArchiveTest(unittest.TestCase):
         omabox.archive_notifications(history, archive)
         omabox.main(["forget-notification", forgotten])
         self.assertEqual(sorted(p.name for p in popup.iterdir() if p.is_file()), [cleared, "notes.txt"])
+        (popup / f"{stamp}-٤.json").write_text("{}")
         omabox.main(["clear-notifications"])
         self.assertEqual(sorted(p.name for p in popup.iterdir() if p.is_file()), ["notes.txt"])
+        self.assertEqual(stat.S_IMODE((archive / omabox.NOTE_CLEARED).stat().st_mode), 0o600)
+        # Omarchy's own clear may land later or fail, and a popup moves into its history once it closes
+        (history / cleared).write_text('{"summary": "Sign-in code"}')
         omabox.archive_notifications(history, archive)
-        self.assertEqual([p.name for p in archive.iterdir()], [kept])
+        self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [])
+        later = f"{stamp + 1000}-4.json"
+        (history / later).write_text("{}")
+        omabox.archive_notifications(history, archive)
+        self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [later])
 
 
 class HostileRunsTest(unittest.TestCase):

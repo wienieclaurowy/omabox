@@ -3057,14 +3057,27 @@ def read_note(path):
         os.close(descriptor)
 
 
+# in the archive folder: names a clear removed, which Omarchy's history may still hold or receive from its popups
+NOTE_CLEARED = "cleared"
+# newest names kept, so the list stays within NOTE_MAX_BYTES, the size read_note accepts
+NOTE_CLEARED_MAX = 2000
+
+
+def cleared_notes(archive=None):
+    data = read_note(Path(archive or NOTE_ARCHIVE_DIR) / NOTE_CLEARED)
+    return set(data.decode("ascii", "replace").split()) if data else set()
+
+
 def archive_notifications(history=None, archive=None, now=None):
-    """Omarchy keeps its last 10 notifications; this keeps a copy of each for NOTE_KEEP_DAYS days."""
+    """Omarchy keeps its last 10 notifications; this keeps a copy of each for NOTE_KEEP_DAYS days, except the ones
+    a clear removed."""
     history, archive = Path(history or NOTE_HISTORY_DIR), Path(archive or NOTE_ARCHIVE_DIR)
     private_dir(archive)
     copied = 0
+    cleared = cleared_notes(archive)
     if history.is_dir():
         for path in history.iterdir():
-            if NOTE_NAME_RE.match(path.name) and not (archive / path.name).exists():
+            if NOTE_NAME_RE.match(path.name) and path.name not in cleared and not (archive / path.name).exists():
                 data = read_note(path)
                 if data is not None:
                     write_private(archive / path.name, data)
@@ -6626,7 +6639,27 @@ def cmd_forget_notification(args):
             (folder / name).unlink(missing_ok=True)
 
 
+def remember_cleared(archive=None):
+    """Records the names Omarchy's history and popups hold now, so the next archive pass does not copy them back."""
+    archive = private_dir(archive or NOTE_ARCHIVE_DIR)
+    names = set()
+    for folder in (NOTE_HISTORY_DIR, NOTE_POPUP_DIR):
+        with contextlib.suppress(OSError):
+            names.update(entry.name for entry in os.scandir(folder) if entry.name.isascii() and NOTE_NAME_RE.match(entry.name))
+    newest = sorted(names, key=lambda name: int(NOTE_NAME_RE.match(name).group(1)), reverse=True)[:NOTE_CLEARED_MAX]
+    descriptor, tmp = tempfile.mkstemp(dir=archive, prefix=".cleared-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write("".join(f"{name}\n" for name in newest))
+        os.replace(tmp, archive / NOTE_CLEARED)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def cmd_clear_notifications(args):
+    remember_cleared()
     for folder in (NOTE_ARCHIVE_DIR, NOTE_POPUP_DIR):
         if folder.is_dir():
             for path in folder.iterdir():
