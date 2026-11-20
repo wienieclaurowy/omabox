@@ -828,6 +828,39 @@ class CadenceTest(unittest.TestCase):
 
 
 class SourcesFileTest(unittest.TestCase):
+    def test_changes_to_the_sources_wait_for_each_other_and_read_the_file_again(self):
+        root = Path(tempfile.mkdtemp())
+        for name, path in (("CONFIG_PATH", root / "config" / "sources.toml"), ("STATE_PATH", root / "state" / "items.json")):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        omabox.save_sources([{"name": "Keep", "url": "https://example.com/keep.xml", "cadence": "paused"},
+                             {"name": "Gone", "url": "https://example.com/gone.xml", "cadence": "paused"}])
+
+        def discover(url):
+            omabox.cmd_remove(argparse.Namespace(name="Gone"))
+            return {"url": url, "title": "New", "latest": None, "count": 0}
+
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        with mock.patch.object(omabox, "discover", discover), quiet:
+            omabox.cmd_add(argparse.Namespace(url="https://example.com/new.xml", name="New", cadence="paused"))
+        self.assertEqual([s["name"] for s in omabox.load_sources()], ["Keep", "New"])
+
+        lock = omabox.CONFIG_PATH.with_suffix(".lock")
+        with open(lock, "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            change = threading.Thread(target=omabox.cmd_cadence, args=(argparse.Namespace(name="Keep", cadence="daily"),))
+            with quiet:
+                change.start()
+                change.join(0.3)
+                self.assertTrue(change.is_alive())
+                self.assertEqual(omabox.load_sources()[0]["cadence"], "paused")
+                fcntl.flock(held, fcntl.LOCK_UN)
+                change.join(5)
+        self.assertEqual(omabox.load_sources()[0]["cadence"], "daily")
+        self.assertEqual(sorted(p.name for p in omabox.CONFIG_PATH.parent.iterdir()), ["sources.lock", "sources.toml"])
+        self.assertEqual(stat.S_IMODE(omabox.CONFIG_PATH.stat().st_mode), 0o600)
+
     def test_round_trip_keeps_fields_and_escapes(self):
         path = Path(tempfile.mkdtemp()) / "sources.toml"
         sources = [

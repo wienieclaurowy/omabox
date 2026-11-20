@@ -3113,10 +3113,42 @@ SOURCES_HEADER = """\
 DEFAULT_SOURCES = Path(__file__).resolve().parent.parent / "data" / "sources.toml"
 
 
+def write_sources_file(path, data, replace=True):
+    """Through a temp file of its own in the same folder, so a reader or a second writer never sees half a file.
+    replace=False keeps a file another run wrote first."""
+    descriptor, tmp = tempfile.mkstemp(dir=private_dir(path.parent), prefix=".sources-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replace:
+            os.replace(tmp, path)
+        else:
+            with contextlib.suppress(FileExistsError):
+                os.link(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+
+
+def changes_sources(command):
+    @functools.wraps(command)
+    def run(args):
+        with sources_locked():
+            return command(args)
+    return run
+
+
+def sources_locked():
+    """Held around every read-modify-write of sources.toml. A run that also takes the state lock (locked()) takes
+    it inside this one, never the other way round."""
+    return locked(CONFIG_PATH)
+
+
 def load_sources(path=None):
     if path is None and not CONFIG_PATH.exists():
-        private_dir(CONFIG_PATH.parent)
-        write_private(CONFIG_PATH, DEFAULT_SOURCES.read_bytes())
+        write_sources_file(CONFIG_PATH, DEFAULT_SOURCES.read_bytes(), replace=False)
     path = path or CONFIG_PATH
     with open(path, "rb") as f:
         try:
@@ -3166,11 +3198,7 @@ def save_sources(sources, path=None):
         if source.get("lan"):
             lines.append("lan = true")
         blocks.append("\n".join(lines))
-    private_dir(path.parent)
-    tmp = path.with_suffix(".tmp")
-    with open_private(tmp) as handle:
-        handle.write(SOURCES_HEADER + "\n" + "\n\n".join(blocks) + "\n")
-    os.replace(tmp, path)
+    write_sources_file(path, (SOURCES_HEADER + "\n" + "\n\n".join(blocks) + "\n").encode())
 
 
 def name_taken(sources, name):
@@ -4986,21 +5014,24 @@ def cmd_discover(args):
 
 
 def cmd_add(args):
-    sources = load_sources()
+    load_sources()
     try:
         found = discover(args.url)
     except Exception as error:
         sys.exit(shown(error_text(error)))
     name = source_name(args.name or found["title"]) or urllib.parse.urlparse(found["url"]).netloc
-    if name_taken(sources, name):
-        sys.exit(shown(f"a source named {name!r} already exists"))
-    if any(s["url"] == found["url"] for s in sources):
-        sys.exit(shown(f"already subscribed to {found['url']}"))
     source = {"name": name, "url": found["url"], "cadence": args.cadence}
     if found.get("lan") and not local_url(found["url"]):
         source["lan"] = True
-    sources.append(source)
-    save_sources(sources)
+    # read again: another run may have changed the list while discover was on the network
+    with sources_locked():
+        sources = load_sources()
+        if name_taken(sources, name):
+            sys.exit(shown(f"a source named {name!r} already exists"))
+        if any(s["url"] == found["url"] for s in sources):
+            sys.exit(shown(f"already subscribed to {found['url']}"))
+        sources.append(source)
+        save_sources(sources)
     print(f"added {shown(name)}: {shown(found['url'])}")
     if args.cadence != "paused":
         with rsshub_session(needs_rsshub(source["url"])):
@@ -5013,35 +5044,37 @@ def cmd_add(args):
 
 
 def cmd_remove(args):
-    sources = load_sources()
-    find_source(sources, args.name)
-    sources = [s for s in sources if s["name"] != args.name]
-    save_sources(sources)
-    with locked():
-        state = load_state()
-        prune(state, sources)
-        save_state(state)
+    with sources_locked():
+        sources = load_sources()
+        find_source(sources, args.name)
+        sources = [s for s in sources if s["name"] != args.name]
+        save_sources(sources)
+        with locked():
+            state = load_state()
+            prune(state, sources)
+            save_state(state)
     print(f"removed {args.name}")
 
 
 def cmd_rename(args):
-    sources = load_sources()
     new = source_name(args.new)
     if not new:
         sys.exit("name cannot be empty or only dashes")
-    if new != args.old and name_taken(sources, new):
-        sys.exit(f"a source named {new!r} already exists")
-    find_source(sources, args.old)["name"] = new
-    save_sources(sources)
-    with locked():
-        state = load_state()
-        for item in state["items"]:
-            if item["source"] == args.old:
-                item["source"] = new
-        for key in SOURCE_STATE_KEYS:
-            if args.old in state[key]:
-                state[key][new] = state[key].pop(args.old)
-        save_state(state)
+    with sources_locked():
+        sources = load_sources()
+        if new != args.old and name_taken(sources, new):
+            sys.exit(f"a source named {new!r} already exists")
+        find_source(sources, args.old)["name"] = new
+        save_sources(sources)
+        with locked():
+            state = load_state()
+            for item in state["items"]:
+                if item["source"] == args.old:
+                    item["source"] = new
+            for key in SOURCE_STATE_KEYS:
+                if args.old in state[key]:
+                    state[key][new] = state[key].pop(args.old)
+            save_state(state)
     print(f"renamed {args.old} to {new}")
 
 
@@ -5054,22 +5087,28 @@ def cmd_opml_export(args):
 
 
 def cmd_opml_import(args):
-    sources = load_sources() if CONFIG_PATH.exists() else []
     try:
-        sources, added, skipped, refused = opml_import(sources, Path(args.file).read_bytes(), args.cadence)
-    except (OSError, ET.ParseError, ValueError) as error:
+        data = Path(args.file).read_bytes()
+    except OSError as error:
         sys.exit(shown(f"cannot import {args.file}: {error}"))
-    if added:
-        save_sources(sources)
+    with sources_locked():
+        sources = load_sources() if CONFIG_PATH.exists() else []
+        try:
+            sources, added, skipped, refused = opml_import(sources, data, args.cadence)
+        except (OSError, ET.ParseError, ValueError) as error:
+            sys.exit(shown(f"cannot import {args.file}: {error}"))
+        if added:
+            save_sources(sources)
     print(f"added {added}, skipped {skipped}")
     if refused:
         print(f"not imported: {refused} on this computer or the local network; add those with omabox add")
 
 
 def cmd_cadence(args):
-    sources = load_sources()
-    find_source(sources, args.name)["cadence"] = args.cadence
-    save_sources(sources)
+    with sources_locked():
+        sources = load_sources()
+        find_source(sources, args.name)["cadence"] = args.cadence
+        save_sources(sources)
     print(f"{args.name}: {args.cadence}")
 
 
@@ -5099,6 +5138,7 @@ def print_mute(source):
         print(x_status(source["url"]))
 
 
+@changes_sources
 def cmd_mute(args):
     sources = load_sources()
     source = find_source(sources, args.name)
@@ -5148,6 +5188,7 @@ def cmd_mute(args):
         print(x_status(source["url"]))
 
 
+@changes_sources
 def cmd_unmute(args):
     sources = load_sources()
     source = find_source(sources, args.name)
@@ -5174,6 +5215,7 @@ def cmd_unmute(args):
         print(x_status(source["url"]))
 
 
+@changes_sources
 def cmd_fulltext(args):
     sources = load_sources()
     source = find_source(sources, args.name)
