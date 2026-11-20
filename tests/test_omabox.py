@@ -4517,24 +4517,24 @@ class ViewerTest(unittest.TestCase):
             self.assertEqual(omabox.viewer_argv(self.PATHS, 1, self.desktop("loupe %U")), ["xdg-open", "/c/b.jpg"])
 
     def test_hold_focus_refocuses_mpv_when_the_closing_panel_takes_focus_away(self):
-        actives, calls = iter(["0xmpv", "0xterm", "0xmpv"]), []
+        actives, calls = iter(["0x5eed", "0x7e44", "0x5eed"]), []
 
         def run(argv, **kwargs):
             calls.append(argv[2] if argv[1] == "dispatch" else "look")
             if argv[1] == "activewindow":
-                return mock.Mock(stdout=json.dumps({"address": next(actives, "0xmpv")}))
+                return mock.Mock(stdout=json.dumps({"address": next(actives, "0x5eed")}))
             return mock.Mock(stdout="ok")
 
-        omabox.hold_focus("0xmpv", run, seconds=0.05, every=0.02)
-        self.assertEqual(calls[:4], ["look", "look", 'hl.dsp.focus({ window = "address:0xmpv" })', "look"])
+        omabox.hold_focus("0x5eed", run, seconds=0.05, every=0.02)
+        self.assertEqual(calls[:4], ["look", "look", 'hl.dsp.focus({ window = "address:0x5eed" })', "look"])
 
     def test_hold_focus_gives_up_quietly_when_hyprctl_fails(self):
         def run(argv, **kwargs):
             if argv[1] == "dispatch":
                 raise subprocess.TimeoutExpired(argv, 5)
-            return mock.Mock(stdout=json.dumps({"address": "0xterm"}))
+            return mock.Mock(stdout=json.dumps({"address": "0x7e44"}))
 
-        omabox.hold_focus("0xmpv", run, seconds=1, every=0)
+        omabox.hold_focus("0x5eed", run, seconds=1, every=0)
 
     def test_focus_window_falls_back_to_the_classic_dispatcher(self):
         sent = []
@@ -4543,8 +4543,21 @@ class ViewerTest(unittest.TestCase):
             sent.append(argv[2])
             return mock.Mock(stdout="ok" if argv[2].startswith("focuswindow") else "error: Invalid dispatcher")
 
-        omabox.focus_window("0xmpv", run)
-        self.assertEqual(sent, ['hl.dsp.focus({ window = "address:0xmpv" })', "focuswindow address:0xmpv"])
+        omabox.focus_window("0x5eed", run)
+        self.assertEqual(sent, ['hl.dsp.focus({ window = "address:0x5eed" })', "focuswindow address:0x5eed"])
+
+    def test_focus_window_sends_only_a_hex_window_address(self):
+        sent = []
+
+        def run(argv, **kwargs):
+            sent.append(argv[2])
+            return mock.Mock(stdout="ok")
+
+        for address in ('0x1" }) hl.exec_cmd("touch /tmp/x") --', "0xmpv", "0x5eed\n", "0x" + "1" * 17, "5eed", "", None):
+            omabox.focus_window(address, run)
+        self.assertEqual(sent, [])
+        omabox.focus_window("0x55d0aB12", run)
+        self.assertEqual(sent, ['hl.dsp.focus({ window = "address:0x55d0aB12" })'])
 
     def test_play_refuses_anything_but_https(self):
         for url in ("file:///etc/passwd", "--input-ipc-server=/tmp/x", "av://lavfi:sine", "http://cdn.example/a.mp4"):
