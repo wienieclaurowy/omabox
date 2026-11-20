@@ -3988,12 +3988,18 @@ def runtime_dir():
     """XDG_RUNTIME_DIR when it is a folder only this account can enter, else Omabox's private state folder: never a
     shared folder, where another user can make files with these fixed names first."""
     path = os.environ.get("XDG_RUNTIME_DIR") or ""
-    if os.path.isabs(path):
-        with contextlib.suppress(OSError):
-            info = os.lstat(path)
-            if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
-                return Path(path)
-    return private_dir(STATE_PATH.parent)
+    return Path(path) if own_private_dir(path) else private_dir(STATE_PATH.parent)
+
+
+def own_private_dir(path):
+    """An absolute path to a real folder of this account that no one else can enter."""
+    if not os.path.isabs(path):
+        return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
 
 
 def rsshub_lock(runtime):
@@ -5419,7 +5425,11 @@ def shell_call(target, function, *args):
     omarchy = os.environ.get("OMARCHY_PATH", "")
     if not omarchy:
         raise ValueError("OMARCHY_PATH is not set")
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    # another account could leave a socket in a shared folder that answers in the shell's place
+    if not own_private_dir(runtime):
+        raise ValueError(f"the runtime folder is not private to this account: {runtime}")
+    runtime = Path(runtime)
     display = shell_display(runtime)
     edge = omarchy_shell_socket(omarchy, runtime, display)
     answer = shell_socket_call(edge, [target, function, *args]) if edge else None

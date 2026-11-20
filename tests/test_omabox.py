@@ -6020,6 +6020,17 @@ class ShellCallTest(unittest.TestCase):
         self.assertEqual(omabox.shell_call("shell", "summon", "omarchy.menu", payload), "ok")
         self.assertEqual(self.parse_call(seen[0]), ["shell", "summon", "omarchy.menu", payload])
 
+    def test_a_runtime_folder_others_can_enter_gets_no_call(self):
+        name = omabox.hashlib.md5(f"{self.omarchy}/shell\nwayland-test".encode()).hexdigest()[:16]
+        edge = self.serve(self.runtime / f"omarchy-shell-{name}.sock", lambda data: b"OK\x1fopened\x1e")
+        for mode in (0o777, 0o755):
+            self.runtime.chmod(mode)
+            with self.assertRaisesRegex(ValueError, "not private"):
+                omabox.shell_call("omabox", "pick", "tide tables")
+        self.runtime.chmod(0o700)
+        self.assertEqual(edge, [])
+        self.assertEqual(omabox.shell_call("omabox", "pick", "tide tables"), "opened")
+
     def test_edge_socket_goes_first_and_skip_falls_back(self):
         name = omabox.hashlib.md5(f"{self.omarchy}/shell\nwayland-test".encode()).hexdigest()[:16]
         edge = self.serve(self.runtime / f"omarchy-shell-{name}.sock", lambda data: b"OK\x1fok\x1e")
