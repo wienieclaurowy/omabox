@@ -1626,6 +1626,33 @@ class IconTest(unittest.TestCase):
         with omabox.time_budget(0), self.assertRaises(TimeoutError):
             omabox.within(urllib.request.Request("https://tides.example/"), 60)
 
+    def test_name_lookups_end_with_the_time_budget(self):
+        lookups = []
+        answered = threading.Event()
+
+        def silent(host, *args, **kwargs):
+            lookups.append(host)
+            answered.wait(5)
+            raise socket.gaierror("no answer")
+
+        self.addCleanup(answered.set)
+        with mock.patch.object(omabox.socket, "getaddrinfo", silent):
+            began = time.monotonic()
+            with omabox.time_budget(0.3), self.assertRaisesRegex(TimeoutError, "took too long"):
+                omabox.download_public("https://slow-dns.example/a.png", 10)
+            self.assertLess(time.monotonic() - began, 2)
+            with omabox.time_budget(0.01):
+                time.sleep(0.05)
+                with self.assertRaisesRegex(TimeoutError, "budget"):
+                    omabox.download_public("https://other-dns.example/a.png", 10)
+                with self.assertRaises(TimeoutError):
+                    omabox.connect_public(("other-dns.example", 443))
+            with mock.patch.object(omabox, "LOOKUP_SECONDS", 0.2):
+                began = time.monotonic()
+                self.assertFalse(omabox.private_target("https://third-dns.example/"))
+                self.assertLess(time.monotonic() - began, 2)
+        self.assertEqual(lookups, ["slow-dns.example", "third-dns.example"])
+
     def test_favicon_from_page_link_then_rss_fallback(self):
         directory = Path(tempfile.mkdtemp())
         served = {
@@ -3874,6 +3901,15 @@ class LinkTest(unittest.TestCase):
         self.assertTrue(result.startswith("Full circle! <p><img"))
         self.assertIn('<b>tidewright joins Omarchy Core</b>', result)
         self.assertIn('<span class="meta">Omarchy</span>', result)
+
+    def test_a_spent_time_budget_leaves_the_post_without_its_card(self):
+        def fetch(url, limit):
+            raise AssertionError("no fetch once the budget is spent")
+
+        with omabox.time_budget(0.01):
+            time.sleep(0.05)
+            self.assertEqual(omabox.attach_card("see https://x.org/", "see https://x.org/", None, fetch),
+                             "see https://x.org/")
 
     def test_no_card_without_title_or_trailing_url(self):
         self.assertEqual(omabox.attach_card("a https://x.org/ b", "a https://x.org/ b", None, lambda u, n: b""), "a https://x.org/ b")

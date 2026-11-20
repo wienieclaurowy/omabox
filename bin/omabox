@@ -256,14 +256,56 @@ def public_address(address):
 
 
 def public_host(url):
-    """False for loopback, private, link-local and reserved targets: feed HTML must not reach the LAN."""
+    """False for loopback, private, link-local and reserved targets: feed HTML must not reach the LAN.
+    TimeoutError when the time budget is spent or the name server does not answer in time."""
     host = urllib.parse.urlparse(url).hostname
     if not host:
         return False
     try:
-        return all(public_address(info[4][0]) for info in socket.getaddrinfo(host, None))
+        return all(public_address(info[4][0]) for info in lookup_host(host, None))
+    except TimeoutError:
+        raise
     except OSError:
         return False
+
+
+# a name server that never answers holds getaddrinfo for the resolver's own timeout, then retries
+LOOKUP_SECONDS = 10
+# lookups left running past their deadline; getaddrinfo cannot be cancelled, so each holds a thread until it ends
+LOOKUPS_RUNNING = threading.BoundedSemaphore(8)
+
+
+def lookup_host(host, port, deadline=None, **kwargs):
+    """socket.getaddrinfo held to LOOKUP_SECONDS, the thread's time budget and deadline: TimeoutError when they end
+    first. Asked before the lookup starts, so a spent budget makes no lookup at all."""
+    seconds = budgeted(LOOKUP_SECONDS)
+    if deadline is not None:
+        seconds = deadline.left(seconds)
+    started = time.monotonic()
+    if not LOOKUPS_RUNNING.acquire(timeout=seconds):
+        raise TimeoutError(f"too many name lookups still waiting: {host}")
+    answer = {}
+
+    def resolve():
+        try:
+            answer["infos"] = socket.getaddrinfo(host, port, **kwargs)
+        except BaseException as error:
+            answer["error"] = error
+        finally:
+            LOOKUPS_RUNNING.release()
+
+    worker = threading.Thread(target=resolve, name="omabox-lookup", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        LOOKUPS_RUNNING.release()
+        raise
+    worker.join(max(0, seconds - (time.monotonic() - started)))
+    if worker.is_alive():
+        raise TimeoutError(f"name lookup took too long: {host}")
+    if "error" in answer:
+        raise answer["error"]
+    return answer["infos"]
 
 
 class Deadline:
@@ -385,7 +427,7 @@ def connect_checked(address, timeout, source_address, public, deadline=None):
     before connecting is not enough: the connection resolves it again, and a short-TTL record can answer that second
     lookup differently."""
     host, port = address
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    infos = lookup_host(host, port, deadline, type=socket.SOCK_STREAM)
     if not all(public_address(info[4][0]) == public for info in infos):
         raise OSError(f"{'non-public' if public else 'public'} address refused: {host}")
     error = OSError(f"no address for {host}")
@@ -469,7 +511,7 @@ class PinnedTunnel:
 
     def set_tunnel(self, host, port=None, headers=None):
         name, port = self._get_hostport(host, port)
-        infos = socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
+        infos = lookup_host(name, port, self.deadline, type=socket.SOCK_STREAM)
         if not infos or not all(public_address(info[4][0]) for info in infos):
             raise OSError(f"non-public address refused: {name}")
         self.server_name = name
@@ -679,6 +721,7 @@ def download_public(url, limit, seconds=DOWNLOAD_SECONDS):
     """Fetches driven by feed content (images, favicons, article pages): public http(s) hosts only, size-capped and
     time-capped, http:// as https:// (content_url). Returns the URL after redirects, the Content-Type and the body."""
     url = content_url(url)
+    seconds = budgeted(seconds)
     if not url.startswith(("https://", "http://")) or not public_host(url):
         raise ValueError(f"non-public address refused: {url}")
     request = within(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), seconds)
@@ -1269,7 +1312,10 @@ def attach_card(markup, text, images, fetch=download_limited):
     if not urls or not text.rstrip().endswith(urls[-1]):
         return markup
     url = urls[-1]
-    if not url.startswith("https://") or not public_host(url):
+    try:
+        if not url.startswith("https://") or not public_host(url):
+            return markup
+    except TimeoutError:
         return markup
     card = link_card(url, images, fetch)
     if not card:
@@ -3241,7 +3287,7 @@ def private_target(url):
     if not host:
         return False
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = lookup_host(host, None)
     except OSError:
         return False
     return bool(infos) and not any(public_address(info[4][0]) for info in infos)
@@ -4597,7 +4643,7 @@ def fetch_host(url):
     return urllib.parse.urlparse(url).hostname
 
 
-def wait_for_network(hosts, seconds=60, resolve=socket.getaddrinfo, sleep=time.sleep, clock=time.monotonic):
+def wait_for_network(hosts, seconds=60, resolve=lookup_host, sleep=time.sleep, clock=time.monotonic):
     """True once any host resolves, False after seconds. The user systemd manager has no network-online.target,
     so Persistent=true catch-up runs at login start before DHCP finishes."""
     deadline = clock() + seconds
