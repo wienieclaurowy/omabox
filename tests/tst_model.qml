@@ -47,6 +47,14 @@ TestCase {
     compare(Model.relativeTime(Model.noteTime({ timestamp: 1e20 }), new Date(), english), "")
   }
 
+  function test_section_labels_match_the_bounded_markup() {
+    var long = new Array(400).join("x")
+    var labels = Model.headingLabels(Model.boundMarkup("<p class=\"h\">" + long + "</p><p>body</p>"))
+    compare(labels.length, 1)
+    verify(labels[0].indexOf("​") > 0)
+    compare(labels[0].replace(/​/g, ""), long)
+  }
+
   function test_x_replies_only_for_posts_of_x_sources() {
     var profiles = { "Rowan on X": { name: "Rowan" } }
     var link = "https://x.com/rowanvale/status/100"

@@ -79,7 +79,7 @@ Column {
   // Headings are found by their label text in the rendered document, in order, so repeated labels resolve in sequence.
   function sectionTarget(direction) {
     if (!item) return -1
-    var labels = Model.headingLabels(item.html)
+    var labels = Model.headingLabels(Model.boundMarkup(item.html))
     var plain = body.getText(0, body.length).toLowerCase()
     var offsets = []
     var from = 0
