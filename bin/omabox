@@ -509,6 +509,8 @@ class PinnedTunnel:
     """A CONNECT tunnel through a proxy to an address checked here, never to the name: the proxy would look the name
     up again, and a short-TTL record can answer that second lookup with a LAN address."""
 
+    deadline: "Deadline"
+
     def set_tunnel(self, host, port=None, headers=None):
         name, port = self._get_hostport(host, port)
         infos = lookup_host(name, port, self.deadline, type=socket.SOCK_STREAM)
@@ -2668,6 +2670,14 @@ ASCII_RUN_RE = re.compile(r"[!-%'-;=-~]+")
 WIDE_RUN_RE = re.compile(r"[\u3400-\u9fff\uac00-\ud7af]+")
 SPACED_TEXT_RE = re.compile(rf"[ \t\n\r]+(?:[!-%'-;=-~]{{1,{MARKUP_RUN}}}[ \t\n\r]+)*")
 SPACED_PRE_RE = re.compile(rf"[ \t]+(?:[!-%'-;=-~]{{1,{MARKUP_RUN}}}[ \t]+)*")
+
+
+def sure_match(pattern, text, pos=0):
+    """pattern.match for a pattern the caller knows matches at pos."""
+    match = pattern.match(text, pos)
+    if match is None:
+        raise ValueError(f"{pattern.pattern!r} does not match at {pos}")
+    return match
 BREAK_BASE_RANGES = ((0x21, 0x7E), (0xC0, 0x24F), (0x370, 0x482), (0x5D0, 0x5EA), (0x621, 0x64A), (0xE01, 0xE30),
                      (0xE40, 0xE46), (0x3040, 0x3098), (0x309D, 0x30FF), (0x3400, 0x9FFF), (0xAC00, 0xD7AF),
                      (0xFF01, 0xFF60))
@@ -2713,7 +2723,7 @@ def bounded_markup(markup, budget=STORED_COST, list_items=STORED_LIST_ITEMS, ima
             end = markup.find(">", i)
             if end < 0:
                 break
-            name = TAG_NAME_RE.match(markup, i).group(1).lower()
+            name = sure_match(TAG_NAME_RE, markup, i).group(1).lower()
             if markup.startswith("</", i):
                 if name in stack:
                     while stack:
@@ -2740,7 +2750,7 @@ def bounded_markup(markup, budget=STORED_COST, list_items=STORED_LIST_ITEMS, ima
             cut_at, cut_taken, cut_out = i, taken, len(out)
             continue
         if char in " \t" or not pre and char in "\n\r":
-            stretch = (SPACED_PRE_RE if pre else SPACED_TEXT_RE).match(markup, i).group()
+            stretch = sure_match(SPACED_PRE_RE if pre else SPACED_TEXT_RE, markup, i).group()
             cut_at, cut_taken, cut_out = i, taken, len(out)
             if script != 1 and stretch.strip():
                 cost += COST_SCRIPT_SWITCH if script else 0
@@ -2756,14 +2766,14 @@ def bounded_markup(markup, budget=STORED_COST, list_items=STORED_LIST_ITEMS, ima
             run = overdue = 0
             i += len(stretch)
             continue
-        bulk = None
+        bulk, kind, weight = None, 0, 1
         if run < MARKUP_RUN:
             if "!" <= char <= "~" and char != "&":
                 bulk, kind, weight = ASCII_RUN_RE, 1, 1
             elif "\u3400" <= char <= "\u9fff" or "\uac00" <= char <= "\ud7af":
                 bulk, kind, weight = WIDE_RUN_RE, 2, COST_WIDE_CHAR
         if bulk:
-            length = bulk.match(markup, i).end() - i
+            length = sure_match(bulk, markup, i).end() - i
             if script != kind:
                 cost += COST_SCRIPT_SWITCH if script else 0
                 script = kind
@@ -6711,7 +6721,7 @@ def remember_cleared(archive=None):
     for folder in (NOTE_HISTORY_DIR, NOTE_POPUP_DIR):
         with contextlib.suppress(OSError):
             names.update(entry.name for entry in os.scandir(folder) if entry.name.isascii() and NOTE_NAME_RE.match(entry.name))
-    newest = sorted(names, key=lambda name: int(NOTE_NAME_RE.match(name).group(1)), reverse=True)[:NOTE_CLEARED_MAX]
+    newest = sorted(names, key=lambda name: int(sure_match(NOTE_NAME_RE, name).group(1)), reverse=True)[:NOTE_CLEARED_MAX]
     descriptor, tmp = tempfile.mkstemp(dir=archive, prefix=".cleared-")
     try:
         with os.fdopen(descriptor, "w", encoding="ascii") as handle:
