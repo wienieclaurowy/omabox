@@ -181,7 +181,9 @@ replies only when you open one of its posts; a link to X inside another feed's p
 ## Privacy
 
 Omabox has no telemetry and no account. It talks only to the feeds you add, to the sites their posts link to
-(for pictures, link previews and full articles), and, for X, to a local RSSHub container. Pictures, previews
+(for pictures, link previews and full articles), and, for X, to a local RSSHub container. A Hacker News source
+is read from [hnrss.org](https://hnrss.org), a third-party feed service for Hacker News, so hnrss.org sees which
+Hacker News pages you follow. Pictures, previews
 and articles are never fetched from addresses on your local network, and a feed on the internet cannot redirect
 or link Omabox there either, so a feed cannot use Omabox to reach your router or other machines. Feeds on your
 own network still work: add them by their local address or name, and Omabox remembers that they are local
