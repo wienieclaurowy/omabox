@@ -4945,6 +4945,20 @@ class RepliesTest(unittest.TestCase):
             omabox.load_replies("blog", fetch=self.fetch, session=self.session)
         self.assertEqual((self.sessions, self.urls), (0, []))
 
+    def test_a_comment_refresh_ends_before_the_panel_stops_it(self):
+        ends = []
+
+        def load(item_id, refresh=False):
+            ends.append(omabox.budget_end() - time.monotonic())
+            return {"replies_html": "", "replies_count": 0, "replies_fetched": ""}, False
+
+        with mock.patch.object(omabox, "load_replies", load), contextlib.redirect_stdout(io.StringIO()):
+            omabox.cmd_replies(argparse.Namespace(id="x", refresh=True, json=True))
+        panel = (BIN.parent.parent / "Panel.qml").read_text()
+        deadline = int(re.search(r"repliesProc\.command = .*?, (\d+)\)\s*$", panel, re.M)[1])
+        self.assertLessEqual(ends[0], deadline - 30)
+        self.assertIsNone(omabox.budget_end())
+
     def test_post_ref_from_status_links_only(self):
         self.assertEqual(omabox.x_post_ref("https://x.com/rowanvale/status/100"), ("rowanvale", "100"))
         self.assertEqual(omabox.x_post_ref("https://twitter.com/rowanvale/status/100?s=20"), ("rowanvale", "100"))

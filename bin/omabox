@@ -5938,9 +5938,14 @@ def store_replies(item, threads, author, site, image_fetch=download_limited):
     return fields
 
 
+# under the panel's 300 s end for a comment refresh, so what arrived in time is stored before the kill
+REPLIES_SECONDS = 240
+
+
 def cmd_replies(args):
     try:
-        fields, cached = load_replies(args.id, args.refresh)
+        with time_budget(REPLIES_SECONDS):
+            fields, cached = load_replies(args.id, args.refresh)
     except ValueError as error:
         if args.json:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
