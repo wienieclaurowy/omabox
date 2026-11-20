@@ -1641,8 +1641,9 @@ Panel {
             event.accepted = true
           }
           // A held key must not repeat into a confirmation: o runs a notification action, a then a picks
-          // "all" in catch-up, x deletes a notification per repeat.
-          else if (event.isAutoRepeat && (event.text === "o" || event.text === "a" || event.text === "x" || event.key === Qt.Key_Delete))
+          // "all" in catch-up, x deletes a notification per repeat, Enter from a text field lands here.
+          else if (event.isAutoRepeat && (event.text === "o" || event.text === "a" || event.text === "x" || event.key === Qt.Key_Delete
+                                          || event.key === Qt.Key_Return || event.key === Qt.Key_Enter))
             event.accepted = true
         }
       }
@@ -2157,7 +2158,7 @@ Panel {
               font.family: root.fontFamily
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) { root.cancelTyping(); event.accepted = true }
-                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.lookUp(); event.accepted = true }
+                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { if (!event.isAutoRepeat) root.lookUp(); event.accepted = true }
               }
             }
           }
@@ -2206,7 +2207,7 @@ Panel {
               font.family: root.fontFamily
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) { root.cancelTyping(); event.accepted = true }
-                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.saveNew(); event.accepted = true }
+                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { if (!event.isAutoRepeat) root.saveNew(); event.accepted = true }
               }
             }
           }
@@ -2240,7 +2241,7 @@ Panel {
             font.family: root.fontFamily
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Escape) { root.cancelTyping(); event.accepted = true }
-              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.commitMute(muteField.text); event.accepted = true }
+              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { if (!event.isAutoRepeat) root.commitMute(muteField.text); event.accepted = true }
               else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Down) { root.stepMutePick(1); event.accepted = true }
               else if (event.key === Qt.Key_Backtab || event.key === Qt.Key_Up) { root.stepMutePick(-1); event.accepted = true }
             }
@@ -2730,7 +2731,7 @@ Panel {
                   font.family: root.fontFamily
                   Keys.onPressed: function(event) {
                     if (event.key === Qt.Key_Escape) { root.pendingXUrl = ""; root.cancelTyping(); event.accepted = true }
-                    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.saveXToken(); event.accepted = true }
+                    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { if (!event.isAutoRepeat) root.saveXToken(); event.accepted = true }
                   }
                 }
               }
@@ -3252,7 +3253,7 @@ Panel {
             font.family: root.fontFamily
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Escape) { root.cancelTyping(); event.accepted = true }
-              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.commitRename(renameInput.text); event.accepted = true }
+              else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { if (!event.isAutoRepeat) root.commitRename(renameInput.text); event.accepted = true }
             }
           }
 
