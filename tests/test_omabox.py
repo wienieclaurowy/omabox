@@ -2675,6 +2675,68 @@ class NotificationArchiveTest(unittest.TestCase):
         self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [later])
         self.assertEqual(omabox.note_rows(), [f"{later}\t{{}}"])
 
+    def store_dirs(self):
+        root = Path(tempfile.mkdtemp())
+        popup, archive = root / "popup", root / "archive"
+        popup.mkdir()
+        archive.mkdir()
+        for name, path in (("NOTE_POPUP_DIR", popup), ("NOTE_HISTORY_DIR", popup / "history"), ("NOTE_ARCHIVE_DIR", archive)):
+            patcher = mock.patch.object(omabox, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return popup, archive
+
+    @staticmethod
+    def store_row(ts, original, summary, **extra):
+        return {"key": f"k{original}", "originalId": original, "ts": ts, "closed_ts": ts + 5, "app": "Ghostty",
+                "summary": summary, "body": "b", "rawBody": "", "execArgv": '["omarchy-shell","omabox","toggleView","feed"]',
+                "urgency": 1, **extra}
+
+    def test_omarchy_4_5_history_and_live_rows_are_listed_and_closed_ones_archived(self):
+        popup, archive = self.store_dirs()
+        ts = int(time.time()) + 0.25
+        history = [self.store_row(ts, 7, "closed"), self.store_row(ts - 60, 6, "older"),
+                   {"key": "bad", "ts": "soon"}, {"ts": ts}, self.store_row(float("nan"), 5, "no time"), ["x"]]
+        (popup / "history.json").write_text(json.dumps(history))
+        (popup / "live.json").write_text(json.dumps([self.store_row(ts + 1, 8, "on screen", originalId=True)]))
+        omabox.archive_notifications()
+        rows = omabox.note_rows()
+        stamp = int(ts * 1000)
+        self.assertEqual([row.split("\t")[0] for row in rows],
+                         [f"{stamp + 1000}-0.json", f"{stamp}-7.json", f"{stamp - 60000}-6.json"])
+        closed = json.loads(rows[1].split("\t")[1])
+        self.assertEqual(closed, {"id": 7, "timestamp": stamp, "app": "Ghostty", "summary": "closed", "body": "b",
+                                  "execArgv": '["omarchy-shell","omabox","toggleView","feed"]', "urgency": 1})
+        self.assertEqual(sorted(p.name for p in archive.iterdir()), [f"{stamp - 60000}-6.json", f"{stamp}-7.json"])
+        self.assertEqual((archive / f"{stamp}-7.json").read_text(), rows[1].split("\t")[1])
+
+    def test_an_omarchy_4_5_row_stays_hidden_once_forgotten_or_cleared(self):
+        popup, archive = self.store_dirs()
+        ts = int(time.time()) + 0.25
+        history = popup / "history.json"
+        history.write_text(json.dumps([self.store_row(ts, 2, "two"), self.store_row(ts - 1, 1, "one")]))
+        omabox.archive_notifications()
+        omabox.main(["forget-notification", f"{int(ts * 1000)}-2.json"])
+        self.assertEqual([row.split("\t")[0] for row in omabox.note_rows()], [f"{int((ts - 1) * 1000)}-1.json"])
+        omabox.archive_notifications()
+        self.assertEqual([p.name for p in archive.iterdir() if omabox.NOTE_NAME_RE.match(p.name)], [f"{int((ts - 1) * 1000)}-1.json"])
+        (popup / "live.json").write_text(json.dumps([self.store_row(ts + 1, 3, "three")]))
+        omabox.main(["clear-notifications"])
+        self.assertEqual(omabox.note_rows(), [])
+        # the toast on screen closes into history after the clear
+        history.write_text(json.dumps([self.store_row(ts + 1, 3, "three"), self.store_row(ts, 2, "two")]))
+        omabox.archive_notifications()
+        self.assertEqual(omabox.note_rows(), [])
+        history.write_text(json.dumps([self.store_row(ts + 2, 4, "four"), self.store_row(ts + 1, 3, "three")]))
+        self.assertEqual([row.split("\t")[0] for row in omabox.note_rows()], [f"{int((ts + 2) * 1000)}-4.json"])
+
+    def test_an_omarchy_4_5_row_fits_the_notification_file_limit(self):
+        name, data = omabox.store_note(self.store_row(time.time(), 1, "long", body="ż" * omabox.NOTE_MAX_BYTES))
+        self.assertLessEqual(len(data), omabox.NOTE_MAX_BYTES)
+        self.assertTrue(data.isascii())
+        self.assertTrue(json.loads(data)["body"].startswith("ż"))
+        self.assertIsNone(omabox.store_note(self.store_row(time.time(), 1, "x" * omabox.NOTE_MAX_BYTES)))
+
 
 class HostileRunsTest(unittest.TestCase):
     """Long runs of spaces, breaks, rules or unclosed comments: each took minutes when a pattern was tried from every

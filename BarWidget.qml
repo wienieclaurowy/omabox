@@ -14,8 +14,10 @@ BarWidget {
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
   readonly property string statePath: stateHome + "/omabox/items.json"
   readonly property string omaboxBin: Model.localPath(Qt.resolvedUrl("bin/omabox"))
-  // Omarchy keeps it under $HOME whatever XDG_STATE_HOME says.
+  // Omarchy keeps it under $HOME whatever XDG_STATE_HOME says. Before 4.5 the folder holds one file per
+  // notification; from 4.5 on, history.json holds them all.
   readonly property string historyDir: home + "/.local/state/omarchy/notifications/history"
+  readonly property string historyFile: home + "/.local/state/omarchy/notifications/history.json"
   // FileView never watches a file whose directory is missing, so the state directory is made before items.json is watched.
   property bool stateDirReady: false
   // Why the last `omabox tick` failed, "" after one that worked; the feed's status line shows it.
@@ -370,13 +372,25 @@ BarWidget {
     }
   }
 
-  // Omarchy keeps only its last 10 notifications; each new one is copied to the 7-day archive as it arrives.
+  // Omarchy keeps only its recent notifications; each new one is copied to the 7-day archive as it arrives.
   FileView {
     path: root.historyDir
     preload: false
     watchChanges: true
     printErrors: false
-    onFileChanged: if (!archiveProc.running && root.scheduler()) archiveProc.running = true
+    onFileChanged: root.archiveNotifications()
+  }
+
+  FileView {
+    path: root.historyFile
+    preload: false
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.archiveNotifications()
+  }
+
+  function archiveNotifications() {
+    if (!archiveProc.running && root.scheduler()) archiveProc.running = true
   }
 
   Process {

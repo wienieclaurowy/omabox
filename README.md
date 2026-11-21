@@ -45,7 +45,7 @@ If you want every post as soon as it appears, a regular feed reader will suit yo
   and Mastodon show their comments under them.
 - **Calm tools.** Snooze a post until later or tomorrow, keep a read-later list, mute words or patterns per
   source, search everything, and mark old posts read in one step.
-- **Notification history.** Omarchy keeps its last 10 notifications; Omabox keeps every one for 7 days, with
+- **Notification history.** Omarchy keeps only its recent notifications; Omabox keeps every one for 7 days, with
   search, filters and do-not-disturb.
 - **Keyboard first.** Every action has a key. Press `?` in the panel to show them.
 

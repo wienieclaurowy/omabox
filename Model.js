@@ -205,7 +205,7 @@ function relativeTime(iso, now, Tr) {
   return then.toLocaleDateString(Tr.locale, then.getFullYear() === now.getFullYear() ? Tr.t("time.date") : Tr.t("time.dateYear"))
 }
 
-// "<file name>\t<json>" per line from Omarchy's history dir and Omabox's archive; the same file can appear in both.
+// "<file name>\t<json>" per line from `omabox notifications`; the same name can appear more than once.
 function parseHistory(text) {
   var rows = []
   var seen = {}

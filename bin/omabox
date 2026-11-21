@@ -3045,11 +3045,16 @@ NOTE_NAME_RE = re.compile(r"^(\d{10,})-\d+\.json$")
 NOTE_MAX_BYTES = 64 * 1024
 NOTE_LIST_MAX = 3000
 NOTE_LIST_BYTES = 4 * 1024 * 1024
+# Omarchy 4.5 and later keep no files per notification: closed ones go into history.json (newest first, one day,
+# 100 rows) and the toasts on screen into live.json. Omarchy itself refuses either file past 100 rows of 16 KiB twice.
+NOTE_STORE_MAX_BYTES = 4 * 1024 * 1024
+NOTE_STORE_ROWS = 200
+NOTE_STORE_TEXT = ("app", "appIcon", "summary", "body", "glyph", "execArgv")
 
 
-def read_note(path):
+def read_note(path, limit=NOTE_MAX_BYTES):
     """A notification file's bytes, or None unless it is a regular file of this user with one link and at most
-    NOTE_MAX_BYTES. Opened without following a symlink or waiting on a FIFO."""
+    limit bytes. Opened without following a symlink or waiting on a FIFO."""
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
@@ -3057,13 +3062,13 @@ def read_note(path):
     try:
         info = os.fstat(descriptor)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-                or info.st_size > NOTE_MAX_BYTES):
+                or info.st_size > limit):
             return None
         chunks, size = [], 0
-        while chunk := os.read(descriptor, NOTE_MAX_BYTES + 1 - size):
+        while chunk := os.read(descriptor, limit + 1 - size):
             chunks.append(chunk)
             size += len(chunk)
-            if size > NOTE_MAX_BYTES:
+            if size > limit:
                 return None
         return b"".join(chunks)
     except OSError:
@@ -3083,9 +3088,66 @@ def cleared_notes(archive=None):
     return set(data.decode("ascii", "replace").split()) if data else set()
 
 
-def archive_notifications(history=None, archive=None, now=None):
-    """Omarchy keeps its last 10 notifications; this keeps a copy of each for NOTE_KEEP_DAYS days, except the ones
-    a clear removed."""
+def write_cleared(names, archive):
+    archive = private_dir(archive)
+    newest = sorted(names, key=lambda name: int(sure_match(NOTE_NAME_RE, name).group(1)), reverse=True)[:NOTE_CLEARED_MAX]
+    descriptor, tmp = tempfile.mkstemp(dir=archive, prefix=".cleared-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write("".join(f"{name}\n" for name in newest))
+        os.replace(tmp, archive / NOTE_CLEARED)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def store_files():
+    return NOTE_POPUP_DIR / "history.json", NOTE_POPUP_DIR / "live.json"
+
+
+def store_note(row):
+    """A history.json or live.json row in the shape of an older Omarchy's notification file: (name, ASCII JSON
+    within NOTE_MAX_BYTES), or None. Omarchy keeps ts and originalId when a toast moves into history, so the name
+    "<ts in ms>-<originalId>.json" stays the same."""
+    if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+        return None
+    ts, original = row.get("ts"), row.get("originalId")
+    if type(ts) not in (int, float) or not 1e9 <= ts < 1e11:
+        return None
+    if type(original) is not int or not 0 <= original < 2**32:
+        original = 0
+    stamp = int(ts * 1000)
+    note = {"id": original, "timestamp": stamp}
+    note.update((field, row[field]) for field in NOTE_STORE_TEXT if isinstance(row.get(field), str))
+    if type(row.get("urgency")) is int:
+        note["urgency"] = row["urgency"]
+    data = json.dumps(note, ensure_ascii=True).encode()
+    while len(data) > NOTE_MAX_BYTES and note.get("body"):
+        note["body"] = note["body"][:len(note["body"]) * 3 // 4]
+        data = json.dumps(note, ensure_ascii=True).encode()
+    return (f"{stamp}-{original}.json", data) if len(data) <= NOTE_MAX_BYTES else None
+
+
+def store_notes(files):
+    """{name: data} from Omarchy's history.json and live.json; the first file holding a name wins."""
+    notes = {}
+    for path in files:
+        data = read_note(path, NOTE_STORE_MAX_BYTES)
+        try:
+            rows = json.loads(data) if data is not None else None
+        except ValueError:
+            continue
+        for row in rows[:NOTE_STORE_ROWS] if isinstance(rows, list) else ():
+            if note := store_note(row):
+                notes.setdefault(*note)
+    return notes
+
+
+def archive_notifications(history=None, archive=None, now=None, store=None):
+    """Omarchy keeps only its recent notifications (its last 10, or one day's worth from 4.5 on); this keeps a copy
+    of each for NOTE_KEEP_DAYS days, except the ones a clear removed. A toast still on screen is copied once it
+    closes: an app may update it until then."""
     history, archive = Path(history or NOTE_HISTORY_DIR), Path(archive or NOTE_ARCHIVE_DIR)
     private_dir(archive)
     copied = 0
@@ -3097,6 +3159,10 @@ def archive_notifications(history=None, archive=None, now=None):
                 if data is not None:
                     write_private(archive / path.name, data)
                     copied += 1
+    for name, data in store_notes(store if store is not None else store_files()[:1]).items():
+        if name not in cleared and not (archive / name).exists():
+            write_private(archive / name, data)
+            copied += 1
     cutoff_ms = ((now or datetime.now(timezone.utc)) - timedelta(days=NOTE_KEEP_DAYS)).timestamp() * 1000
     for path in archive.iterdir():
         match = NOTE_NAME_RE.match(path.name)
@@ -6663,9 +6729,10 @@ def cmd_later(args):
     update_items(args.ids, toggle)
 
 
-def note_rows(directories=None, archive=None):
-    """The panel's notifications: newest first, each name once (the first directory holding it wins), one
-    "name<TAB>json" line each, ASCII only, within NOTE_LIST_MAX and NOTE_LIST_BYTES. Cleared ones are left out."""
+def note_rows(directories=None, archive=None, store=None):
+    """The panel's notifications: newest first, each name once (the first directory holding it wins, then Omarchy's
+    history.json and live.json), one "name<TAB>json" line each, ASCII only, within NOTE_LIST_MAX and
+    NOTE_LIST_BYTES. Cleared ones are left out."""
     archive = Path(archive or NOTE_ARCHIVE_DIR)
     found, cleared = {}, cleared_notes(archive)
     for directory in map(Path, directories or (NOTE_HISTORY_DIR, archive, NOTE_POPUP_DIR)):
@@ -6674,9 +6741,12 @@ def note_rows(directories=None, archive=None):
                 match = NOTE_NAME_RE.match(entry.name)
                 if match and entry.name not in found and entry.name not in cleared:
                     found[entry.name] = (int(match.group(1)), Path(entry.path))
+    for name, data in store_notes(store if store is not None else store_files()).items():
+        if name not in found and name not in cleared:
+            found[name] = (int(sure_match(NOTE_NAME_RE, name).group(1)), data)
     rows, size = [], 0
-    for name, (_, path) in sorted(found.items(), key=lambda pair: pair[1][0], reverse=True)[:NOTE_LIST_MAX]:
-        data = read_note(path)
+    for name, (_, source) in sorted(found.items(), key=lambda pair: pair[1][0], reverse=True)[:NOTE_LIST_MAX]:
+        data = source if isinstance(source, bytes) else read_note(source)
         try:
             note = json.loads(data) if data is not None else None
         except ValueError:
@@ -6692,7 +6762,7 @@ def note_rows(directories=None, archive=None):
 
 
 def cmd_notifications(args):
-    # archived first, so Omarchy's 10-entry history and the 7-day copy agree
+    # archived first, so Omarchy's short history and the 7-day copy agree
     with contextlib.suppress(OSError):
         archive_notifications()
     for row in note_rows():
@@ -6712,25 +6782,17 @@ def cmd_forget_notification(args):
         # the popup's file too: Omarchy would move it into history later and the next archive would copy it back
         for folder in (NOTE_ARCHIVE_DIR, NOTE_HISTORY_DIR, NOTE_POPUP_DIR):
             (folder / name).unlink(missing_ok=True)
+    # history.json is Omarchy's to write and it has no call to drop one row, so a forgotten row is only hidden
+    write_cleared(cleared_notes() | {name for name in args.names if name.isascii()}, NOTE_ARCHIVE_DIR)
 
 
 def remember_cleared(archive=None):
     """Records the names Omarchy's history and popups hold now, so the next archive pass does not copy them back."""
-    archive = private_dir(archive or NOTE_ARCHIVE_DIR)
-    names = set()
+    names = set(store_notes(store_files()))
     for folder in (NOTE_HISTORY_DIR, NOTE_POPUP_DIR):
         with contextlib.suppress(OSError):
             names.update(entry.name for entry in os.scandir(folder) if entry.name.isascii() and NOTE_NAME_RE.match(entry.name))
-    newest = sorted(names, key=lambda name: int(sure_match(NOTE_NAME_RE, name).group(1)), reverse=True)[:NOTE_CLEARED_MAX]
-    descriptor, tmp = tempfile.mkstemp(dir=archive, prefix=".cleared-")
-    try:
-        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-            handle.write("".join(f"{name}\n" for name in newest))
-        os.replace(tmp, archive / NOTE_CLEARED)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    write_cleared(names, archive or NOTE_ARCHIVE_DIR)
 
 
 def cmd_clear_notifications(args):
